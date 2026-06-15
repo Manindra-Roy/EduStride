@@ -1,4 +1,4 @@
-# Institutional ERP & LMS Suite (Class VII - X)
+# Institutional ERP & LMS Suite
 
 An enterprise-ready, production-grade Institutional ERP & Learning Management System (LMS) platform for managing student lifecycles, real-time messaging communications, financial tuition ledgers, curriculum progress auditing, and automated background cron notifications.
 
