@@ -26,7 +26,7 @@ export default {
           100: '#ebeeff',
           200: '#dbe0ff',
           300: '#bfcbff',
-          400: '#9baa  ff',
+          400: '#9baaff',
           500: '#6366f1', // Indigo Accent
           600: '#4f46e5',
           700: '#4338ca',

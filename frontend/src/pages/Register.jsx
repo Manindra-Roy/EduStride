@@ -311,10 +311,12 @@ const Register = () => {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-dark-950 px-4 relative overflow-hidden">
-      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] rounded-full bg-primary-600/10 blur-[150px] pointer-events-none" />
+    <div className={user ? "w-full max-w-5xl mx-auto py-2" : "min-h-screen flex items-center justify-center bg-dark-950 px-4 relative overflow-hidden"}>
+      {!user && (
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] rounded-full bg-primary-600/10 blur-[150px] pointer-events-none" />
+      )}
 
-      <div className={`w-full ${user && (user.role === 'SuperAdmin' || user.role === 'Teacher') && (activeTab === 'teachers' || activeTab === 'students' || activeTab === 'classes') ? 'max-w-3xl' : 'max-w-md'} z-10 my-8 transition-all duration-300`}>
+      <div className={`w-full ${user && (user.role === 'SuperAdmin' || user.role === 'Teacher') && (activeTab === 'teachers' || activeTab === 'students' || activeTab === 'classes') ? 'max-w-5xl' : 'max-w-md'} z-10 mx-auto transition-all duration-300`}>
         <div className="flex flex-col items-center mb-6">
           <div className="bg-primary-600/10 p-2 rounded-2xl border border-primary-500/20 glow-indigo mb-3">
             {!user ? (

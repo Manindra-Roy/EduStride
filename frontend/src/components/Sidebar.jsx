@@ -18,9 +18,8 @@ import {
 
 import Logo from './Logo';
 
-const Sidebar = () => {
+const Sidebar = ({ isOpen, setIsOpen }) => {
   const { user, logout, updateUserProfilePic } = useAuth();
-  const [isOpen, setIsOpen] = useState(false);
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [avatarFile, setAvatarFile] = useState(null);
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
@@ -215,14 +214,6 @@ const Sidebar = () => {
 
   return (
     <>
-      {/* Mobile Toggle Button */}
-      <button 
-        onClick={toggleSidebar}
-        className="lg:hidden fixed top-4 right-4 z-50 p-2 rounded-lg bg-dark-900 border border-dark-800 text-slate-300 hover:text-white transition"
-      >
-        {isOpen ? <X size={20} /> : <Menu size={20} />}
-      </button>
-
       {/* Sidebar Container */}
       <aside className={`
         fixed inset-y-0 left-0 z-40 w-64 lg:static lg:block

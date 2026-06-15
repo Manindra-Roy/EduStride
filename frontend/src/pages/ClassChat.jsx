@@ -170,7 +170,7 @@ const ClassChat = () => {
           </div>
           
           {/* Mobile room selectors */}
-          <div className="md:hidden flex gap-1 bg-dark-900 p-1 rounded-lg border border-dark-850">
+          <div className="md:hidden flex gap-1 bg-dark-900 p-1 rounded-lg border border-dark-850 overflow-x-auto max-w-[140px] sm:max-w-[280px] scrollbar-none whitespace-nowrap">
             {rooms.map(room => {
               const isDisabled = user.role === 'Student' && user.studentProfile?.class_level !== room;
               if (isDisabled) return null;
@@ -178,9 +178,9 @@ const ClassChat = () => {
                 <button
                   key={room}
                   onClick={() => setCurrentRoom(room)}
-                  className={`px-2 py-1 rounded text-[10px] font-bold ${currentRoom === room ? 'bg-primary-600 text-white' : 'text-slate-400'}`}
+                  className={`px-2.5 py-1 rounded text-[10px] font-bold shrink-0 transition-colors ${currentRoom === room ? 'bg-primary-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}
                 >
-                  {room}
+                  Class {room}
                 </button>
               );
             })}
