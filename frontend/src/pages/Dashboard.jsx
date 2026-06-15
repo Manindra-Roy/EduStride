@@ -532,7 +532,7 @@ const Dashboard = () => {
             </div>
           </div>
         {/* Scores Grid */}
-        <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+        <div className="grid grid-cols-1 2xl:grid-cols-2 gap-6">
           {/* School Exam Scores Section */}
           <div className="glass-panel p-6 rounded-2xl border border-dark-800 space-y-4">
             <div className="border-b border-dark-800 pb-4 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
@@ -558,7 +558,7 @@ const Dashboard = () => {
             {recentScores.length > 0 ? (
               <>
                 {/* Desktop Table view */}
-                <div className="hidden md:block overflow-x-auto">
+                <div className="hidden lg:block overflow-x-auto">
                   <table className="w-full text-left border-collapse">
                     <thead>
                       <tr className="border-b border-dark-800/60 text-slate-400 text-xs font-semibold uppercase tracking-wider font-mono">
@@ -623,7 +623,7 @@ const Dashboard = () => {
                 </div>
 
                 {/* Mobile Card view */}
-                <div className="grid grid-cols-1 gap-3 md:hidden">
+                <div className="grid grid-cols-1 gap-3 lg:hidden">
                   {recentScores.map((score, index) => {
                     const percentage = Math.round((score.marks_obtained / score.total_marks) * 100);
                     let badgeClass = '';
@@ -702,7 +702,7 @@ const Dashboard = () => {
             {tuitionScores.length > 0 ? (
               <>
                 {/* Desktop Table view */}
-                <div className="hidden md:block overflow-x-auto">
+                <div className="hidden lg:block overflow-x-auto">
                   <table className="w-full text-left border-collapse">
                     <thead>
                       <tr className="border-b border-dark-800/60 text-slate-400 text-xs font-semibold uppercase tracking-wider font-mono">
@@ -767,7 +767,7 @@ const Dashboard = () => {
                 </div>
 
                 {/* Mobile Card view */}
-                <div className="grid grid-cols-1 gap-3 md:hidden">
+                <div className="grid grid-cols-1 gap-3 lg:hidden">
                   {tuitionScores.map((score, index) => {
                     const percentage = Math.round((score.marks_obtained / score.total_marks) * 100);
                     let badgeClass = '';
@@ -820,7 +820,7 @@ const Dashboard = () => {
               </div>
             )}
           </div>
-        </div> </div>
+        </div>
       </div>
     );
   }
