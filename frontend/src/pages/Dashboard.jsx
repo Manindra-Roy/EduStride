@@ -531,6 +531,7 @@ const Dashboard = () => {
               )}
             </div>
           </div>
+        </div>
         {/* Scores Grid */}
         <div className="grid grid-cols-1 2xl:grid-cols-2 gap-6">
           {/* School Exam Scores Section */}
