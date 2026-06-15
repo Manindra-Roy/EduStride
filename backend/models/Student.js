@@ -81,7 +81,8 @@ const studentSchema = new mongoose.Schema({
     default: 1500
   },
   attendance_history: [attendanceHistorySchema],
-  test_scores: [testScoreSchema]
+  test_scores: [testScoreSchema],
+  tuition_test_scores: [testScoreSchema]
 }, {
   timestamps: true
 });

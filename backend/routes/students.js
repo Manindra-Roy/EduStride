@@ -221,6 +221,7 @@ router.get('/', protect, async (req, res, next) => {
         studentObj.parent_name = 'Private';
         studentObj.monthly_fee = 0;
         studentObj.test_scores = [];
+        studentObj.tuition_test_scores = [];
         studentObj.attendance_history = [];
       }
 
@@ -594,6 +595,43 @@ router.post('/:id/test-scores', protect, authorize('SuperAdmin', 'Teacher'), asy
     }
 
     student.test_scores.push({
+      subject,
+      test_name,
+      marks_obtained: Number(marks_obtained),
+      total_marks: Number(total_marks),
+      date: date || new Date()
+    });
+
+    await student.save();
+
+    // Recalculate roll numbers for this class since test scores changed
+    await recalculateRollNumbers(student.class_level);
+
+    const finalStudent = await Student.findById(req.params.id);
+
+    res.status(201).json({
+      success: true,
+      data: finalStudent
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Add a tuition test score for a student
+// @route   POST /api/students/:id/tuition-test-scores
+// @access  Private (Admin/Teacher)
+router.post('/:id/tuition-test-scores', protect, authorize('SuperAdmin', 'Teacher'), async (req, res, next) => {
+  try {
+    const { subject, test_name, marks_obtained, total_marks, date } = req.body;
+
+    const student = await Student.findById(req.params.id);
+    if (!student) {
+      res.status(404);
+      throw new Error('Student not found');
+    }
+
+    student.tuition_test_scores.push({
       subject,
       test_name,
       marks_obtained: Number(marks_obtained),

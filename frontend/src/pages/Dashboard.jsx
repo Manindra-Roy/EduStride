@@ -181,6 +181,7 @@ const Dashboard = () => {
     // Fallback data if student doesn't have records yet
     const attendanceRecords = studentDetails?.attendance_history || [];
     const recentScores = studentDetails?.test_scores || [];
+    const tuitionScores = studentDetails?.tuition_test_scores || [];
     
     const latestAttendance = attendanceRecords[attendanceRecords.length - 1] || { total_classes: 20, attended: 16 };
     const attendancePercentage = latestAttendance.total_classes > 0 
@@ -530,151 +531,296 @@ const Dashboard = () => {
               )}
             </div>
           </div>
-        </div>
-
-        {/* School Exam Scores Section */}
-        <div className="glass-panel p-6 rounded-2xl border border-dark-800 space-y-4">
-          <div className="border-b border-dark-800 pb-4 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-            <div>
-              <h3 className="text-white text-base font-bold font-outfit flex items-center gap-2">
-                <BookOpen className="text-primary-500" size={18} />
-                <span>School Exam Scores</span>
-              </h3>
-              <p className="text-xs text-slate-400 mt-0.5">Comprehensive history of your academic evaluations and test scores</p>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <span className="px-3 py-1.5 rounded-xl bg-dark-900 border border-dark-850 text-xs font-semibold text-slate-350">
-                Tests Conducted: {recentScores.length}
-              </span>
-              {recentScores.length > 0 && (
-                <span className="px-3 py-1.5 rounded-xl bg-emerald-950/40 border border-emerald-800/30 text-xs font-semibold text-emerald-400">
-                  Average: {Math.round(recentScores.reduce((sum, s) => sum + (s.marks_obtained / s.total_marks * 100), 0) / recentScores.length)}%
+        {/* Scores Grid */}
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+          {/* School Exam Scores Section */}
+          <div className="glass-panel p-6 rounded-2xl border border-dark-800 space-y-4">
+            <div className="border-b border-dark-800 pb-4 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+              <div>
+                <h3 className="text-white text-base font-bold font-outfit flex items-center gap-2">
+                  <BookOpen className="text-primary-500" size={18} />
+                  <span>School Exam Scores</span>
+                </h3>
+                <p className="text-xs text-slate-400 mt-0.5">Comprehensive history of your academic evaluations and test scores</p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <span className="px-3 py-1.5 rounded-xl bg-dark-900 border border-dark-850 text-xs font-semibold text-slate-350">
+                  Tests Conducted: {recentScores.length}
                 </span>
-              )}
+                {recentScores.length > 0 && (
+                  <span className="px-3 py-1.5 rounded-xl bg-emerald-950/40 border border-emerald-800/30 text-xs font-semibold text-emerald-400">
+                    Average: {Math.round(recentScores.reduce((sum, s) => sum + (s.marks_obtained / s.total_marks * 100), 0) / recentScores.length)}%
+                  </span>
+                )}
+              </div>
             </div>
+
+            {recentScores.length > 0 ? (
+              <>
+                {/* Desktop Table view */}
+                <div className="hidden md:block overflow-x-auto">
+                  <table className="w-full text-left border-collapse">
+                    <thead>
+                      <tr className="border-b border-dark-800/60 text-slate-400 text-xs font-semibold uppercase tracking-wider font-mono">
+                        <th className="pb-3 pl-2">Exam / Test Name</th>
+                        <th className="pb-3">Subject</th>
+                        <th className="pb-3">Date</th>
+                        <th className="pb-3 text-right">Marks</th>
+                        <th className="pb-3 text-right">Percentage</th>
+                        <th className="pb-3 pr-2 text-right">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-dark-850/40 text-sm">
+                      {recentScores.map((score, index) => {
+                        const percentage = Math.round((score.marks_obtained / score.total_marks) * 100);
+                        let badgeClass = '';
+                        let statusLabel = '';
+                        if (percentage >= 85) {
+                          badgeClass = 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20';
+                          statusLabel = 'Excellent';
+                        } else if (percentage >= 60) {
+                          badgeClass = 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20';
+                          statusLabel = 'Good';
+                        } else if (percentage >= 40) {
+                          badgeClass = 'bg-amber-500/10 text-amber-400 border border-amber-500/20';
+                          statusLabel = 'Passed';
+                        } else {
+                          badgeClass = 'bg-rose-500/10 text-rose-450 border border-rose-500/20';
+                          statusLabel = 'Needs Review';
+                        }
+
+                        return (
+                          <tr key={score._id || index} className="hover:bg-dark-900/20 transition duration-150">
+                            <td className="py-3.5 pl-2 font-semibold text-white font-outfit">{score.test_name}</td>
+                            <td className="py-3.5 text-slate-350 font-medium">{score.subject}</td>
+                            <td className="py-3.5 text-slate-450 text-xs font-mono">
+                              {new Date(score.date).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}
+                            </td>
+                            <td className="py-3.5 text-right font-mono font-semibold text-slate-200">
+                              {score.marks_obtained} <span className="text-slate-500">/ {score.total_marks}</span>
+                            </td>
+                            <td className="py-3.5 text-right">
+                              <div className="inline-flex flex-col items-end gap-1">
+                                <span className="font-mono font-bold text-primary-400">{percentage}%</span>
+                                <div className="w-16 bg-dark-900 rounded-full h-1">
+                                  <div 
+                                    className={`h-1 rounded-full ${percentage >= 85 ? 'bg-emerald-500' : percentage >= 40 ? 'bg-primary-500' : 'bg-rose-500'}`} 
+                                    style={{ width: `${percentage}%` }}
+                                  />
+                                </div>
+                              </div>
+                            </td>
+                            <td className="py-3.5 pr-2 text-right">
+                              <span className={`px-2.5 py-1 rounded-lg text-[10px] font-extrabold tracking-wide uppercase ${badgeClass}`}>
+                                {statusLabel}
+                              </span>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Mobile Card view */}
+                <div className="grid grid-cols-1 gap-3 md:hidden">
+                  {recentScores.map((score, index) => {
+                    const percentage = Math.round((score.marks_obtained / score.total_marks) * 100);
+                    let badgeClass = '';
+                    let statusLabel = '';
+                    if (percentage >= 85) {
+                      badgeClass = 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20';
+                      statusLabel = 'Excellent';
+                    } else if (percentage >= 60) {
+                      badgeClass = 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20';
+                      statusLabel = 'Good';
+                    } else if (percentage >= 40) {
+                      badgeClass = 'bg-amber-500/10 text-amber-400 border border-amber-500/20';
+                      statusLabel = 'Passed';
+                    } else {
+                      badgeClass = 'bg-rose-500/10 text-rose-450 border border-rose-500/20';
+                      statusLabel = 'Needs Review';
+                    }
+
+                    return (
+                      <div key={score._id || index} className="p-4 rounded-xl bg-dark-900/40 border border-dark-850 space-y-3">
+                        <div className="flex justify-between items-start">
+                          <div>
+                            <h4 className="text-sm font-semibold text-white font-outfit">{score.test_name}</h4>
+                            <span className="text-xs text-slate-455 mt-0.5 block">{score.subject}</span>
+                          </div>
+                          <span className={`px-2 py-0.5 rounded text-[9px] font-extrabold tracking-wide uppercase ${badgeClass}`}>
+                            {statusLabel}
+                          </span>
+                        </div>
+                        
+                        <div className="flex justify-between items-center pt-2 border-t border-dark-800/40">
+                          <div className="text-[10px] text-slate-500 font-mono">
+                            {new Date(score.date).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}
+                          </div>
+                          <div className="flex items-center gap-3">
+                            <span className="text-xs font-mono font-semibold text-slate-350">
+                              {score.marks_obtained}/{score.total_marks}
+                            </span>
+                            <span className="text-xs font-mono font-bold text-primary-400">{percentage}%</span>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            ) : (
+              <div className="text-center py-10 text-slate-550 text-xs border border-dashed border-dark-850 rounded-xl">
+                No school exam scores logged in your profile yet.
+              </div>
+            )}
           </div>
 
-          {recentScores.length > 0 ? (
-            <>
-              {/* Desktop Table view */}
-              <div className="hidden md:block overflow-x-auto">
-                <table className="w-full text-left border-collapse">
-                  <thead>
-                    <tr className="border-b border-dark-800/60 text-slate-400 text-xs font-semibold uppercase tracking-wider font-mono">
-                      <th className="pb-3 pl-2">Exam / Test Name</th>
-                      <th className="pb-3">Subject</th>
-                      <th className="pb-3">Date</th>
-                      <th className="pb-3 text-right">Marks</th>
-                      <th className="pb-3 text-right">Percentage</th>
-                      <th className="pb-3 pr-2 text-right">Status</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-dark-850/40 text-sm">
-                    {recentScores.map((score, index) => {
-                      const percentage = Math.round((score.marks_obtained / score.total_marks) * 100);
-                      let badgeClass = '';
-                      let statusLabel = '';
-                      if (percentage >= 85) {
-                        badgeClass = 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20';
-                        statusLabel = 'Excellent';
-                      } else if (percentage >= 60) {
-                        badgeClass = 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20';
-                        statusLabel = 'Good';
-                      } else if (percentage >= 40) {
-                        badgeClass = 'bg-amber-500/10 text-amber-400 border border-amber-500/20';
-                        statusLabel = 'Passed';
-                      } else {
-                        badgeClass = 'bg-rose-500/10 text-rose-450 border border-rose-500/20';
-                        statusLabel = 'Needs Review';
-                      }
-
-                      return (
-                        <tr key={score._id || index} className="hover:bg-dark-900/20 transition duration-150">
-                          <td className="py-3.5 pl-2 font-semibold text-white font-outfit">{score.test_name}</td>
-                          <td className="py-3.5 text-slate-350 font-medium">{score.subject}</td>
-                          <td className="py-3.5 text-slate-450 text-xs font-mono">
-                            {new Date(score.date).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}
-                          </td>
-                          <td className="py-3.5 text-right font-mono font-semibold text-slate-200">
-                            {score.marks_obtained} <span className="text-slate-500">/ {score.total_marks}</span>
-                          </td>
-                          <td className="py-3.5 text-right">
-                            <div className="inline-flex flex-col items-end gap-1">
-                              <span className="font-mono font-bold text-primary-400">{percentage}%</span>
-                              <div className="w-16 bg-dark-900 rounded-full h-1">
-                                <div 
-                                  className={`h-1 rounded-full ${percentage >= 85 ? 'bg-emerald-500' : percentage >= 40 ? 'bg-primary-500' : 'bg-rose-500'}`} 
-                                  style={{ width: `${percentage}%` }}
-                                />
-                              </div>
-                            </div>
-                          </td>
-                          <td className="py-3.5 pr-2 text-right">
-                            <span className={`px-2.5 py-1 rounded-lg text-[10px] font-extrabold tracking-wide uppercase ${badgeClass}`}>
-                              {statusLabel}
-                            </span>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+          {/* Tuition Exam Scores Section */}
+          <div className="glass-panel p-6 rounded-2xl border border-dark-800 space-y-4">
+            <div className="border-b border-dark-800 pb-4 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+              <div>
+                <h3 className="text-white text-base font-bold font-outfit flex items-center gap-2">
+                  <TrendingUp className="text-emerald-500" size={18} />
+                  <span>Tuition Exam Scores</span>
+                </h3>
+                <p className="text-xs text-slate-400 mt-0.5">Comprehensive history of your evaluation and tests at the tuition center</p>
               </div>
-
-              {/* Mobile Card view */}
-              <div className="grid grid-cols-1 gap-3 md:hidden">
-                {recentScores.map((score, index) => {
-                  const percentage = Math.round((score.marks_obtained / score.total_marks) * 100);
-                  let badgeClass = '';
-                  let statusLabel = '';
-                  if (percentage >= 85) {
-                    badgeClass = 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20';
-                    statusLabel = 'Excellent';
-                  } else if (percentage >= 60) {
-                    badgeClass = 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20';
-                    statusLabel = 'Good';
-                  } else if (percentage >= 40) {
-                    badgeClass = 'bg-amber-500/10 text-amber-400 border border-amber-500/20';
-                    statusLabel = 'Passed';
-                  } else {
-                    badgeClass = 'bg-rose-500/10 text-rose-450 border border-rose-500/20';
-                    statusLabel = 'Needs Review';
-                  }
-
-                  return (
-                    <div key={score._id || index} className="p-4 rounded-xl bg-dark-900/40 border border-dark-850 space-y-3">
-                      <div className="flex justify-between items-start">
-                        <div>
-                          <h4 className="text-sm font-semibold text-white font-outfit">{score.test_name}</h4>
-                          <span className="text-xs text-slate-450 mt-0.5 block">{score.subject}</span>
-                        </div>
-                        <span className={`px-2 py-0.5 rounded text-[9px] font-extrabold tracking-wide uppercase ${badgeClass}`}>
-                          {statusLabel}
-                        </span>
-                      </div>
-                      
-                      <div className="flex justify-between items-center pt-2 border-t border-dark-800/40">
-                        <div className="text-[10px] text-slate-500 font-mono">
-                          {new Date(score.date).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}
-                        </div>
-                        <div className="flex items-center gap-3">
-                          <span className="text-xs font-mono font-semibold text-slate-350">
-                            {score.marks_obtained}/{score.total_marks}
-                          </span>
-                          <span className="text-xs font-mono font-bold text-primary-400">{percentage}%</span>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
+              <div className="flex flex-wrap gap-2">
+                <span className="px-3 py-1.5 rounded-xl bg-dark-900 border border-dark-850 text-xs font-semibold text-slate-355">
+                  Tests Conducted: {tuitionScores.length}
+                </span>
+                {tuitionScores.length > 0 && (
+                  <span className="px-3 py-1.5 rounded-xl bg-emerald-950/40 border border-emerald-800/30 text-xs font-semibold text-emerald-400">
+                    Average: {Math.round(tuitionScores.reduce((sum, s) => sum + (s.marks_obtained / s.total_marks * 100), 0) / tuitionScores.length)}%
+                  </span>
+                )}
               </div>
-            </>
-          ) : (
-            <div className="text-center py-10 text-slate-500 text-xs border border-dashed border-dark-850 rounded-xl">
-              No school exam scores logged in your profile yet.
             </div>
-          )}
-        </div>
+
+            {tuitionScores.length > 0 ? (
+              <>
+                {/* Desktop Table view */}
+                <div className="hidden md:block overflow-x-auto">
+                  <table className="w-full text-left border-collapse">
+                    <thead>
+                      <tr className="border-b border-dark-800/60 text-slate-400 text-xs font-semibold uppercase tracking-wider font-mono">
+                        <th className="pb-3 pl-2">Exam / Test Name</th>
+                        <th className="pb-3">Subject</th>
+                        <th className="pb-3">Date</th>
+                        <th className="pb-3 text-right">Marks</th>
+                        <th className="pb-3 text-right">Percentage</th>
+                        <th className="pb-3 pr-2 text-right">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-dark-850/40 text-sm">
+                      {tuitionScores.map((score, index) => {
+                        const percentage = Math.round((score.marks_obtained / score.total_marks) * 100);
+                        let badgeClass = '';
+                        let statusLabel = '';
+                        if (percentage >= 85) {
+                          badgeClass = 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20';
+                          statusLabel = 'Excellent';
+                        } else if (percentage >= 60) {
+                          badgeClass = 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20';
+                          statusLabel = 'Good';
+                        } else if (percentage >= 40) {
+                          badgeClass = 'bg-amber-500/10 text-amber-400 border border-amber-500/20';
+                          statusLabel = 'Passed';
+                        } else {
+                          badgeClass = 'bg-rose-500/10 text-rose-450 border border-rose-500/20';
+                          statusLabel = 'Needs Review';
+                        }
+
+                        return (
+                          <tr key={score._id || index} className="hover:bg-dark-900/20 transition duration-150">
+                            <td className="py-3.5 pl-2 font-semibold text-white font-outfit">{score.test_name}</td>
+                            <td className="py-3.5 text-slate-350 font-medium">{score.subject}</td>
+                            <td className="py-3.5 text-slate-450 text-xs font-mono">
+                              {new Date(score.date).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}
+                            </td>
+                            <td className="py-3.5 text-right font-mono font-semibold text-slate-200">
+                              {score.marks_obtained} <span className="text-slate-500">/ {score.total_marks}</span>
+                            </td>
+                            <td className="py-3.5 text-right">
+                              <div className="inline-flex flex-col items-end gap-1">
+                                <span className="font-mono font-bold text-emerald-400">{percentage}%</span>
+                                <div className="w-16 bg-dark-900 rounded-full h-1">
+                                  <div 
+                                    className={`h-1 rounded-full ${percentage >= 85 ? 'bg-emerald-500' : percentage >= 40 ? 'bg-emerald-600' : 'bg-rose-500'}`} 
+                                    style={{ width: `${percentage}%` }}
+                                  />
+                                </div>
+                              </div>
+                            </td>
+                            <td className="py-3.5 pr-2 text-right">
+                              <span className={`px-2.5 py-1 rounded-lg text-[10px] font-extrabold tracking-wide uppercase ${badgeClass}`}>
+                                {statusLabel}
+                              </span>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Mobile Card view */}
+                <div className="grid grid-cols-1 gap-3 md:hidden">
+                  {tuitionScores.map((score, index) => {
+                    const percentage = Math.round((score.marks_obtained / score.total_marks) * 100);
+                    let badgeClass = '';
+                    let statusLabel = '';
+                    if (percentage >= 85) {
+                      badgeClass = 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20';
+                      statusLabel = 'Excellent';
+                    } else if (percentage >= 60) {
+                      badgeClass = 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20';
+                      statusLabel = 'Good';
+                    } else if (percentage >= 40) {
+                      badgeClass = 'bg-amber-500/10 text-amber-400 border border-amber-500/20';
+                      statusLabel = 'Passed';
+                    } else {
+                      badgeClass = 'bg-rose-500/10 text-rose-450 border border-rose-500/20';
+                      statusLabel = 'Needs Review';
+                    }
+
+                    return (
+                      <div key={score._id || index} className="p-4 rounded-xl bg-dark-900/40 border border-dark-850 space-y-3">
+                        <div className="flex justify-between items-start">
+                          <div>
+                            <h4 className="text-sm font-semibold text-white font-outfit">{score.test_name}</h4>
+                            <span className="text-xs text-slate-455 mt-0.5 block">{score.subject}</span>
+                          </div>
+                          <span className={`px-2 py-0.5 rounded text-[9px] font-extrabold tracking-wide uppercase ${badgeClass}`}>
+                            {statusLabel}
+                          </span>
+                        </div>
+                        
+                        <div className="flex justify-between items-center pt-2 border-t border-dark-800/40">
+                          <div className="text-[10px] text-slate-500 font-mono">
+                            {new Date(score.date).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}
+                          </div>
+                          <div className="flex items-center gap-3">
+                            <span className="text-xs font-mono font-semibold text-slate-355">
+                              {score.marks_obtained}/{score.total_marks}
+                            </span>
+                            <span className="text-xs font-mono font-bold text-emerald-400">{percentage}%</span>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            ) : (
+              <div className="text-center py-10 text-slate-550 text-xs border border-dashed border-dark-850 rounded-xl">
+                No tuition exam scores logged in your profile yet.
+              </div>
+            )}
+          </div>
+        </div> </div>
       </div>
     );
   }

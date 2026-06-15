@@ -68,12 +68,15 @@ const ClassGrid = () => {
   });
   
   const [testForm, setTestForm] = useState({
+    type: 'school', // 'school' or 'tuition'
     subject: '',
     test_name: '',
     marks_obtained: '',
     total_marks: '',
     date: new Date().toISOString().substring(0, 10)
   });
+
+  const [performanceTab, setPerformanceTab] = useState('school'); // 'school' or 'tuition'
 
   const [subjects, setSubjects] = useState([]);
   const [subjectsList, setSubjectsList] = useState([]);
@@ -307,6 +310,7 @@ const ClassGrid = () => {
   const openTestModal = (student) => {
     setSelectedStudent(student);
     setTestForm({
+      type: 'school',
       subject: subjects[0] || '',
       test_name: '',
       marks_obtained: '',
@@ -322,7 +326,10 @@ const ClassGrid = () => {
     setSubmitError('');
     setSubmitting(true);
     try {
-      const res = await axios.post(`/api/students/${selectedStudent._id}/test-scores`, testForm);
+      const endpoint = testForm.type === 'tuition'
+        ? `/api/students/${selectedStudent._id}/tuition-test-scores`
+        : `/api/students/${selectedStudent._id}/test-scores`;
+      const res = await axios.post(endpoint, testForm);
       if (res.data.success) {
         setShowTestModal(false);
         fetchStudents();
@@ -430,7 +437,9 @@ const ClassGrid = () => {
   };
 
   // Prepare chart data for selected student performance curve
-  const selectedStudentScores = selectedStudent?.test_scores || [];
+  const selectedStudentScores = performanceTab === 'school'
+    ? (selectedStudent?.test_scores || [])
+    : (selectedStudent?.tuition_test_scores || []);
   const performanceChartData = selectedStudentScores.map(score => ({
     name: score.test_name,
     percentage: Math.round((score.marks_obtained / score.total_marks) * 100),
@@ -607,12 +616,39 @@ const ClassGrid = () => {
                     </div>
 
                     {/* Performance curve chart */}
-                    {selectedStudentScores.length > 0 ? (
-                      <div className="pt-4 border-t border-dark-800/60">
-                        <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-3 flex items-center gap-1.5">
+                    <div className="pt-4 border-t border-dark-800/60 space-y-3">
+                      <div className="flex justify-between items-center">
+                        <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
                           <TrendingUp size={14} className="text-primary-500" />
-                          <span>Academic Performance Curve</span>
+                          <span>Academic Performance</span>
                         </h3>
+                        <div className="flex gap-1 bg-dark-950 p-0.5 rounded-lg border border-dark-850">
+                          <button
+                            type="button"
+                            onClick={() => setPerformanceTab('school')}
+                            className={`px-2 py-0.5 rounded text-[10px] font-bold transition ${
+                              performanceTab === 'school'
+                                ? 'bg-primary-600 text-white'
+                                : 'text-slate-500 hover:text-slate-350'
+                            }`}
+                          >
+                            School
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setPerformanceTab('tuition')}
+                            className={`px-2 py-0.5 rounded text-[10px] font-bold transition ${
+                              performanceTab === 'tuition'
+                                ? 'bg-primary-600 text-white'
+                                : 'text-slate-500 hover:text-slate-350'
+                            }`}
+                          >
+                            Tuition
+                          </button>
+                        </div>
+                      </div>
+
+                      {selectedStudentScores.length > 0 ? (
                         <div className="h-48 bg-dark-900/30 rounded-xl border border-dark-850 p-2">
                           <ResponsiveContainer width="100%" height="100%">
                             <LineChart data={performanceChartData}>
@@ -620,16 +656,16 @@ const ClassGrid = () => {
                               <XAxis dataKey="name" fontSize={8} stroke="#64748b" />
                               <YAxis domain={[0, 100]} fontSize={8} stroke="#64748b" />
                               <Tooltip contentStyle={{ fontSize: '10px', backgroundColor: '#1b1c31', borderRadius: '8px' }} />
-                              <Line type="monotone" dataKey="percentage" stroke="#6366f1" strokeWidth={2} dot={{ r: 3 }} />
+                              <Line type="monotone" dataKey="percentage" stroke={performanceTab === 'tuition' ? '#10b981' : '#6366f1'} strokeWidth={2} dot={{ r: 3 }} />
                             </LineChart>
                           </ResponsiveContainer>
                         </div>
-                      </div>
-                    ) : (
-                      <div className="p-4 rounded-xl border border-dashed border-dark-850 text-center text-slate-500 text-xs">
-                        No exam scores logged for performance charting.
-                      </div>
-                    )}
+                      ) : (
+                        <div className="p-4 rounded-xl border border-dashed border-dark-850 text-center text-slate-500 text-xs">
+                          No {performanceTab} exam scores logged for performance charting.
+                        </div>
+                      )}
+                    </div>
 
                     {/* Attendance Tracker */}
                     <div className="pt-4 border-t border-dark-800/60">
@@ -994,12 +1030,39 @@ const ClassGrid = () => {
               </div>
 
               {/* Performance curve chart */}
-              {selectedStudentScores.length > 0 ? (
-                <div>
-                  <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-3 flex items-center gap-1.5">
+              <div className="space-y-3">
+                <div className="flex justify-between items-center">
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
                     <TrendingUp size={14} className="text-primary-500" />
                     <span>Academic Performance</span>
                   </h3>
+                  <div className="flex gap-1 bg-dark-950 p-0.5 rounded-lg border border-dark-850">
+                    <button
+                      type="button"
+                      onClick={() => setPerformanceTab('school')}
+                      className={`px-2 py-0.5 rounded text-[10px] font-bold transition ${
+                        performanceTab === 'school'
+                          ? 'bg-primary-600 text-white'
+                          : 'text-slate-550 hover:text-slate-350'
+                      }`}
+                    >
+                      School
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPerformanceTab('tuition')}
+                      className={`px-2 py-0.5 rounded text-[10px] font-bold transition ${
+                        performanceTab === 'tuition'
+                          ? 'bg-primary-600 text-white'
+                          : 'text-slate-550 hover:text-slate-350'
+                      }`}
+                    >
+                      Tuition
+                    </button>
+                  </div>
+                </div>
+
+                {selectedStudentScores.length > 0 ? (
                   <div className="h-40 bg-dark-900/30 rounded-xl border border-dark-850 p-2">
                     <ResponsiveContainer width="100%" height="100%">
                       <LineChart data={performanceChartData}>
@@ -1007,16 +1070,16 @@ const ClassGrid = () => {
                         <XAxis dataKey="name" fontSize={8} stroke="#64748b" />
                         <YAxis domain={[0, 100]} fontSize={8} stroke="#64748b" />
                         <Tooltip contentStyle={{ fontSize: '10px', backgroundColor: '#1b1c31', borderRadius: '8px' }} />
-                        <Line type="monotone" dataKey="percentage" stroke="#6366f1" strokeWidth={2} dot={{ r: 3 }} />
+                        <Line type="monotone" dataKey="percentage" stroke={performanceTab === 'tuition' ? '#10b981' : '#6366f1'} strokeWidth={2} dot={{ r: 3 }} />
                       </LineChart>
                     </ResponsiveContainer>
                   </div>
-                </div>
-              ) : (
-                <div className="p-4 rounded-xl border border-dashed border-dark-850 text-center text-slate-500 text-xs">
-                  No exam scores logged for performance charting.
-                </div>
-              )}
+                ) : (
+                  <div className="p-4 rounded-xl border border-dashed border-dark-850 text-center text-slate-500 text-xs">
+                    No {performanceTab} exam scores logged for performance charting.
+                  </div>
+                )}
+              </div>
 
               {/* Attendance Tracker */}
               <div>
@@ -1353,6 +1416,19 @@ const ClassGrid = () => {
             )}
 
             <form onSubmit={handleAddTestScore} className="p-6 space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-400 mb-1.5">Score Category</label>
+                <select
+                  name="type"
+                  value={testForm.type}
+                  onChange={handleTestFormChange}
+                  className="w-full px-3 py-2.5 rounded-lg bg-dark-900 border border-dark-850 text-white text-xs outline-none focus:border-primary-500"
+                >
+                  <option value="school">School Exam Score</option>
+                  <option value="tuition">Tuition Exam Score</option>
+                </select>
+              </div>
+
               <div>
                 <label className="block text-xs font-semibold text-slate-400 mb-1.5">Subject Category</label>
                 <select
