@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/jpeg" href="/logo.jpg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>EduStride ERP & LMS Portal</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@300;400;500;600;700;850&display=swap" rel="stylesheet">
+  </head>
+  <body class="bg-dark-950 text-slate-100 antialiased font-sans min-h-screen">
+    <div id="root">
+      <!-- HTML/CSS static preloader during JS bundle download -->
+      <style>
+        .initial-preloader-container {
+          position: fixed;
+          inset: 0;
+          background: #1b1c31;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          z-index: 9999;
+        }
+        .initial-orbit {
+          position: relative;
+          width: 96px;
+          height: 96px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+        .initial-ring {
+          position: absolute;
+          inset: 0;
+          border-radius: 50%;
+          border: 2px solid rgba(99, 102, 241, 0.08);
+          border-top-color: #6366f1;
+          animation: initial-spin 1.4s linear infinite;
+        }
+        .initial-ring-inner {
+          position: absolute;
+          inset: 8px;
+          border-radius: 50%;
+          border: 2px solid rgba(99, 102, 241, 0.04);
+          border-bottom-color: #4f46e5;
+          animation: initial-spin 2.2s linear infinite reverse;
+        }
+        .initial-dot {
+          width: 32px;
+          height: 32px;
+          background: linear-gradient(135deg, #a5b4fc 0%, #6366f1 100%);
+          border-radius: 8px;
+          box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
+          animation: initial-pulse 2s ease-in-out infinite;
+        }
+        .initial-brand {
+          margin-top: 28px;
+          font-family: 'Outfit', 'Inter', sans-serif;
+          font-size: 26px;
+          font-weight: 850;
+          letter-spacing: -0.02em;
+          color: #ffffff;
+          background: linear-gradient(to right, #ffffff, #a5b4fc);
+          -webkit-background-clip: text;
+          -webkit-text-fill-color: transparent;
+        }
+        @keyframes initial-spin {
+          0% { transform: rotate(0deg); }
+          100% { transform: rotate(360deg); }
+        }
+        @keyframes initial-pulse {
+          0%, 100% { transform: scale(0.92); opacity: 0.7; }
+          50% { transform: scale(1.08); opacity: 1; }
+        }
+      </style>
+      <div class="initial-preloader-container">
+        <div class="initial-orbit">
+          <div class="initial-ring"></div>
+          <div class="initial-ring-inner"></div>
+          <div class="initial-dot"></div>
+        </div>
+        <div class="initial-brand">EduStride</div>
+      </div>
+    </div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

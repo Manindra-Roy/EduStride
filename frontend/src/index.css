@@ -1,0 +1,83 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-dark-950 text-slate-100;
+  }
+}
+
+/* Glassmorphic Utilities */
+.glass-panel {
+  background: rgba(27, 28, 49, 0.6);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.glass-card {
+  background: linear-gradient(135deg, rgba(27, 28, 49, 0.4) 0%, rgba(27, 28, 49, 0.8) 100%);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
+}
+
+.glow-indigo {
+  box-shadow: 0 0 25px -5px rgba(99, 102, 241, 0.3);
+}
+
+.glow-emerald {
+  box-shadow: 0 0 25px -5px rgba(16, 185, 129, 0.3);
+}
+
+.glow-rose {
+  box-shadow: 0 0 25px -5px rgba(244, 63, 94, 0.3);
+}
+
+/* Scrollbar Customization */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #1b1c31;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #3d447c;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #626eb1;
+}
+
+/* Custom Table Utilities */
+.custom-table {
+  @apply w-full border-collapse text-left;
+}
+
+.custom-table th {
+  @apply px-6 py-4 font-semibold text-slate-300 border-b border-dark-800 text-sm tracking-wider uppercase bg-dark-900/40;
+}
+
+.custom-table td {
+  @apply px-6 py-4 border-b border-dark-900 text-sm align-middle;
+}
+
+.custom-table tr:hover td {
+  @apply bg-dark-800/30 transition-colors duration-150;
+}
+
+/* Animations */
+@keyframes glowPulse {
+  0%, 100% { opacity: 0.15; }
+  50% { opacity: 0.35; }
+}
+
+.glow-bg {
+  background: radial-gradient(circle at 50% 50%, rgba(99, 102, 241, 0.15), transparent 50%);
+  animation: glowPulse 8s infinite alternate;
+}
