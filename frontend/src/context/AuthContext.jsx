@@ -4,24 +4,22 @@ import axios from 'axios';
 const AuthContext = createContext(null);
 
 export const AuthProvider = ({ children }) => {
+  const [token, setToken] = useState(() => {
+    const savedToken = localStorage.getItem('token');
+    if (savedToken) {
+      axios.defaults.headers.common['Authorization'] = `Bearer ${savedToken}`;
+    }
+    return savedToken || null;
+  });
   const [user, setUser] = useState(null);
-  const [token, setToken] = useState(localStorage.getItem('token') || null);
   const [loading, setLoading] = useState(true);
 
   const logout = () => {
+    delete axios.defaults.headers.common['Authorization'];
     localStorage.removeItem('token');
     setToken(null);
     setUser(null);
   };
-
-  // Configure global axios interceptor for API calls
-  useEffect(() => {
-    if (token) {
-      axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
-    } else {
-      delete axios.defaults.headers.common['Authorization'];
-    }
-  }, [token]);
 
   // Set up global response interceptor for 401 handling
   useEffect(() => {
@@ -66,8 +64,10 @@ export const AuthProvider = ({ children }) => {
     try {
       const response = await axios.post('/api/auth/login', { email, password });
       if (response.data.success) {
-        localStorage.setItem('token', response.data.token);
-        setToken(response.data.token);
+        const tokenVal = response.data.token;
+        axios.defaults.headers.common['Authorization'] = `Bearer ${tokenVal}`;
+        localStorage.setItem('token', tokenVal);
+        setToken(tokenVal);
         setUser(response.data.user);
         return { success: true };
       }
@@ -88,8 +88,10 @@ export const AuthProvider = ({ children }) => {
       }
       const response = await axios.post('/api/auth/register', payload);
       if (response.data.success) {
-        localStorage.setItem('token', response.data.token);
-        setToken(response.data.token);
+        const tokenVal = response.data.token;
+        axios.defaults.headers.common['Authorization'] = `Bearer ${tokenVal}`;
+        localStorage.setItem('token', tokenVal);
+        setToken(tokenVal);
         setUser(response.data.user);
         return { success: true };
       }
