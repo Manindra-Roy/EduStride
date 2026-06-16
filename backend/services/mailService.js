@@ -66,19 +66,6 @@ export const sendEmail = async ({ from, to, subject, text, html }) => {
       }
     };
 
-    // If local development has Brevo SMTP keys defined, route Nodemailer through Brevo
-    if (process.env.BREVO_USER && process.env.BREVO_PASS) {
-      transporterConfig = {
-        host: 'smtp-relay.brevo.com',
-        port: 587,
-        secure: false,
-        auth: {
-          user: process.env.BREVO_USER,
-          pass: process.env.BREVO_PASS
-        }
-      };
-    }
-
     const transporter = nodemailer.createTransport(transporterConfig);
     return await transporter.sendMail({ from: activeFrom, to, subject, text, html });
   }
@@ -116,18 +103,6 @@ export const verifyMailConfig = async () => {
         pass: process.env.EMAIL_PASS || 'mock_password'
       }
     };
-
-    if (process.env.BREVO_USER && process.env.BREVO_PASS) {
-      transporterConfig = {
-        host: 'smtp-relay.brevo.com',
-        port: 587,
-        secure: false,
-        auth: {
-          user: process.env.BREVO_USER,
-          pass: process.env.BREVO_PASS
-        }
-      };
-    }
 
     const transporter = nodemailer.createTransport(transporterConfig);
     await transporter.verify();
