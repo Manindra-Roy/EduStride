@@ -64,6 +64,11 @@ const AutomationsPanel = () => {
   const [emailSuccess, setEmailSuccess] = useState('');
   const [emailError, setEmailError] = useState('');
 
+  // Monthly Progress Report Target States
+  const [reportTarget, setReportTarget] = useState('all'); // 'all' | 'class' | 'student'
+  const [reportClassLevel, setReportClassLevel] = useState('');
+  const [reportStudentId, setReportStudentId] = useState('');
+
   const fetchStudentsList = async () => {
     setLoadingStudentsList(true);
     try {
@@ -79,14 +84,16 @@ const AutomationsPanel = () => {
   };
 
   useEffect(() => {
-    if (classes.length > 0 && !emailClassLevel) {
-      setEmailClassLevel(classes[0]);
+    if (classes.length > 0) {
+      if (!emailClassLevel) setEmailClassLevel(classes[0]);
+      if (!reportClassLevel) setReportClassLevel(classes[0]);
     }
   }, [classes]);
 
   useEffect(() => {
-    if (studentsList.length > 0 && !emailStudentId) {
-      setEmailStudentId(studentsList[0]._id);
+    if (studentsList.length > 0) {
+      if (!emailStudentId) setEmailStudentId(studentsList[0]._id);
+      if (!reportStudentId) setReportStudentId(studentsList[0]._id);
     }
   }, [studentsList]);
 
@@ -250,12 +257,28 @@ const AutomationsPanel = () => {
   };
 
   const handleTriggerProgressReport = async () => {
-    setTriggeringProgress(true);
     setSystemMessage('');
     setSystemError('');
+
+    if (reportTarget === 'class' && !reportClassLevel) {
+      setSystemError('Please select a target class.');
+      return;
+    }
+
+    if (reportTarget === 'student' && !reportStudentId) {
+      setSystemError('Please select a target student.');
+      return;
+    }
+
+    setTriggeringProgress(true);
     setProgressReportsLog([]);
     try {
-      const res = await axios.post('/api/automations/trigger-progress-report');
+      const payload = {
+        target: reportTarget,
+        class_level: reportTarget === 'class' ? reportClassLevel : undefined,
+        student_id: reportTarget === 'student' ? reportStudentId : undefined
+      };
+      const res = await axios.post('/api/automations/trigger-progress-report', payload);
       if (res.data.success) {
         setSystemMessage(res.data.message);
         setProgressReportsLog(res.data.data || []);
@@ -762,28 +785,129 @@ const AutomationsPanel = () => {
             )}
 
             {/* Manual Triggers Form */}
-            <div className="space-y-2 pt-2 border-t border-dark-800">
-              <button
-                onClick={handleTriggerFeeNag}
-                disabled={triggeringNag || loadingMetrics}
-                className="w-full py-2.5 rounded-xl bg-primary-600 hover:bg-primary-500 disabled:opacity-50 text-white font-semibold text-xs transition duration-150 flex items-center justify-center gap-1.5"
-              >
-                {triggeringNag ? 'Dispatched Alerts...' : 'Execute Fee Reminders'}
-              </button>
-              <button
-                onClick={handleTriggerAttendanceAlert}
-                disabled={triggeringAttendance || loadingMetrics}
-                className="w-full py-2.5 rounded-xl bg-dark-900 hover:bg-dark-850 disabled:opacity-50 border border-dark-800 text-slate-350 font-semibold text-xs transition duration-150 flex items-center justify-center gap-1.5"
-              >
-                {triggeringAttendance ? 'Scanning Attendance...' : 'Execute Attendance Check'}
-              </button>
-              <button
-                onClick={handleTriggerProgressReport}
-                disabled={triggeringProgress || loadingMetrics}
-                className="w-full py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:opacity-50 text-white font-semibold text-xs transition duration-150 flex items-center justify-center gap-1.5"
-              >
-                {triggeringProgress ? 'Sending Progress Reports...' : 'Execute Progress Reports'}
-              </button>
+            <div className="space-y-4 pt-3 border-t border-dark-800">
+              <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider">System Automation Dispatchers</label>
+              
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  onClick={handleTriggerFeeNag}
+                  disabled={triggeringNag || loadingMetrics}
+                  className="w-full py-2.5 rounded-xl bg-primary-600 hover:bg-primary-500 disabled:opacity-50 text-white font-semibold text-xs transition duration-150 flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  {triggeringNag ? 'Reminding...' : 'Fee Reminders'}
+                </button>
+                <button
+                  onClick={handleTriggerAttendanceAlert}
+                  disabled={triggeringAttendance || loadingMetrics}
+                  className="w-full py-2.5 rounded-xl bg-dark-900 hover:bg-dark-850 disabled:opacity-50 border border-dark-800 text-slate-350 font-semibold text-xs transition duration-150 flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  {triggeringAttendance ? 'Scanning...' : 'Attendance Check'}
+                </button>
+              </div>
+
+              {/* Progress Reports Dispatch Section */}
+              <div className="p-3 bg-dark-900/60 border border-dark-850 rounded-xl space-y-3">
+                <div className="flex justify-between items-center">
+                  <span className="text-xs font-bold text-white">Monthly Progress Report</span>
+                  <span className="text-[9px] text-slate-500 font-mono">Current Month</span>
+                </div>
+
+                {/* Target Selector */}
+                <div>
+                  <div className="flex gap-1.5 p-1 bg-dark-950 border border-dark-850 rounded-lg">
+                    <button
+                      type="button"
+                      onClick={() => { setReportTarget('all'); }}
+                      className={`flex-1 py-1 text-[10px] font-bold rounded transition-all duration-150 cursor-pointer ${
+                        reportTarget === 'all'
+                          ? 'bg-emerald-600 text-white shadow-sm'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      All
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setReportTarget('class'); }}
+                      className={`flex-1 py-1 text-[10px] font-bold rounded transition-all duration-150 cursor-pointer ${
+                        reportTarget === 'class'
+                          ? 'bg-emerald-600 text-white shadow-sm'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      Class
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setReportTarget('student'); }}
+                      className={`flex-1 py-1 text-[10px] font-bold rounded transition-all duration-150 cursor-pointer ${
+                        reportTarget === 'student'
+                          ? 'bg-emerald-600 text-white shadow-sm'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      Student
+                    </button>
+                  </div>
+                </div>
+
+                {/* Conditional Dropdown Selection */}
+                {reportTarget === 'class' && (
+                  <div className="animate-fadeIn">
+                    <label className="block text-[9px] font-semibold text-slate-500 uppercase tracking-wider mb-1">Select Target Class</label>
+                    <select
+                      value={reportClassLevel}
+                      onChange={(e) => setReportClassLevel(e.target.value)}
+                      className="w-full px-2.5 py-1.5 rounded-lg bg-dark-950 border border-dark-850 focus:border-emerald-500 text-white text-[11px] outline-none transition cursor-pointer"
+                    >
+                      <option value="" disabled>-- Select Class --</option>
+                      {classes.map(c => (
+                        <option key={c} value={c}>Class {c}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                {reportTarget === 'student' && (
+                  <div className="animate-fadeIn">
+                    <label className="block text-[9px] font-semibold text-slate-500 uppercase tracking-wider mb-1">Select Target Student</label>
+                    {loadingStudentsList ? (
+                      <div className="text-slate-500 text-[10px]">Loading students...</div>
+                    ) : (
+                      <select
+                        value={reportStudentId}
+                        onChange={(e) => setReportStudentId(e.target.value)}
+                        className="w-full px-2.5 py-1.5 rounded-lg bg-dark-950 border border-dark-850 focus:border-emerald-500 text-white text-[11px] outline-none transition cursor-pointer"
+                      >
+                        <option value="" disabled>-- Select Student --</option>
+                        {studentsList.map(s => (
+                          <option key={s._id} value={s._id}>
+                            {s.name} (Class {s.class_level})
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+                )}
+
+                <button
+                  onClick={handleTriggerProgressReport}
+                  disabled={triggeringProgress || loadingMetrics}
+                  className="w-full py-2 rounded-lg bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:opacity-50 text-white font-bold text-xs transition duration-150 flex items-center justify-center gap-1.5 cursor-pointer shadow-sm shadow-emerald-500/10"
+                >
+                  {triggeringProgress ? (
+                    <>
+                      <div className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                      <span>Sending Progress Reports...</span>
+                    </>
+                  ) : (
+                    <>
+                      <TrendingUp size={13} />
+                      <span>Execute Progress Reports</span>
+                    </>
+                  )}
+                </button>
+              </div>
             </div>
           </div>
 

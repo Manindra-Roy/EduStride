@@ -145,6 +145,8 @@ router.post('/trigger-attendance-alert', protect, authorize('SuperAdmin'), async
 // @access  Private (SuperAdmin only)
 router.post('/trigger-progress-report', protect, authorize('SuperAdmin'), async (req, res, next) => {
   try {
+    const { target, class_level, student_id } = req.body;
+
     const currentMonthIndex = new Date().getMonth();
     const currentYear = new Date().getFullYear();
     const monthsName = [
@@ -154,15 +156,35 @@ router.post('/trigger-progress-report', protect, authorize('SuperAdmin'), async 
     const currentMonthName = monthsName[currentMonthIndex];
     const currentMonthStr = new Date().toISOString().substring(0, 7);
 
-    // Fetch all active students
-    const allStudents = await Student.find({ status: 'Active' });
+    // Filter recipients based on custom parameters
+    let recipients = [];
+    if (target === 'class') {
+      if (!class_level) {
+        res.status(400);
+        throw new Error('Please specify class_level');
+      }
+      recipients = await Student.find({ class_level, status: 'Active' });
+    } else if (target === 'student') {
+      if (!student_id) {
+        res.status(400);
+        throw new Error('Please specify student_id');
+      }
+      const student = await Student.findById(student_id);
+      if (!student) {
+        res.status(404);
+        throw new Error('Student not found');
+      }
+      recipients = [student];
+    } else {
+      recipients = await Student.find({ status: 'Active' });
+    }
 
     // Transporter initialization removed, handled in sendEmail
 
     const logs = [];
     let sentCount = 0;
 
-    for (const student of allStudents) {
+    for (const student of recipients) {
       // 1. Calculate Monthly Attendance Rate
       const monthlyAttendance = student.attendance_history.find(h => h.month === currentMonthStr) || { total_classes: 0, attended: 0 };
       const totalClasses = monthlyAttendance.total_classes;
