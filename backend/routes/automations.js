@@ -85,7 +85,7 @@ router.post('/trigger-fee-nag', protect, authorize('SuperAdmin'), async (req, re
           from: '"EduStride Admin" <admin@edustride.com>',
           to: parentEmail,
           subject: `Urgent: Tuition Fee Outstanding for ${student.name} - ${currentMonthName}`,
-          text: `Dear ${student.parent_name},\n\nThis is a friendly reminder that the tuition fee of ₹${student.monthly_fee || 1500} for ${student.name} (Class ${student.class_level}, Roll No ${student.roll_number}) for the month of ${currentMonthName} is currently UNPAID. Please clear the outstanding balance via the student portal at your earliest convenience.\n\nBest regards,\nEduStride Administration`
+          text: `Dear ${student.parent_name},\n\nThis is a friendly reminder that the tuition fee of ₹${student.monthly_fee || 1500} for ${student.name} (Class ${student.class_level}, Roll No ${student.roll_number}) for the month of ${currentMonthName} is currently UNPAID. Please clear the outstanding balance via the student portal at edustride.in at your earliest convenience.\n\nBest regards,\nEduStride Administration`
         };
 
         await sendEmail(mailOptions);
@@ -122,7 +122,7 @@ router.post('/trigger-attendance-alert', protect, authorize('SuperAdmin'), async
             from: '"EduStride Academic Office" <academic@edustride.com>',
             to: parentEmail,
             subject: `Alert: Low Attendance Notice - ${student.name}`,
-            text: `Dear ${student.parent_name},\n\nWe are writing to inform you that your ward, ${student.name} (Class ${student.class_level}, Roll No ${student.roll_number}), has a running attendance rate of ${rate.toFixed(1)}% for this month. This is below the required 75% threshold.\n\nPlease ensure they attend regular sessions. Feel free to contact the class teacher if you have any queries.\n\nBest regards,\nEduStride Academic Office`
+            text: `Dear ${student.parent_name},\n\nWe are writing to inform you that your ward, ${student.name} (Class ${student.class_level}, Roll No ${student.roll_number}), has a running attendance rate of ${rate.toFixed(1)}% for this month. This is below the required 75% threshold.\n\nPlease ensure they attend regular sessions. You can monitor daily attendance details on the student portal at edustride.in. Feel free to contact the class teacher if you have any queries.\n\nBest regards,\nEduStride Academic Office`
           };
 
           await sendEmail(mailOptions);
