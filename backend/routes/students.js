@@ -334,6 +334,11 @@ router.put('/:id', protect, authorize('SuperAdmin', 'Teacher'), async (req, res,
       delete req.body.roll_number;
     }
 
+    // If class level is changing, temporarily set roll number to a unique string to avoid unique key index clashes
+    if (class_level && class_level !== oldClassLevel) {
+      req.body.roll_number = `TEMP_${Date.now()}_MOVE`;
+    }
+
     const updatedStudent = await Student.findByIdAndUpdate(req.params.id, req.body, {
       new: true,
       runValidators: true
@@ -588,6 +593,34 @@ router.post('/:id/test-scores', protect, authorize('SuperAdmin', 'Teacher'), asy
   try {
     const { subject, test_name, marks_obtained, total_marks, date } = req.body;
 
+    if (!subject || !test_name || marks_obtained === undefined || total_marks === undefined) {
+      res.status(400);
+      throw new Error('Please fill in all test score fields');
+    }
+
+    const marksNum = Number(marks_obtained);
+    const totalNum = Number(total_marks);
+
+    if (isNaN(marksNum) || isNaN(totalNum)) {
+      res.status(400);
+      throw new Error('Marks obtained and total marks must be valid numbers');
+    }
+
+    if (marksNum < 0) {
+      res.status(400);
+      throw new Error('Marks obtained cannot be negative');
+    }
+
+    if (totalNum <= 0) {
+      res.status(400);
+      throw new Error('Total marks must be greater than zero');
+    }
+
+    if (marksNum > totalNum) {
+      res.status(400);
+      throw new Error('Marks obtained cannot be greater than total marks');
+    }
+
     const student = await Student.findById(req.params.id);
     if (!student) {
       res.status(404);
@@ -597,8 +630,8 @@ router.post('/:id/test-scores', protect, authorize('SuperAdmin', 'Teacher'), asy
     student.test_scores.push({
       subject,
       test_name,
-      marks_obtained: Number(marks_obtained),
-      total_marks: Number(total_marks),
+      marks_obtained: marksNum,
+      total_marks: totalNum,
       date: date || new Date()
     });
 
@@ -625,6 +658,34 @@ router.post('/:id/tuition-test-scores', protect, authorize('SuperAdmin', 'Teache
   try {
     const { subject, test_name, marks_obtained, total_marks, date } = req.body;
 
+    if (!subject || !test_name || marks_obtained === undefined || total_marks === undefined) {
+      res.status(400);
+      throw new Error('Please fill in all test score fields');
+    }
+
+    const marksNum = Number(marks_obtained);
+    const totalNum = Number(total_marks);
+
+    if (isNaN(marksNum) || isNaN(totalNum)) {
+      res.status(400);
+      throw new Error('Marks obtained and total marks must be valid numbers');
+    }
+
+    if (marksNum < 0) {
+      res.status(400);
+      throw new Error('Marks obtained cannot be negative');
+    }
+
+    if (totalNum <= 0) {
+      res.status(400);
+      throw new Error('Total marks must be greater than zero');
+    }
+
+    if (marksNum > totalNum) {
+      res.status(400);
+      throw new Error('Marks obtained cannot be greater than total marks');
+    }
+
     const student = await Student.findById(req.params.id);
     if (!student) {
       res.status(404);
@@ -634,8 +695,8 @@ router.post('/:id/tuition-test-scores', protect, authorize('SuperAdmin', 'Teache
     student.tuition_test_scores.push({
       subject,
       test_name,
-      marks_obtained: Number(marks_obtained),
-      total_marks: Number(total_marks),
+      marks_obtained: marksNum,
+      total_marks: totalNum,
       date: date || new Date()
     });
 

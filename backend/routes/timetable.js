@@ -54,6 +54,7 @@ router.get('/', async (req, res, next) => {
         migratedData.push({ day: 'Sunday', slots: [] });
       }
       timetable.data = migratedData;
+      timetable.markModified('data');
       await timetable.save();
       console.log('[Migration] Timetable successfully upgraded to 7-day schedule.');
     }
@@ -79,6 +80,7 @@ router.put('/', protect, authorize('SuperAdmin', 'Teacher'), async (req, res, ne
       timetable = await Timetable.create({ data });
     } else {
       timetable.data = data;
+      timetable.markModified('data');
       await timetable.save();
     }
 

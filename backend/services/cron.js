@@ -1,6 +1,7 @@
 import cron from 'node-cron';
 import { sendEmail } from './mailService.js';
 import Student from '../models/Student.js';
+import User from '../models/User.js';
 import FeeLedger from '../models/FeeLedger.js';
 
 export const initCronJobs = () => {
@@ -28,7 +29,8 @@ export const initCronJobs = () => {
       for (const ledger of unpaidLedgers) {
         if (ledger.student_id && ledger.student_id.status === 'Active') {
           const student = ledger.student_id;
-          const parentEmail = `${student.parent_name.toLowerCase().replace(/\s+/g, '')}@example.com`;
+          const studentUser = await User.findOne({ studentProfile: student._id });
+          const parentEmail = studentUser ? studentUser.email : `${student.parent_name.toLowerCase().replace(/\s+/g, '')}@example.com`;
 
           const mailOptions = {
             from: '"School ERP Admin" <admin@schoolerp.com>',
@@ -59,7 +61,8 @@ export const initCronJobs = () => {
         if (monthlyAttendance && monthlyAttendance.total_classes > 0) {
           const rate = (monthlyAttendance.attended / monthlyAttendance.total_classes) * 100;
           if (rate < 75) {
-            const parentEmail = `${student.parent_name.toLowerCase().replace(/\s+/g, '')}@example.com`;
+            const studentUser = await User.findOne({ studentProfile: student._id });
+            const parentEmail = studentUser ? studentUser.email : `${student.parent_name.toLowerCase().replace(/\s+/g, '')}@example.com`;
             const mailOptions = {
               from: '"School Academic Office" <academic@schoolerp.com>',
               to: parentEmail,
