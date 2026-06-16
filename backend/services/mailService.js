@@ -6,8 +6,11 @@ import nodemailer from 'nodemailer';
 export const getActiveMailProvider = () => {
   const isProduction = process.env.NODE_ENV === 'production';
   
-  if (isProduction && process.env.BREVO_API_KEY) {
+  if (isProduction && process.env.BREVO_PASS) {
     return 'Brevo API (Production)';
+  }
+  if (process.env.BREVO_USER && process.env.BREVO_PASS) {
+    return 'Brevo SMTP';
   }
   if (process.env.EMAIL_HOST && process.env.EMAIL_HOST !== 'smtp.ethereal.email') {
     return 'Custom SMTP';
@@ -21,17 +24,26 @@ export const getActiveMailProvider = () => {
 export const sendEmail = async ({ from, to, subject, text, html }) => {
   const provider = getActiveMailProvider();
 
+  // If a verified BREVO_SENDER is configured, rewrite the sender email to match the verified domain.
+  // This avoids Brevo SMTP/API rejecting the mail due to unverified sender domains.
+  let activeFrom = from;
+  if (process.env.BREVO_SENDER) {
+    const nameMatch = from.match(/"?([^"]*)"?\s*<[^>]*>/);
+    const displayName = nameMatch ? nameMatch[1].trim() : 'EduStride Admin';
+    activeFrom = `"${displayName}" <${process.env.BREVO_SENDER}>`;
+  }
+
   if (provider === 'Brevo API (Production)') {
     let senderName = 'EduStride Admin';
-    let senderEmail = 'admin@edustride.com';
+    let senderEmail = process.env.BREVO_SENDER || 'admin@edustride.com';
     
-    // Parse sender name and email from '"Name" <email>' string format
-    const fromMatch = from.match(/"?([^"]*)"?\s*<([^>]*)>/);
+    // Parse sender name and email from activeFrom
+    const fromMatch = activeFrom.match(/"?([^"]*)"?\s*<([^>]*)>/);
     if (fromMatch) {
       senderName = fromMatch[1].trim();
       senderEmail = fromMatch[2].trim();
-    } else if (from.includes('@')) {
-      senderEmail = from.trim();
+    } else if (activeFrom.includes('@')) {
+      senderEmail = activeFrom.trim();
     }
 
     const payload = {
@@ -47,7 +59,7 @@ export const sendEmail = async ({ from, to, subject, text, html }) => {
       method: 'POST',
       headers: {
         'accept': 'application/json',
-        'api-key': process.env.BREVO_API_KEY,
+        'api-key': process.env.BREVO_PASS,
         'content-type': 'application/json'
       },
       body: JSON.stringify(payload)
@@ -63,7 +75,17 @@ export const sendEmail = async ({ from, to, subject, text, html }) => {
 
   // NodeMailer SMTP config setup
   let transporterConfig = {};
-  if (provider === 'Custom SMTP') {
+  if (provider === 'Brevo SMTP') {
+    transporterConfig = {
+      host: 'smtp-relay.brevo.com',
+      port: 587,
+      secure: false,
+      auth: {
+        user: process.env.BREVO_USER,
+        pass: process.env.BREVO_PASS
+      }
+    };
+  } else if (provider === 'Custom SMTP') {
     transporterConfig = {
       host: process.env.EMAIL_HOST,
       port: parseInt(process.env.EMAIL_PORT) || 587,
@@ -87,7 +109,7 @@ export const sendEmail = async ({ from, to, subject, text, html }) => {
   }
 
   const transporter = nodemailer.createTransport(transporterConfig);
-  return await transporter.sendMail({ from, to, subject, text, html });
+  return await transporter.sendMail({ from: activeFrom, to, subject, text, html });
 };
 
 /**
@@ -100,7 +122,7 @@ export const verifyMailConfig = async () => {
     if (provider === 'Brevo API (Production)') {
       const response = await fetch('https://api.brevo.com/v3/account', {
         headers: {
-          'api-key': process.env.BREVO_API_KEY
+          'api-key': process.env.BREVO_PASS
         }
       });
 
@@ -113,7 +135,17 @@ export const verifyMailConfig = async () => {
     }
 
     let transporterConfig = {};
-    if (provider === 'Custom SMTP') {
+    if (provider === 'Brevo SMTP') {
+      transporterConfig = {
+        host: 'smtp-relay.brevo.com',
+        port: 587,
+        secure: false,
+        auth: {
+          user: process.env.BREVO_USER,
+          pass: process.env.BREVO_PASS
+        }
+      };
+    } else if (provider === 'Custom SMTP') {
       transporterConfig = {
         host: process.env.EMAIL_HOST,
         port: parseInt(process.env.EMAIL_PORT) || 587,
