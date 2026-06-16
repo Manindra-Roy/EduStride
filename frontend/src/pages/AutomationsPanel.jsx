@@ -69,6 +69,17 @@ const AutomationsPanel = () => {
   const [reportClassLevel, setReportClassLevel] = useState('');
   const [reportStudentId, setReportStudentId] = useState('');
 
+  // Student Promotion States
+  const [promoMode, setPromoMode] = useState('class'); // 'class' | 'student'
+  const [promoSourceClass, setPromoSourceClass] = useState('');
+  const [promoStudentId, setPromoStudentId] = useState('');
+  const [promoTargetClass, setPromoTargetClass] = useState('');
+  const [promoStatus, setPromoStatus] = useState('Promoted');
+  const [promoNewYear, setPromoNewYear] = useState(new Date().getFullYear() + 1);
+  const [executingPromo, setExecutingPromo] = useState(false);
+  const [promoSuccess, setPromoSuccess] = useState('');
+  const [promoError, setPromoError] = useState('');
+
   const fetchStudentsList = async () => {
     setLoadingStudentsList(true);
     try {
@@ -87,6 +98,8 @@ const AutomationsPanel = () => {
     if (classes.length > 0) {
       if (!emailClassLevel) setEmailClassLevel(classes[0]);
       if (!reportClassLevel) setReportClassLevel(classes[0]);
+      if (!promoSourceClass) setPromoSourceClass(classes[0]);
+      if (!promoTargetClass) setPromoTargetClass(classes[1] || classes[0]);
     }
   }, [classes]);
 
@@ -94,6 +107,7 @@ const AutomationsPanel = () => {
     if (studentsList.length > 0) {
       if (!emailStudentId) setEmailStudentId(studentsList[0]._id);
       if (!reportStudentId) setReportStudentId(studentsList[0]._id);
+      if (!promoStudentId) setPromoStudentId(studentsList[0]._id);
     }
   }, [studentsList]);
 
@@ -137,6 +151,63 @@ const AutomationsPanel = () => {
       setEmailError(err.response?.data?.message || 'Failed to dispatch custom email.');
     } finally {
       setDispatchingEmail(false);
+    }
+  };
+
+  const handleExecutePromotion = async (e) => {
+    e.preventDefault();
+    setPromoError('');
+    setPromoSuccess('');
+
+    if (promoMode === 'class' && !promoSourceClass) {
+      setPromoError('Please select the source class.');
+      return;
+    }
+
+    if (promoMode === 'student' && !promoStudentId) {
+      setPromoError('Please select the target student.');
+      return;
+    }
+
+    if (!promoTargetClass) {
+      setPromoError('Please select the target class.');
+      return;
+    }
+
+    if (!promoNewYear) {
+      setPromoError('Please specify the new academic year.');
+      return;
+    }
+
+    const confirmMessage = promoMode === 'class'
+      ? `Are you sure you want to promote all active students in Class ${promoSourceClass} to Class ${promoTargetClass} for the year ${promoNewYear}? This will archive their current grades and attendance history.`
+      : `Are you sure you want to promote the selected student to Class ${promoTargetClass} for the year ${promoNewYear}? This will archive their current grades and attendance history.`;
+
+    if (!window.confirm(confirmMessage)) {
+      return;
+    }
+
+    setExecutingPromo(true);
+    try {
+      const payload = {
+        studentIds: promoMode === 'student' ? [promoStudentId] : undefined,
+        sourceClass: promoMode === 'class' ? promoSourceClass : undefined,
+        targetClass: promoTargetClass,
+        promotionStatus: promoStatus,
+        newAcademicYear: Number(promoNewYear)
+      };
+
+      const res = await axios.post('/api/students/promote', payload);
+      if (res.data.success) {
+        setPromoSuccess(res.data.message || 'Promotion processed successfully!');
+        // Refresh local data
+        await fetchSystemMetrics();
+        await fetchStudentsList();
+      }
+    } catch (err) {
+      setPromoError(err.response?.data?.message || 'Failed to execute promotion.');
+    } finally {
+      setExecutingPromo(false);
     }
   };
 
@@ -711,6 +782,160 @@ const AutomationsPanel = () => {
                   <>
                     <Mail size={14} />
                     <span>Send Announcement Email</span>
+                  </>
+                )}
+              </button>
+            </form>
+          </div>
+
+          {/* Student Session Promotion Manager Panel */}
+          <div className="glass-panel p-6 rounded-2xl border border-dark-800 space-y-4">
+            <h2 className="text-base font-bold text-white font-outfit flex items-center gap-2">
+              <GraduationCap className="text-primary-500" size={18} />
+              <span>Student Session Promotion Manager</span>
+            </h2>
+            <p className="text-xs text-slate-400">
+              Promote students batch-wise or individually to the next academic class session. This will archive their current grades and attendance history into their profile record.
+            </p>
+
+            {promoError && (
+              <div className="p-3.5 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-400 text-xs font-medium animate-fadeIn">
+                {promoError}
+              </div>
+            )}
+            {promoSuccess && (
+              <div className="p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-450 text-xs font-medium animate-fadeIn">
+                {promoSuccess}
+              </div>
+            )}
+
+            <form onSubmit={handleExecutePromotion} className="space-y-4">
+              {/* Mode Selection */}
+              <div>
+                <label className="block text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-2">Promotion Selection Mode</label>
+                <div className="flex gap-2 p-1 bg-dark-900 border border-dark-850 rounded-xl max-w-xs">
+                  <button
+                    type="button"
+                    onClick={() => { setPromoMode('class'); setPromoError(''); setPromoSuccess(''); }}
+                    className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all duration-200 ${
+                      promoMode === 'class'
+                        ? 'bg-primary-600 text-white shadow-md'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    Class-wise (Batch)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setPromoMode('student'); setPromoError(''); setPromoSuccess(''); }}
+                    className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all duration-200 ${
+                      promoMode === 'student'
+                        ? 'bg-primary-600 text-white shadow-md'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    Student-wise
+                  </button>
+                </div>
+              </div>
+
+              {/* Conditional dropdown selects */}
+              {promoMode === 'class' ? (
+                <div>
+                  <label className="block text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Source Class (Current Class)</label>
+                  <select
+                    value={promoSourceClass}
+                    onChange={(e) => setPromoSourceClass(e.target.value)}
+                    className="w-full max-w-md px-3.5 py-2.5 rounded-xl bg-dark-900 border border-dark-850 focus:border-primary-500 text-white text-xs outline-none transition cursor-pointer"
+                  >
+                    <option value="" disabled>-- Select Class --</option>
+                    {classes.map(c => (
+                      <option key={c} value={c}>Class {c}</option>
+                    ))}
+                  </select>
+                </div>
+              ) : (
+                <div>
+                  <label className="block text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Select Student to Promote</label>
+                  {loadingStudentsList ? (
+                    <div className="text-slate-500 text-xs">Loading students...</div>
+                  ) : (
+                    <select
+                      value={promoStudentId}
+                      onChange={(e) => setPromoStudentId(e.target.value)}
+                      className="w-full max-w-md px-3.5 py-2.5 rounded-xl bg-dark-900 border border-dark-850 focus:border-primary-500 text-white text-xs outline-none transition cursor-pointer"
+                    >
+                      <option value="" disabled>-- Select Student --</option>
+                      {studentsList.map(s => (
+                        <option key={s._id} value={s._id}>
+                          {s.name} (Class {s.class_level}, Roll {s.roll_number})
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </div>
+              )}
+
+              {/* Target Class Selector */}
+              <div>
+                <label className="block text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Target Class (Next Class)</label>
+                <select
+                  value={promoTargetClass}
+                  onChange={(e) => setPromoTargetClass(e.target.value)}
+                  className="w-full max-w-md px-3.5 py-2.5 rounded-xl bg-dark-900 border border-dark-850 focus:border-primary-500 text-white text-xs outline-none transition cursor-pointer"
+                >
+                  <option value="" disabled>-- Select Target Class --</option>
+                  {classes.map(c => (
+                    <option key={c} value={c}>Class {c}</option>
+                  ))}
+                  <option value="GRADUATED">GRADUATED (Mark Student as Inactive)</option>
+                </select>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-md">
+                {/* Promotion Status */}
+                <div>
+                  <label className="block text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Promotion Decision</label>
+                  <select
+                    value={promoStatus}
+                    onChange={(e) => setPromoStatus(e.target.value)}
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-dark-900 border border-dark-850 focus:border-primary-500 text-white text-xs outline-none transition cursor-pointer"
+                  >
+                    <option value="Promoted">Promoted (Advances to Next Class)</option>
+                    <option value="Retained">Retained (Repeats Class - Archives scores)</option>
+                    <option value="Graduated">Graduated (Completed studies)</option>
+                  </select>
+                </div>
+
+                {/* New Academic Year */}
+                <div>
+                  <label className="block text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1.5">New Session Year</label>
+                  <input
+                    type="number"
+                    required
+                    min={2020}
+                    max={2100}
+                    value={promoNewYear}
+                    onChange={(e) => setPromoNewYear(e.target.value)}
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-dark-900 border border-dark-850 focus:border-primary-500 text-white text-xs outline-none transition font-mono"
+                  />
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                disabled={executingPromo}
+                className="px-5 py-2.5 bg-gradient-to-r from-indigo-600 to-primary-600 hover:from-indigo-500 hover:to-primary-500 disabled:opacity-50 text-white text-xs font-semibold rounded-xl transition duration-150 flex items-center justify-center gap-1.5 shadow-md shadow-primary-500/10 cursor-pointer"
+              >
+                {executingPromo ? (
+                  <>
+                    <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    <span>Executing Promotion...</span>
+                  </>
+                ) : (
+                  <>
+                    <GraduationCap size={14} />
+                    <span>Execute Session Promotion</span>
                   </>
                 )}
               </button>

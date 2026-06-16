@@ -106,7 +106,7 @@ const recalculateRollNumbers = async (class_level) => {
 };
 
 // Helper to initialize 12-month ledger for a student
-const initializeFeeLedger = async (studentId) => {
+const initializeFeeLedger = async (studentId, year = new Date().getFullYear()) => {
   const months = [
     'January', 'February', 'March', 'April', 'May', 'June',
     'July', 'August', 'September', 'October', 'November', 'December'
@@ -119,11 +119,14 @@ const initializeFeeLedger = async (studentId) => {
     transaction_method: null
   }));
 
-  await FeeLedger.create({
-    student_id: studentId,
-    year: new Date().getFullYear(),
-    months
-  });
+  const exists = await FeeLedger.findOne({ student_id: studentId, year });
+  if (!exists) {
+    await FeeLedger.create({
+      student_id: studentId,
+      year,
+      months
+    });
+  }
 };
 
 // @desc    Get all students (with search, filter, pagination)
@@ -710,6 +713,104 @@ router.post('/:id/tuition-test-scores', protect, authorize('SuperAdmin', 'Teache
     res.status(201).json({
       success: true,
       data: finalStudent
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Promote students to next class level (batch or single)
+// @route   POST /api/students/promote
+// @access  Private (SuperAdmin only)
+router.post('/promote', protect, authorize('SuperAdmin'), async (req, res, next) => {
+  try {
+    const { studentIds, sourceClass, targetClass, promotionStatus = 'Promoted', newAcademicYear } = req.body;
+
+    if (!targetClass) {
+      res.status(400);
+      throw new Error('Please specify target class level');
+    }
+
+    if (!newAcademicYear) {
+      res.status(400);
+      throw new Error('Please specify new academic year');
+    }
+
+    let query = {};
+    if (studentIds && studentIds.length > 0) {
+      query = { _id: { $in: studentIds } };
+    } else if (sourceClass) {
+      query = { class_level: sourceClass, status: 'Active' };
+    } else {
+      res.status(400);
+      throw new Error('Please specify studentIds or sourceClass for promotion');
+    }
+
+    const students = await Student.find(query);
+    if (students.length === 0) {
+      res.status(404);
+      throw new Error('No students found for promotion matching the criteria');
+    }
+
+    const processedStudents = [];
+    const archivedYear = Number(newAcademicYear) - 1;
+
+    for (const student of students) {
+      // 1. Archive current academic data
+      const archiveRecord = {
+        class_level: student.class_level,
+        academic_year: archivedYear,
+        roll_number: student.roll_number,
+        attendance_history: student.attendance_history || [],
+        test_scores: student.test_scores || [],
+        promotion_status: promotionStatus,
+        promoted_at: new Date()
+      };
+
+      // Push to academic_history
+      student.academic_history = student.academic_history || [];
+      student.academic_history.push(archiveRecord);
+
+      // 2. Clear current session data
+      student.test_scores = [];
+      student.attendance_history = [];
+      student.tuition_test_scores = []; // clear tuition scores too
+
+      // 3. Move to target class
+      const oldClass = student.class_level;
+      student.class_level = targetClass.toUpperCase().trim();
+
+      if (promotionStatus === 'Graduated' || targetClass.toUpperCase().trim() === 'GRADUATED') {
+        student.status = 'Inactive';
+      }
+
+      // 4. Temporary roll number to avoid index collision during batch update
+      student.roll_number = `TEMP_PROMOTE_${Date.now()}_${student._id}`;
+
+      await student.save();
+
+      // 5. Initialize Fee Ledger for new academic year
+      await initializeFeeLedger(student._id, Number(newAcademicYear));
+
+      processedStudents.push({
+        _id: student._id,
+        name: student.name,
+        oldClass,
+        newClass: student.class_level,
+        status: student.status
+      });
+    }
+
+    // 6. Recalculate roll numbers for source and target classes
+    if (sourceClass) {
+      await recalculateRollNumbers(sourceClass);
+    }
+    await recalculateRollNumbers(targetClass.toUpperCase().trim());
+
+    res.json({
+      success: true,
+      message: `Successfully processed promotion for ${processedStudents.length} student(s) to Class ${targetClass}`,
+      data: processedStudents
     });
   } catch (error) {
     next(error);

@@ -82,7 +82,32 @@ const studentSchema = new mongoose.Schema({
   },
   attendance_history: [attendanceHistorySchema],
   test_scores: [testScoreSchema],
-  tuition_test_scores: [testScoreSchema]
+  tuition_test_scores: [testScoreSchema],
+  academic_history: [{
+    class_level: {
+      type: String,
+      required: true
+    },
+    academic_year: {
+      type: Number,
+      required: true
+    },
+    roll_number: {
+      type: String,
+      required: true
+    },
+    attendance_history: [attendanceHistorySchema],
+    test_scores: [testScoreSchema],
+    promoted_at: {
+      type: Date,
+      default: Date.now
+    },
+    promotion_status: {
+      type: String,
+      enum: ['Promoted', 'Retained', 'Graduated'],
+      default: 'Promoted'
+    }
+  }]
 }, {
   timestamps: true
 });
