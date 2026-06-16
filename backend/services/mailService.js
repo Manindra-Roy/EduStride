@@ -15,7 +15,10 @@ export const sendEmail = async ({ from, to, subject, text, html }) => {
     activeFrom = `"${displayName}" <${process.env.BREVO_SENDER}>`;
   }
 
-  if (isProduction && process.env.BREVO_PASS) {
+  if (isProduction) {
+    if (!process.env.BREVO_PASS) {
+      throw new Error('BREVO_PASS is missing in production environment variables.');
+    }
     // PRODUCTION: Brevo HTTP API (fetch)
     let senderName = 'EduStride Admin';
     let senderEmail = process.env.BREVO_SENDER || 'admin@edustride.com';
@@ -78,7 +81,10 @@ export const verifyMailConfig = async () => {
   const isProduction = process.env.NODE_ENV === 'production';
   
   try {
-    if (isProduction && process.env.BREVO_PASS) {
+    if (isProduction) {
+      if (!process.env.BREVO_PASS) {
+        throw new Error('BREVO_PASS is missing in production environment variables.');
+      }
       const response = await fetch('https://api.brevo.com/v3/account', {
         headers: {
           'api-key': process.env.BREVO_PASS
