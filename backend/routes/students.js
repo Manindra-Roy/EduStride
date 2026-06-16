@@ -129,6 +129,34 @@ const initializeFeeLedger = async (studentId, year = new Date().getFullYear()) =
   }
 };
 
+// Helper to reset an existing fee ledger or create it if missing (avoids unique student_id violations)
+const resetOrCreateFeeLedger = async (studentId, year) => {
+  const months = [
+    'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December'
+  ].map(m => ({
+    month_name: m,
+    status: 'Unpaid',
+    amount_paid: 0,
+    payment_date: null,
+    receipt_id: null,
+    transaction_method: null
+  }));
+
+  const ledger = await FeeLedger.findOne({ student_id: studentId });
+  if (ledger) {
+    ledger.year = Number(year);
+    ledger.months = months;
+    await ledger.save();
+  } else {
+    await FeeLedger.create({
+      student_id: studentId,
+      year: Number(year),
+      months
+    });
+  }
+};
+
 // @desc    Get all students (with search, filter, pagination)
 // @route   GET /api/students
 // @access  Private
@@ -756,13 +784,18 @@ router.post('/promote', protect, authorize('SuperAdmin'), async (req, res, next)
     const archivedYear = Number(newAcademicYear) - 1;
 
     for (const student of students) {
-      // 1. Archive current academic data
+      // Fetch the student's current fee ledger to archive
+      const currentLedger = await FeeLedger.findOne({ student_id: student._id });
+      const ledgerMonths = currentLedger ? currentLedger.months : [];
+
+      // 1. Archive current academic and fee data
       const archiveRecord = {
         class_level: student.class_level,
         academic_year: archivedYear,
         roll_number: student.roll_number,
         attendance_history: student.attendance_history || [],
         test_scores: student.test_scores || [],
+        fee_ledger: ledgerMonths,
         promotion_status: promotionStatus,
         promoted_at: new Date()
       };
@@ -789,8 +822,8 @@ router.post('/promote', protect, authorize('SuperAdmin'), async (req, res, next)
 
       await student.save();
 
-      // 5. Initialize Fee Ledger for new academic year
-      await initializeFeeLedger(student._id, Number(newAcademicYear));
+      // 5. Update/Reset Fee Ledger for the new academic year
+      await resetOrCreateFeeLedger(student._id, Number(newAcademicYear));
 
       processedStudents.push({
         _id: student._id,
