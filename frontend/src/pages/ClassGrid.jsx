@@ -15,7 +15,8 @@ import {
   AlertCircle,
   TrendingUp,
   UserPlus,
-  BookOpen
+  BookOpen,
+  History
 } from 'lucide-react';
 import { 
   LineChart, 
@@ -739,6 +740,65 @@ const ClassGrid = () => {
                         </div>
                       )}
                     </div>
+
+                    {/* Academic Session History */}
+                    {selectedStudent.academic_history?.length > 0 && (
+                      <div className="pt-4 border-t border-dark-800/60 space-y-3 animate-fadeIn">
+                        <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-405 flex items-center gap-1.5 font-outfit">
+                          <History size={14} className="text-primary-500" />
+                          <span>Session Archives (Academic History)</span>
+                        </h3>
+                        <div className="space-y-2.5 max-h-48 overflow-y-auto pr-1">
+                          {selectedStudent.academic_history.map((record, index) => {
+                            const totalScores = record.test_scores || [];
+                            const avgScore = totalScores.length > 0 
+                              ? Math.round(totalScores.reduce((sum, s) => sum + (s.marks_obtained / s.total_marks * 100), 0) / totalScores.length)
+                              : null;
+
+                            let totalClasses = 0;
+                            let attended = 0;
+                            if (record.attendance_history && record.attendance_history.length > 0) {
+                              record.attendance_history.forEach(att => {
+                                totalClasses += att.total_classes;
+                                attended += att.attended;
+                              });
+                            }
+                            const attendanceRate = totalClasses > 0 ? Math.round((attended / totalClasses) * 100) : null;
+
+                            return (
+                              <div key={index} className="p-3 rounded-xl bg-dark-900 border border-dark-850 space-y-2 text-xs hover:border-dark-750 transition duration-150">
+                                <div className="flex justify-between items-center border-b border-dark-800 pb-1.5">
+                                  <span className="font-bold text-white">Class {record.class_level} ({record.academic_year})</span>
+                                  <span className={`px-2 py-0.5 rounded text-[9px] font-extrabold ${
+                                    record.promotion_status === 'Promoted' || record.promotion_status === 'Graduated'
+                                      ? 'bg-emerald-500/10 text-emerald-450 border border-emerald-500/20'
+                                      : 'bg-amber-500/10 text-amber-450 border border-amber-500/20'
+                                  }`}>
+                                    {record.promotion_status}
+                                  </span>
+                                </div>
+                                <div className="grid grid-cols-3 gap-2 text-[10px] text-slate-400">
+                                  <div>
+                                    <span className="text-slate-500 block">Roll Number</span>
+                                    <span className="font-bold text-slate-200">{record.roll_number}</span>
+                                  </div>
+                                  <div>
+                                    <span className="text-slate-500 block">Avg Exam Score</span>
+                                    <span className="font-bold text-slate-200">{avgScore !== null ? `${avgScore}%` : 'N/A'}</span>
+                                  </div>
+                                  <div>
+                                    <span className="text-slate-500 block">Attendance Rate</span>
+                                    <span className={`font-bold ${attendanceRate !== null ? (attendanceRate >= 75 ? 'text-emerald-400' : 'text-amber-400') : 'text-slate-250'}`}>
+                                      {attendanceRate !== null ? `${attendanceRate}%` : 'N/A'}
+                                    </span>
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
                   </>
                 ) : (
                   // Redacted view for classmates
@@ -1153,6 +1213,65 @@ const ClassGrid = () => {
                   </div>
                 )}
               </div>
+
+              {/* Academic Session History */}
+              {selectedStudent.academic_history?.length > 0 && (
+                <div className="pt-4 border-t border-dark-800/60 space-y-3 animate-fadeIn">
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-1.5 font-outfit">
+                    <History size={14} className="text-primary-500" />
+                    <span>Session Archives (Academic History)</span>
+                  </h3>
+                  <div className="space-y-2.5 max-h-48 overflow-y-auto pr-1">
+                    {selectedStudent.academic_history.map((record, index) => {
+                      const totalScores = record.test_scores || [];
+                      const avgScore = totalScores.length > 0 
+                        ? Math.round(totalScores.reduce((sum, s) => sum + (s.marks_obtained / s.total_marks * 100), 0) / totalScores.length)
+                        : null;
+
+                      let totalClasses = 0;
+                      let attended = 0;
+                      if (record.attendance_history && record.attendance_history.length > 0) {
+                        record.attendance_history.forEach(att => {
+                          totalClasses += att.total_classes;
+                          attended += att.attended;
+                        });
+                      }
+                      const attendanceRate = totalClasses > 0 ? Math.round((attended / totalClasses) * 100) : null;
+
+                      return (
+                        <div key={index} className="p-3 rounded-xl bg-dark-900 border border-dark-850 space-y-2 text-xs hover:border-dark-750 transition duration-150">
+                          <div className="flex justify-between items-center border-b border-dark-800 pb-1.5">
+                            <span className="font-bold text-white">Class {record.class_level} ({record.academic_year})</span>
+                            <span className={`px-2 py-0.5 rounded text-[9px] font-extrabold ${
+                              record.promotion_status === 'Promoted' || record.promotion_status === 'Graduated'
+                                ? 'bg-emerald-500/10 text-emerald-450 border border-emerald-500/20'
+                                : 'bg-amber-500/10 text-amber-450 border border-amber-500/20'
+                            }`}>
+                              {record.promotion_status}
+                            </span>
+                          </div>
+                          <div className="grid grid-cols-3 gap-2 text-[10px] text-slate-400">
+                            <div>
+                              <span className="text-slate-500 block">Roll Number</span>
+                              <span className="font-bold text-slate-200">{record.roll_number}</span>
+                            </div>
+                            <div>
+                              <span className="text-slate-500 block">Avg Exam Score</span>
+                              <span className="font-bold text-slate-200">{avgScore !== null ? `${avgScore}%` : 'N/A'}</span>
+                            </div>
+                            <div>
+                              <span className="text-slate-550 block">Attendance Rate</span>
+                              <span className={`font-bold ${attendanceRate !== null ? (attendanceRate >= 75 ? 'text-emerald-400' : 'text-amber-400') : 'text-slate-200'}`}>
+                                {attendanceRate !== null ? `${attendanceRate}%` : 'N/A'}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
           ) : (
             <div className="glass-panel p-8 rounded-2xl border border-dark-800 text-center py-24 text-slate-500 text-sm">
