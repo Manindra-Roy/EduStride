@@ -291,6 +291,10 @@ router.post('/trigger-progress-report', protect, authorize('SuperAdmin'), async 
               ${scoresTable}
             </div>
             
+            <p style="font-size: 13px; color: #4a5568; line-height: 1.5; margin-top: 20px; margin-bottom: 20px;">
+              Please log in to the student portal (<a href="https://edustride.in" style="color: #4f46e5; text-decoration: none; font-weight: bold;">EduStride.in</a>) to view detailed gradebooks and schedules.
+            </p>
+            
             <div style="font-size: 12px; color: #a0aec0; text-align: center; border-top: 1px solid #edf2f7; padding-top: 15px; margin-top: 30px;">
               This is an automated system dispatch from your school portal (<a href="https://edustride.in" style="color: #4f46e5; text-decoration: none; font-weight: bold;">edustride.in</a>).<br>
               Please do not reply directly to this email. For any queries, contact the academic coordinator.
@@ -400,6 +404,10 @@ router.post('/send-custom-email', protect, authorize('SuperAdmin'), async (req, 
             <div style="line-height: 1.6; margin: 20px 0; font-size: 14px; white-space: pre-line; color: #2d3748;">
               ${body}
             </div>
+            
+            <p style="font-size: 13px; color: #4a5568; line-height: 1.5; margin-top: 20px; margin-bottom: 20px;">
+              Please log in to the student portal (<a href="https://edustride.in" style="color: #4f46e5; text-decoration: none; font-weight: bold;">EduStride.in</a>) to view detailed gradebooks and schedules.
+            </p>
             
             <div style="font-size: 11px; color: #a0aec0; text-align: center; border-top: 1px solid #edf2f7; padding-top: 15px; margin-top: 30px;">
               This is a direct administrative communication broadcasted from your school portal (<a href="https://edustride.in" style="color: #4f46e5; text-decoration: none; font-weight: bold;">edustride.in</a>).<br>
