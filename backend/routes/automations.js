@@ -292,7 +292,7 @@ router.post('/trigger-progress-report', protect, authorize('SuperAdmin'), async 
             </div>
             
             <div style="font-size: 12px; color: #a0aec0; text-align: center; border-top: 1px solid #edf2f7; padding-top: 15px; margin-top: 30px;">
-              This is an automated system dispatch from your school portal.<br>
+              This is an automated system dispatch from your school portal (<a href="https://edustride.in" style="color: #4f46e5; text-decoration: none; font-weight: bold;">edustride.in</a>).<br>
               Please do not reply directly to this email. For any queries, contact the academic coordinator.
             </div>
           </div>
@@ -402,7 +402,7 @@ router.post('/send-custom-email', protect, authorize('SuperAdmin'), async (req, 
             </div>
             
             <div style="font-size: 11px; color: #a0aec0; text-align: center; border-top: 1px solid #edf2f7; padding-top: 15px; margin-top: 30px;">
-              This is a direct administrative communication broadcasted from your school portal.<br>
+              This is a direct administrative communication broadcasted from your school portal (<a href="https://edustride.in" style="color: #4f46e5; text-decoration: none; font-weight: bold;">edustride.in</a>).<br>
               Please do not reply directly to this email. For any queries, contact the administration.
             </div>
           </div>
