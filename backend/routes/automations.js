@@ -315,4 +315,94 @@ router.post('/trigger-progress-report', protect, authorize('SuperAdmin'), async 
   }
 });
 
+// @desc    Send custom announcement email class-wise or student-wise
+// @route   POST /api/automations/send-custom-email
+// @access  Private (SuperAdmin only)
+router.post('/send-custom-email', protect, authorize('SuperAdmin'), async (req, res, next) => {
+  try {
+    const { target, class_level, student_id, subject, body } = req.body;
+
+    if (!subject || !body) {
+      res.status(400);
+      throw new Error('Please provide both subject and body for the email');
+    }
+
+    let recipients = [];
+
+    if (target === 'class') {
+      if (!class_level) {
+        res.status(400);
+        throw new Error('Please specify class_level');
+      }
+      const students = await Student.find({ class_level, status: 'Active' });
+      if (students.length === 0) {
+        res.status(404);
+        throw new Error(`No active students found in Class ${class_level}`);
+      }
+      recipients = students;
+    } else if (target === 'student') {
+      if (!student_id) {
+        res.status(400);
+        throw new Error('Please specify student_id');
+      }
+      const student = await Student.findById(student_id);
+      if (!student) {
+        res.status(404);
+        throw new Error('Student not found');
+      }
+      recipients = [student];
+    } else {
+      res.status(400);
+      throw new Error('Invalid send target. Must be class or student');
+    }
+
+    let sentCount = 0;
+    const sentList = [];
+
+    for (const student of recipients) {
+      const studentUser = await User.findOne({ studentProfile: student._id });
+      const parentEmail = studentUser ? studentUser.email : `${student.parent_name.toLowerCase().replace(/\s+/g, '')}@example.com`;
+
+      await sendEmail({
+        from: '"EduStride Admin" <admin@edustride.com>',
+        to: parentEmail,
+        subject: subject,
+        text: `Dear ${student.parent_name},\n\n${body}\n\nBest regards,\nEduStride Administration`,
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 12px; background-color: #ffffff; color: #1a202c;">
+            <div style="text-align: center; border-bottom: 2px solid #6366f1; padding-bottom: 15px; margin-bottom: 20px;">
+              <h2 style="color: #4f46e5; margin: 0; font-size: 22px;">EduStride Academic Announcement</h2>
+            </div>
+            
+            <p>Dear <strong>${student.parent_name}</strong> (Parent of ${student.name}),</p>
+            <div style="line-height: 1.6; margin: 20px 0; font-size: 14px; white-space: pre-line; color: #2d3748;">
+              ${body}
+            </div>
+            
+            <div style="font-size: 11px; color: #a0aec0; text-align: center; border-top: 1px solid #edf2f7; padding-top: 15px; margin-top: 30px;">
+              This is a direct administrative communication broadcasted from your school portal.<br>
+              Please do not reply directly to this email. For any queries, contact the administration.
+            </div>
+          </div>
+        `
+      });
+
+      sentCount++;
+      sentList.push({
+        studentName: student.name,
+        parentName: student.parent_name,
+        email: parentEmail
+      });
+    }
+
+    res.json({
+      success: true,
+      message: `Custom email sent successfully to ${sentCount} recipient(s).`,
+      data: sentList
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 export default router;

@@ -32,6 +32,107 @@ const AutomationsPanel = () => {
   const [timetableError, setTimetableError] = useState('');
   const [timetableSuccess, setTimetableSuccess] = useState('');
 
+  // Selected class for syllabus tracking
+  const [syllabusClass, setSyllabusClass] = useState('');
+  const [classes, setClasses] = useState([]);
+
+  // Class Management State
+  const [newClassName, setNewClassName] = useState('');
+  const [classError, setClassError] = useState('');
+  const [classSuccess, setClassSuccess] = useState('');
+  const [addingClass, setAddingClass] = useState(false);
+
+  // Core System State
+  const [systemMetrics, setSystemMetrics] = useState(null);
+  const [loadingMetrics, setLoadingMetrics] = useState(false);
+  const [triggeringNag, setTriggeringNag] = useState(false);
+  const [triggeringAttendance, setTriggeringAttendance] = useState(false);
+  const [triggeringProgress, setTriggeringProgress] = useState(false);
+  const [progressReportsLog, setProgressReportsLog] = useState([]);
+  const [systemMessage, setSystemMessage] = useState('');
+  const [systemError, setSystemError] = useState('');
+
+  // Custom Email Dispatcher States
+  const [studentsList, setStudentsList] = useState([]);
+  const [loadingStudentsList, setLoadingStudentsList] = useState(false);
+  const [emailTarget, setEmailTarget] = useState('class'); // 'class' or 'student'
+  const [emailClassLevel, setEmailClassLevel] = useState('');
+  const [emailStudentId, setEmailStudentId] = useState('');
+  const [emailSubject, setEmailSubject] = useState('');
+  const [emailBody, setEmailBody] = useState('');
+  const [dispatchingEmail, setDispatchingEmail] = useState(false);
+  const [emailSuccess, setEmailSuccess] = useState('');
+  const [emailError, setEmailError] = useState('');
+
+  const fetchStudentsList = async () => {
+    setLoadingStudentsList(true);
+    try {
+      const res = await axios.get('/api/students?limit=1000');
+      if (res.data.success) {
+        setStudentsList(res.data.data || []);
+      }
+    } catch (err) {
+      console.error('Failed to fetch students list:', err);
+    } finally {
+      setLoadingStudentsList(false);
+    }
+  };
+
+  useEffect(() => {
+    if (classes.length > 0 && !emailClassLevel) {
+      setEmailClassLevel(classes[0]);
+    }
+  }, [classes]);
+
+  useEffect(() => {
+    if (studentsList.length > 0 && !emailStudentId) {
+      setEmailStudentId(studentsList[0]._id);
+    }
+  }, [studentsList]);
+
+  const handleSendCustomEmail = async (e) => {
+    e.preventDefault();
+    setEmailError('');
+    setEmailSuccess('');
+    
+    if (!emailSubject.trim() || !emailBody.trim()) {
+      setEmailError('Please enter both subject and body.');
+      return;
+    }
+    
+    if (emailTarget === 'class' && !emailClassLevel) {
+      setEmailError('Please select a target class.');
+      return;
+    }
+    
+    if (emailTarget === 'student' && !emailStudentId) {
+      setEmailError('Please select a target student.');
+      return;
+    }
+    
+    setDispatchingEmail(true);
+    try {
+      const payload = {
+        target: emailTarget,
+        subject: emailSubject.trim(),
+        body: emailBody.trim(),
+        class_level: emailTarget === 'class' ? emailClassLevel : undefined,
+        student_id: emailTarget === 'student' ? emailStudentId : undefined
+      };
+      
+      const res = await axios.post('/api/automations/send-custom-email', payload);
+      if (res.data.success) {
+        setEmailSuccess(res.data.message || 'Announcement email sent successfully!');
+        setEmailSubject('');
+        setEmailBody('');
+      }
+    } catch (err) {
+      setEmailError(err.response?.data?.message || 'Failed to dispatch custom email.');
+    } finally {
+      setDispatchingEmail(false);
+    }
+  };
+
   // Sync temp slots when day is changed
   useEffect(() => {
     const dayData = timetable.find(t => t.day === editingDay);
@@ -96,25 +197,7 @@ const AutomationsPanel = () => {
     }
   };
 
-  // Selected class for syllabus tracking
-  const [syllabusClass, setSyllabusClass] = useState('');
-  const [classes, setClasses] = useState([]);
-
-  // Class Management State
-  const [newClassName, setNewClassName] = useState('');
-  const [classError, setClassError] = useState('');
-  const [classSuccess, setClassSuccess] = useState('');
-  const [addingClass, setAddingClass] = useState(false);
-
-  // Core System State
-  const [systemMetrics, setSystemMetrics] = useState(null);
-  const [loadingMetrics, setLoadingMetrics] = useState(false);
-  const [triggeringNag, setTriggeringNag] = useState(false);
-  const [triggeringAttendance, setTriggeringAttendance] = useState(false);
-  const [triggeringProgress, setTriggeringProgress] = useState(false);
-  const [progressReportsLog, setProgressReportsLog] = useState([]);
-  const [systemMessage, setSystemMessage] = useState('');
-  const [systemError, setSystemError] = useState('');
+  // All state declarations consolidated at the top of the component
 
   const fetchSystemMetrics = async () => {
     setLoadingMetrics(true);
@@ -203,6 +286,7 @@ const AutomationsPanel = () => {
     fetchClasses();
     fetchSystemMetrics();
     fetchTimetable();
+    fetchStudentsList();
   }, []);
 
   const handleAddClass = async (e) => {
@@ -476,6 +560,138 @@ const AutomationsPanel = () => {
                 </div>
               ))}
             </div>
+          </div>
+
+          {/* Custom Email Broadcaster Panel */}
+          <div className="glass-panel p-6 rounded-2xl border border-dark-800 space-y-4">
+            <h2 className="text-base font-bold text-white font-outfit flex items-center gap-2">
+              <Mail className="text-primary-500" size={18} />
+              <span>Direct Mail Communicator</span>
+            </h2>
+            <p className="text-xs text-slate-400">Broadcast customized administrative announcements and emails directly to parent portals.</p>
+
+            {emailError && (
+              <div className="p-3.5 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-400 text-xs font-medium animate-fadeIn">
+                {emailError}
+              </div>
+            )}
+            {emailSuccess && (
+              <div className="p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-medium animate-fadeIn">
+                {emailSuccess}
+              </div>
+            )}
+
+            <form onSubmit={handleSendCustomEmail} className="space-y-4">
+              {/* Target Selection toggles */}
+              <div>
+                <label className="block text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-2">Send Broadcast Target</label>
+                <div className="flex gap-2 p-1 bg-dark-900 border border-dark-850 rounded-xl max-w-xs">
+                  <button
+                    type="button"
+                    onClick={() => { setEmailTarget('class'); setEmailError(''); setEmailSuccess(''); }}
+                    className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all duration-200 ${
+                      emailTarget === 'class'
+                        ? 'bg-primary-600 text-white shadow-md'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    Class-wise
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setEmailTarget('student'); setEmailError(''); setEmailSuccess(''); }}
+                    className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all duration-200 ${
+                      emailTarget === 'student'
+                        ? 'bg-primary-600 text-white shadow-md'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    Student-wise
+                  </button>
+                </div>
+              </div>
+
+              {/* Conditional dropdown selects */}
+              {emailTarget === 'class' ? (
+                <div>
+                  <label className="block text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Select Class Level</label>
+                  <select
+                    value={emailClassLevel}
+                    onChange={(e) => setEmailClassLevel(e.target.value)}
+                    className="w-full max-w-md px-3.5 py-2.5 rounded-xl bg-dark-900 border border-dark-850 focus:border-primary-500 text-white text-xs outline-none transition cursor-pointer"
+                  >
+                    <option value="" disabled>-- Select Class --</option>
+                    {classes.map(c => (
+                      <option key={c} value={c}>Class {c}</option>
+                    ))}
+                  </select>
+                </div>
+              ) : (
+                <div>
+                  <label className="block text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Select Student</label>
+                  {loadingStudentsList ? (
+                    <div className="text-slate-500 text-xs">Loading students...</div>
+                  ) : (
+                    <select
+                      value={emailStudentId}
+                      onChange={(e) => setEmailStudentId(e.target.value)}
+                      className="w-full max-w-md px-3.5 py-2.5 rounded-xl bg-dark-900 border border-dark-850 focus:border-primary-500 text-white text-xs outline-none transition cursor-pointer"
+                    >
+                      <option value="" disabled>-- Select Student --</option>
+                      {studentsList.map(s => (
+                        <option key={s._id} value={s._id}>
+                          {s.name} (Class {s.class_level}, Roll {s.roll_number})
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </div>
+              )}
+
+              {/* Subject */}
+              <div>
+                <label className="block text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Email Subject</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="Enter notice / mail subject"
+                  value={emailSubject}
+                  onChange={(e) => setEmailSubject(e.target.value)}
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-dark-900 border border-dark-850 focus:border-primary-500 text-white text-xs outline-none transition"
+                />
+              </div>
+
+              {/* Body */}
+              <div>
+                <label className="block text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Email Message Body</label>
+                <textarea
+                  required
+                  rows={5}
+                  placeholder="Write message details here..."
+                  value={emailBody}
+                  onChange={(e) => setEmailBody(e.target.value)}
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-dark-900 border border-dark-850 focus:border-primary-500 text-white text-xs outline-none transition font-sans resize-y"
+                />
+              </div>
+
+              <button
+                type="submit"
+                disabled={dispatchingEmail}
+                className="px-5 py-2.5 bg-gradient-to-r from-primary-600 to-indigo-600 hover:from-primary-500 hover:to-indigo-500 disabled:opacity-50 text-white text-xs font-semibold rounded-xl transition duration-150 flex items-center justify-center gap-1.5 shadow-md shadow-primary-500/10 cursor-pointer"
+              >
+                {dispatchingEmail ? (
+                  <>
+                    <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    <span>Sending Broadcast...</span>
+                  </>
+                ) : (
+                  <>
+                    <Mail size={14} />
+                    <span>Send Announcement Email</span>
+                  </>
+                )}
+              </button>
+            </form>
           </div>
         </div>
 
