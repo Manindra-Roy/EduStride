@@ -1,20 +1,7 @@
 import cron from 'node-cron';
-import nodemailer from 'nodemailer';
+import { sendEmail } from './mailService.js';
 import Student from '../models/Student.js';
 import FeeLedger from '../models/FeeLedger.js';
-
-// Setup Mock/Real Nodemailer Transporter
-const getTransporter = () => {
-  return nodemailer.createTransport({
-    host: process.env.EMAIL_HOST || 'smtp.ethereal.email',
-    port: process.env.EMAIL_PORT || 587,
-    secure: false,
-    auth: {
-      user: process.env.EMAIL_USER || 'mock_user',
-      pass: process.env.EMAIL_PASS || 'mock_password'
-    }
-  });
-};
 
 export const initCronJobs = () => {
   console.log('Initializing background cron jobs...');
@@ -38,8 +25,6 @@ export const initCronJobs = () => {
         }
       }).populate('student_id');
 
-      const transporter = getTransporter();
-
       for (const ledger of unpaidLedgers) {
         if (ledger.student_id && ledger.student_id.status === 'Active') {
           const student = ledger.student_id;
@@ -52,7 +37,7 @@ export const initCronJobs = () => {
             text: `Dear ${student.parent_name},\n\nThis is a friendly reminder that the tuition fee of ₹${student.monthly_fee || 1500} for ${student.name} (Class ${student.class_level}, Roll No ${student.roll_number}) for the month of ${currentMonthName} is currently UNPAID. Please clear the outstanding balance via the student portal at your earliest convenience.\n\nBest regards,\nSchool Administration`
           };
 
-          await transporter.sendMail(mailOptions);
+          await sendEmail(mailOptions);
           console.log(`[Fee Nagging] Sent reminder to ${student.parent_name} (${parentEmail}) for student ${student.name}`);
         }
       }
@@ -68,7 +53,6 @@ export const initCronJobs = () => {
     try {
       const currentMonthStr = new Date().toISOString().substring(0, 7); // format: YYYY-MM
       const students = await Student.find({ status: 'Active' });
-      const transporter = getTransporter();
 
       for (const student of students) {
         const monthlyAttendance = student.attendance_history.find(h => h.month === currentMonthStr);
@@ -83,7 +67,7 @@ export const initCronJobs = () => {
               text: `Dear ${student.parent_name},\n\nWe are writing to inform you that your ward, ${student.name} (Class ${student.class_level}, Roll No ${student.roll_number}), has a running attendance rate of ${rate.toFixed(1)}% for this month. This is below the required 75% threshold.\n\nPlease ensure they attend regular sessions. Feel free to contact the class teacher if you have any queries.\n\nBest regards,\nAcademic Coordinator`
             };
 
-            await transporter.sendMail(mailOptions);
+            await sendEmail(mailOptions);
             console.log(`[Attendance Alert] Sent warning to ${student.parent_name} (${parentEmail}) for ${student.name} (${rate.toFixed(1)}%)`);
           }
         }

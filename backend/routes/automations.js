@@ -1,7 +1,7 @@
 import express from 'express';
 import os from 'os';
 import mongoose from 'mongoose';
-import nodemailer from 'nodemailer';
+import { sendEmail, verifyMailConfig } from '../services/mailService.js';
 import { protect, authorize } from '../middleware/auth.js';
 import Student from '../models/Student.js';
 import User from '../models/User.js';
@@ -11,23 +11,9 @@ import ClassLevel from '../models/ClassLevel.js';
 
 const router = express.Router();
 
-// Helper to test nodemailer connection
+// Helper to test mail service configuration
 const testMailerConfig = async () => {
-  try {
-    const transporter = nodemailer.createTransport({
-      host: process.env.EMAIL_HOST || 'smtp.ethereal.email',
-      port: process.env.EMAIL_PORT || 587,
-      secure: false,
-      auth: {
-        user: process.env.EMAIL_USER || 'mock_user',
-        pass: process.env.EMAIL_PASS || 'mock_password'
-      }
-    });
-    await transporter.verify();
-    return 'Operational (Connected)';
-  } catch (err) {
-    return `SMTP Offline: ${err.message}`;
-  }
+  return await verifyMailConfig();
 };
 
 // @desc    Get core system metrics and connection status
@@ -88,16 +74,6 @@ router.post('/trigger-fee-nag', protect, authorize('SuperAdmin'), async (req, re
       }
     }).populate('student_id');
 
-    const transporter = nodemailer.createTransport({
-      host: process.env.EMAIL_HOST || 'smtp.ethereal.email',
-      port: process.env.EMAIL_PORT || 587,
-      secure: false,
-      auth: {
-        user: process.env.EMAIL_USER || 'mock_user',
-        pass: process.env.EMAIL_PASS || 'mock_password'
-      }
-    });
-
     let sentCount = 0;
     for (const ledger of unpaidLedgers) {
       if (ledger.student_id && ledger.student_id.status === 'Active') {
@@ -112,7 +88,7 @@ router.post('/trigger-fee-nag', protect, authorize('SuperAdmin'), async (req, re
           text: `Dear ${student.parent_name},\n\nThis is a friendly reminder that the tuition fee of ₹${student.monthly_fee || 1500} for ${student.name} (Class ${student.class_level}, Roll No ${student.roll_number}) for the month of ${currentMonthName} is currently UNPAID. Please clear the outstanding balance via the student portal at your earliest convenience.\n\nBest regards,\nEduStride Administration`
         };
 
-        await transporter.sendMail(mailOptions);
+        await sendEmail(mailOptions);
         sentCount++;
       }
     }
@@ -134,16 +110,6 @@ router.post('/trigger-attendance-alert', protect, authorize('SuperAdmin'), async
     const currentMonthStr = new Date().toISOString().substring(0, 7);
     const students = await Student.find({ status: 'Active' });
     
-    const transporter = nodemailer.createTransport({
-      host: process.env.EMAIL_HOST || 'smtp.ethereal.email',
-      port: process.env.EMAIL_PORT || 587,
-      secure: false,
-      auth: {
-        user: process.env.EMAIL_USER || 'mock_user',
-        pass: process.env.EMAIL_PASS || 'mock_password'
-      }
-    });
-
     let sentCount = 0;
     for (const student of students) {
       const monthlyAttendance = student.attendance_history.find(h => h.month === currentMonthStr);
@@ -159,7 +125,7 @@ router.post('/trigger-attendance-alert', protect, authorize('SuperAdmin'), async
             text: `Dear ${student.parent_name},\n\nWe are writing to inform you that your ward, ${student.name} (Class ${student.class_level}, Roll No ${student.roll_number}), has a running attendance rate of ${rate.toFixed(1)}% for this month. This is below the required 75% threshold.\n\nPlease ensure they attend regular sessions. Feel free to contact the class teacher if you have any queries.\n\nBest regards,\nEduStride Academic Office`
           };
 
-          await transporter.sendMail(mailOptions);
+          await sendEmail(mailOptions);
           sentCount++;
         }
       }
@@ -191,15 +157,7 @@ router.post('/trigger-progress-report', protect, authorize('SuperAdmin'), async 
     // Fetch all active students
     const allStudents = await Student.find({ status: 'Active' });
 
-    const transporter = nodemailer.createTransport({
-      host: process.env.EMAIL_HOST || 'smtp.ethereal.email',
-      port: process.env.EMAIL_PORT || 587,
-      secure: false,
-      auth: {
-        user: process.env.EMAIL_USER || 'mock_user',
-        pass: process.env.EMAIL_PASS || 'mock_password'
-      }
-    });
+    // Transporter initialization removed, handled in sendEmail
 
     const logs = [];
     let sentCount = 0;
@@ -319,7 +277,7 @@ router.post('/trigger-progress-report', protect, authorize('SuperAdmin'), async 
         `
       };
 
-      await transporter.sendMail(mailOptions);
+      await sendEmail(mailOptions);
 
       // 7. Simulate WhatsApp sending (print details into console log)
       const whatsappText = `📝 *Monthly Progress Report* 📝\n\nDear *${student.parent_name}*,\nHere is the academic progress report for *${student.name}* (Class *${student.class_level}*, Roll *${student.roll_number}*) for *${currentMonthName}*:\n\n📊 *Academic Performance:*\n- Tests Conducted: *${testCount}*\n- Average Score: *${averagePercentage}%*\n\n📅 *Attendance Status:*\n- Attended: *${attended}* / *${totalClasses}* classes (${attendanceRate}%)\n- Compliance: *${attendanceRate >= 75 ? 'Yes' : 'Low Attendance Alert' }*\n\nPlease log in to the student portal to view detailed gradebooks and schedules.\nBest regards,\n*EduStride Academic Center*`;
