@@ -3,6 +3,7 @@ import { useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { Mail, Lock, UserCheck, ArrowRight, GraduationCap, ShieldAlert, CheckCircle2, Trash2, Users, UserPlus, Edit, BookOpen } from 'lucide-react';
 import Logo from '../components/Logo';
+import Footer from '../components/Footer';
 import axios from 'axios';
 
 const Register = () => {
@@ -816,6 +817,8 @@ const Register = () => {
             </>
           )}
         </p>
+
+        {!user && <Footer className="border-t-0 mt-8 pt-4 justify-center sm:flex-col sm:gap-2 opacity-75" />}
       </div>
     </div>
   );

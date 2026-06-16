@@ -3,6 +3,7 @@ import { useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { Mail, Lock, ArrowRight, GraduationCap } from 'lucide-react';
 import Logo from '../components/Logo';
+import Footer from '../components/Footer';
 
 const Login = () => {
   const [email, setEmail] = useState('');
@@ -106,13 +107,15 @@ const Login = () => {
           </form>
         </div>
 
-        {/* Footer */}
+        {/* Footer Link */}
         <p className="text-center text-slate-400 text-sm mt-6">
           Need student access?{' '}
           <Link to="/register" className="text-primary-400 hover:text-primary-300 font-semibold transition">
             Register Student Profile
           </Link>
         </p>
+
+        <Footer className="border-t-0 mt-8 pt-4 justify-center sm:flex-col sm:gap-2 opacity-75" />
       </div>
     </div>
   );

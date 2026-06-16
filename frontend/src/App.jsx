@@ -4,6 +4,8 @@ import { AuthProvider, useAuth } from './context/AuthContext';
 import Sidebar from './components/Sidebar';
 import Preloader from './components/Preloader';
 import Logo from './components/Logo';
+import Footer from './components/Footer';
+import PageTitleUpdater from './components/PageTitleUpdater';
 import { Menu, X } from 'lucide-react';
 
 // Pages
@@ -69,7 +71,7 @@ const Layout = () => {
 
         {/* Scrollable Main Area */}
         <main className="flex-1 p-4 md:p-6 lg:p-8 overflow-y-auto relative flex flex-col">
-          <div className="flex-1 max-w-7xl w-full mx-auto pb-12">
+          <div className="max-w-7xl w-full mx-auto pb-12">
             <Routes>
               <Route path="/" element={<Dashboard />} />
               <Route path="/class/:class_level" element={<ClassGrid />} />
@@ -88,6 +90,7 @@ const Layout = () => {
               } />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
+            <Footer />
           </div>
         </main>
       </div>
@@ -105,6 +108,7 @@ const AppContent = () => {
         <Preloader loading={loading} onFinished={() => setShowPreloader(false)} />
       )}
       <Router>
+        <PageTitleUpdater />
         <Routes>
           <Route path="/login" element={<Login />} />
           {!user ? (
