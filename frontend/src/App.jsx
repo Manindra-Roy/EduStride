@@ -1,12 +1,15 @@
-import React, { useState } from 'react';
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import React, { useState, useEffect } from 'react';
+import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
+import { CallProvider } from './context/CallContext';
 import Sidebar from './components/Sidebar';
 import Preloader from './components/Preloader';
 import Logo from './components/Logo';
 import Footer from './components/Footer';
 import PageTitleUpdater from './components/PageTitleUpdater';
 import { Menu, X } from 'lucide-react';
+import { applyThemeAccent, getSavedThemeAccent } from './config/theme';
+import axios from 'axios';
 
 // Pages
 import Login from './pages/Login';
@@ -38,6 +41,9 @@ const ProtectedRoute = ({ children, allowedRoles }) => {
 
 const Layout = () => {
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const location = useLocation();
+
+  const isChatPage = location.pathname === '/chats';
 
   return (
     <div className="min-h-screen flex flex-col lg:flex-row bg-dark-950 text-slate-100 overflow-hidden relative">
@@ -70,8 +76,16 @@ const Layout = () => {
         </header>
 
         {/* Scrollable Main Area */}
-        <main className="flex-1 p-4 md:p-6 lg:p-8 overflow-y-auto relative flex flex-col">
-          <div className="max-w-7xl w-full mx-auto pb-12">
+        <main className={`flex-1 relative flex flex-col ${
+          isChatPage 
+            ? 'p-0 md:p-4 lg:p-6 overflow-hidden' 
+            : 'p-4 md:p-6 lg:p-8 overflow-y-auto'
+        }`}>
+          <div className={`w-full mx-auto flex flex-col ${
+            isChatPage 
+              ? 'max-w-7xl h-full pb-0' 
+              : 'max-w-7xl pb-12'
+          }`}>
             <Routes>
               <Route path="/" element={<Dashboard />} />
               <Route path="/class/:class_level" element={<ClassGrid />} />
@@ -90,7 +104,7 @@ const Layout = () => {
               } />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
-            <Footer />
+            {!isChatPage && <Footer />}
           </div>
         </main>
       </div>
@@ -102,24 +116,54 @@ const AppContent = () => {
   const { user, loading } = useAuth();
   const [showPreloader, setShowPreloader] = useState(true);
 
+  useEffect(() => {
+    const applyActiveTheme = async () => {
+      let activeColor = 'indigo'; // hard fallback
+      
+      try {
+        const sysResponse = await axios.get('/api/system/theme');
+        if (sysResponse.data.success) {
+          activeColor = sysResponse.data.theme_color;
+        }
+      } catch (err) {
+        console.error('Failed to fetch system default theme', err);
+      }
+
+      if (user && user.theme_color) {
+        activeColor = user.theme_color;
+      } else {
+        const localColor = localStorage.getItem('edustride_theme_color');
+        if (localColor) {
+          activeColor = localColor;
+        }
+      }
+
+      applyThemeAccent(activeColor);
+    };
+
+    applyActiveTheme();
+  }, [user]);
+
   return (
     <>
       {showPreloader && (
         <Preloader loading={loading} onFinished={() => setShowPreloader(false)} />
       )}
-      <Router>
+      <Router future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <PageTitleUpdater />
-        <Routes>
-          <Route path="/login" element={<Login />} />
-          {!user ? (
-            <Route path="/register" element={<Register />} />
-          ) : null}
-          <Route path="*" element={
-            <ProtectedRoute>
-              <Layout />
-            </ProtectedRoute>
-          } />
-        </Routes>
+        <CallProvider>
+          <Routes>
+            <Route path="/login" element={<Login />} />
+            {!user ? (
+              <Route path="/register" element={<Register />} />
+            ) : null}
+            <Route path="*" element={
+              <ProtectedRoute>
+                <Layout />
+              </ProtectedRoute>
+            } />
+          </Routes>
+        </CallProvider>
       </Router>
     </>
   );

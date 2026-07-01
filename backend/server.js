@@ -17,6 +17,7 @@ import classRoutes from './routes/classes.js';
 import subjectRoutes from './routes/subjects.js';
 import automationRoutes from './routes/automations.js';
 import timetableRoutes from './routes/timetable.js';
+import systemRoutes from './routes/system.js';
 import errorHandler from './middleware/error.js';
 import ChatMessage from './models/ChatMessage.js';
 import ClassLevel from './models/ClassLevel.js';
@@ -50,6 +51,7 @@ app.use('/api/classes', classRoutes);
 app.use('/api/subjects', subjectRoutes);
 app.use('/api/automations', automationRoutes);
 app.use('/api/timetable', timetableRoutes);
+app.use('/api/system', systemRoutes);
 
 // Chat History Router
 app.get('/api/chats/:class_level', async (req, res, next) => {

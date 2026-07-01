@@ -260,7 +260,7 @@ const Dashboard = () => {
         </div>
 
         {/* Dashboard Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           {/* Card 1: Attendance Gauge */}
           <div className="glass-panel p-6 rounded-2xl border border-dark-800 flex flex-col items-center justify-center text-center">
             <h3 className="text-slate-400 text-sm font-semibold uppercase tracking-wider mb-4 self-start">Monthly Attendance</h3>
@@ -294,35 +294,7 @@ const Dashboard = () => {
             </div>
           </div>
 
-          {/* Card 2: Tuition Standing */}
-          <div className="glass-panel p-6 rounded-2xl border border-dark-800 flex flex-col justify-between">
-            <div>
-              <h3 className="text-slate-400 text-sm font-semibold uppercase tracking-wider mb-4">Tuition Fees Ledger</h3>
-              <div className="flex items-center justify-between p-4 rounded-xl bg-dark-900/50 border border-dark-800">
-                <div>
-                  <span className="text-xs text-slate-400 block font-medium">Month of {currentMonthName}</span>
-                  <span className="text-lg font-bold text-white mt-1 block font-outfit">₹{(studentDetails?.monthly_fee || 1500).toLocaleString()}</span>
-                </div>
-                <span className={`px-2.5 py-1 rounded-lg text-xs font-bold ${
-                  currentFeeState.status === 'Paid' 
-                    ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' 
-                    : currentFeeState.status === 'Partial/Pending'
-                      ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
-                      : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
-                }`}>
-                  {currentFeeState.status}
-                </span>
-              </div>
-            </div>
-            <div className="mt-4 pt-4 border-t border-dark-800/60 flex items-center justify-between text-xs text-slate-400">
-              <span>Next Due: 10th of next month</span>
-              <a href="/fees" className="text-primary-400 hover:text-primary-300 font-semibold flex items-center">
-                Open Ledger <ChevronRight size={14} />
-              </a>
-            </div>
-          </div>
-
-          {/* Card 3: Syllabus Status */}
+          {/* Card 2: Syllabus Status */}
           <div className="glass-panel p-6 rounded-2xl border border-dark-800 flex flex-col justify-between">
             <div>
               <h3 className="text-slate-400 text-sm font-semibold uppercase tracking-wider mb-3">Syllabus Progress</h3>
@@ -839,28 +811,36 @@ const Dashboard = () => {
 
   return (
     <div className="space-y-6">
-      {/* Welcome & Stats Row */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-        <div className="flex items-center gap-4">
+      {/* Welcome & Stats Row - Redesigned to be a gorgeous premium header card */}
+      <div className="relative overflow-hidden rounded-2xl bg-gradient-to-r from-primary-900/40 via-dark-900/30 to-indigo-900/20 border border-dark-800/80 p-6 sm:p-8 shadow-xl flex flex-col md:flex-row md:items-center justify-between gap-6">
+        <div className="absolute top-0 right-0 p-8 opacity-10 pointer-events-none">
+          <Sparkles size={160} className="text-primary-500" />
+        </div>
+        <div className="relative z-10 flex items-center gap-4 animate-fadeIn">
           {user?.profile_pic ? (
             <img 
               src={user.profile_pic} 
               alt="Profile" 
-              className="w-12 h-12 rounded-xl object-cover border border-primary-500/25 shadow-md shadow-primary-500/5 animate-fadeIn"
+              className="w-16 h-16 rounded-2xl object-cover border-2 border-primary-500/25 shadow-md shadow-primary-500/5"
             />
           ) : (
-            <div className="w-12 h-12 rounded-xl bg-gradient-to-tr from-primary-600 to-indigo-400 flex items-center justify-center font-bold text-white text-lg shadow-md animate-fadeIn">
+            <div className="w-16 h-16 rounded-2xl bg-gradient-to-tr from-primary-600 to-indigo-400 flex items-center justify-center font-bold text-white text-2xl shadow-md">
               {user?.email[0].toUpperCase()}
             </div>
           )}
           <div>
-            <h1 className="text-2xl font-bold tracking-tight text-white font-outfit">EduStride Admin Center</h1>
-            <p className="text-slate-400 text-sm mt-1">Hello, {user?.role}! System Overview & Revenue Analytics</p>
+            <span className="px-2.5 py-1 rounded-md text-[10px] font-extrabold uppercase tracking-widest bg-primary-500/10 text-primary-400 border border-primary-500/20">
+              System Command
+            </span>
+            <h1 className="text-3xl font-extrabold tracking-tight text-white font-outfit mt-1">EduStride Control Center</h1>
+            <p className="text-slate-400 text-xs sm:text-sm max-w-2xl mt-0.5 font-medium">
+              Welcome back, {user?.role}! Inspect live student counts, financial metrics, and operational dashboards.
+            </p>
           </div>
         </div>
-        <div className="text-xs text-slate-400 flex items-center gap-2">
-          <Calendar size={14} />
-          <span>System running on: {new Date().toLocaleDateString(undefined, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</span>
+        <div className="relative z-10 text-xs text-slate-400 flex items-center gap-2 bg-dark-950/40 border border-dark-800/80 px-3.5 py-2 rounded-xl h-fit shrink-0 self-start md:self-center font-mono">
+          <Calendar size={14} className="text-primary-500" />
+          <span>{new Date().toLocaleDateString(undefined, { weekday: 'short', year: 'numeric', month: 'short', day: 'numeric' })}</span>
         </div>
       </div>
 
@@ -920,8 +900,8 @@ const Dashboard = () => {
         {/* Class distribution charts */}
         <div className="glass-panel p-6 rounded-2xl border border-dark-800 lg:col-span-2">
           <h3 className="text-white text-base font-bold font-outfit mb-4">Class Enrollment Ratios</h3>
-          <div className="h-64 flex flex-col md:flex-row items-center justify-around gap-4">
-            <div className="w-full md:w-1/2 h-full">
+          <div className="flex flex-col md:flex-row items-center justify-around gap-4">
+            <div className="w-full md:w-1/2 h-64">
               <ResponsiveContainer width="100%" height="100%">
                 <PieChart>
                   <Pie

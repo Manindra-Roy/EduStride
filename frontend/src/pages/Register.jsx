@@ -41,6 +41,9 @@ const Register = () => {
   const [students, setStudents] = useState([]);
   const [loadingStudents, setLoadingStudents] = useState(false);
   const [deletingStudentId, setDeletingStudentId] = useState(null);
+  const [editingStudentId, setEditingStudentId] = useState(null);
+  const [editStudentEmail, setEditStudentEmail] = useState('');
+  const [updatingStudentEmail, setUpdatingStudentEmail] = useState(false);
 
   const fetchClasses = async () => {
     try {
@@ -215,6 +218,26 @@ const Register = () => {
     }
   }, [user, activeTab]);
 
+  const handleUpdateStudentEmail = async (e, studentUserId) => {
+    e.preventDefault();
+    if (!editStudentEmail.trim()) return;
+    setUpdatingStudentEmail(true);
+    setError('');
+    setSuccess('');
+    try {
+      const res = await axios.put(`/api/auth/students/${studentUserId}/email`, { email: editStudentEmail.trim().toLowerCase() });
+      if (res.data.success) {
+        setSuccess('Student email/login ID updated successfully');
+        setEditingStudentId(null);
+        fetchStudents();
+      }
+    } catch (err) {
+      setError(err.response?.data?.message || 'Failed to update student login ID');
+    } finally {
+      setUpdatingStudentEmail(false);
+    }
+  };
+
   const handleDeleteStudentAccount = async (studentUserId, studentEmail) => {
     if (!window.confirm(`Are you sure you want to delete the student login account for ${studentEmail}? The student profile (grades, attendance, ledger) will remain intact, but their portal access will be revoked.`)) {
       return;
@@ -318,27 +341,32 @@ const Register = () => {
       )}
 
       <div className={`w-full ${user && (user.role === 'SuperAdmin' || user.role === 'Teacher') && (activeTab === 'teachers' || activeTab === 'students' || activeTab === 'classes') ? 'max-w-5xl' : 'max-w-md'} z-10 mx-auto transition-all duration-300`}>
-        <div className="flex flex-col items-center mb-6">
-          <div className="bg-primary-600/10 p-2 rounded-2xl border border-primary-500/20 glow-indigo mb-3">
-            {!user ? (
-              <Logo size={56} className="bg-dark-900/30 rounded-xl" />
-            ) : (user.role === 'SuperAdmin' || user.role === 'Teacher') && activeTab === 'students' ? (
-              <GraduationCap className="text-primary-500" size={32} />
-            ) : user.role === 'SuperAdmin' && activeTab === 'teachers' ? (
-              <Users className="text-primary-500" size={32} />
-            ) : user.role === 'SuperAdmin' && activeTab === 'classes' ? (
-              <BookOpen className="text-primary-500" size={32} />
-            ) : (
-              <GraduationCap className="text-primary-500" size={32} />
-            )}
+        {user ? (
+          <div className="relative overflow-hidden rounded-2xl bg-gradient-to-r from-primary-900/40 via-dark-900/30 to-indigo-900/20 border border-dark-800/80 p-6 sm:p-8 shadow-xl mb-6">
+            <div className="absolute top-0 right-0 p-8 opacity-10 pointer-events-none">
+              <Users size={160} className="text-primary-500" />
+            </div>
+            <div className="relative z-10 space-y-2">
+              <span className="px-2.5 py-1 rounded-md text-[10px] font-extrabold uppercase tracking-widest bg-primary-500/10 text-primary-400 border border-primary-500/20">
+                Administration Hub
+              </span>
+              <h1 className="text-3xl font-extrabold tracking-tight text-white font-outfit mt-1">
+                {activeTab === 'teachers' ? 'Provision Faculty' : activeTab === 'students' ? 'Provision Students' : activeTab === 'classes' ? 'Configure Classes' : 'System Administration'}
+              </h1>
+              <p className="text-slate-400 text-xs sm:text-sm max-w-2xl">
+                {activeTab === 'teachers' ? 'Provision educator logins, revoke credentials, and audit active teachers.' : activeTab === 'students' ? 'Provision student login credentials, update student profiles, and manage enrollment Gmail IDs.' : activeTab === 'classes' ? 'Add new class levels, track course sections, and inspect dynamic student distributions.' : 'Manage institution records and system-wide configurations.'}
+              </p>
+            </div>
           </div>
-          <h2 className="text-3xl font-extrabold text-white tracking-tight font-outfit">
-            {!user ? 'Initialize Portal' : activeTab === 'teachers' ? 'Manage Educators' : activeTab === 'students' ? 'Manage Students' : activeTab === 'classes' ? 'Manage Classes' : 'Provision Account'}
-          </h2>
-          <p className="text-slate-400 mt-1 text-sm font-medium">
-            {!user ? 'Setup the single SuperAdmin account' : activeTab === 'teachers' ? 'Overview & deprovision of faculty members' : activeTab === 'students' ? 'Overview & deprovision of student accounts' : activeTab === 'classes' ? 'Configure, rename, and add dynamic class levels' : `Logged in as: ${user.role}`}
-          </p>
-        </div>
+        ) : (
+          <div className="flex flex-col items-center mb-6 animate-fadeIn">
+            <div className="bg-primary-600/10 p-2 rounded-2xl border border-primary-500/20 glow-indigo mb-3">
+              <Logo size={56} className="bg-dark-900/30 rounded-xl" />
+            </div>
+            <h2 className="text-3xl font-extrabold text-white tracking-tight font-outfit">Initialize Intranet Portal</h2>
+            <p className="text-slate-400 mt-1 text-sm font-medium">Setup the root SuperAdmin system account</p>
+          </div>
+        )}
 
         <div className="glass-panel p-8 rounded-2xl border border-dark-800 shadow-2xl relative">
           <div className="absolute inset-0 bg-gradient-to-b from-white/5 to-transparent pointer-events-none rounded-2xl" />
@@ -540,60 +568,106 @@ const Register = () => {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-dark-800/60">
-                      {students.map((studentAccount) => (
-                        <tr key={studentAccount._id} className="hover:bg-dark-900/30 transition-colors">
-                          <td className="py-3.5 px-4">
-                            <div className="flex items-center gap-3">
-                              {studentAccount.profile_pic ? (
-                                <img
-                                  src={studentAccount.profile_pic}
-                                  alt="Avatar"
-                                  className="w-8 h-8 rounded-lg object-cover border border-primary-500/20"
-                                />
+                      {students.map((studentAccount) => {
+                        const isEditing = editingStudentId === studentAccount._id;
+                        return (
+                          <tr key={studentAccount._id} className="hover:bg-dark-900/30 transition-colors">
+                            <td className="py-3.5 px-4">
+                              <div className="flex items-center gap-3">
+                                {studentAccount.profile_pic ? (
+                                  <img
+                                    src={studentAccount.profile_pic}
+                                    alt="Avatar"
+                                    className="w-8 h-8 rounded-lg object-cover border border-primary-500/20"
+                                  />
+                                ) : (
+                                  <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-primary-600 to-indigo-400 flex items-center justify-center font-bold text-white text-xs">
+                                    {studentAccount.email[0].toUpperCase()}
+                                  </div>
+                                )}
+                                <div className="flex-1">
+                                  {isEditing ? (
+                                    <form onSubmit={(e) => handleUpdateStudentEmail(e, studentAccount._id)} className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 max-w-md" onClick={(e) => e.stopPropagation()}>
+                                      <input
+                                        type="email"
+                                        required
+                                        value={editStudentEmail}
+                                        onChange={(e) => setEditStudentEmail(e.target.value)}
+                                        className="px-2 py-1 rounded bg-dark-950 border border-dark-800 text-white text-xs outline-none focus:border-primary-500 w-full sm:w-64"
+                                        placeholder="New login/email address"
+                                      />
+                                      <div className="flex items-center gap-1.5 shrink-0">
+                                        <button
+                                          type="submit"
+                                          disabled={updatingStudentEmail}
+                                          className="px-2 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-[10px] font-bold"
+                                        >
+                                          {updatingStudentEmail ? 'Saving...' : 'Save'}
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => setEditingStudentId(null)}
+                                          className="px-2 py-1 bg-dark-800 hover:bg-dark-750 text-slate-350 rounded text-[10px] font-bold"
+                                        >
+                                          Cancel
+                                        </button>
+                                      </div>
+                                    </form>
+                                  ) : (
+                                    <>
+                                      <span className="text-white font-semibold block">{studentAccount.email}</span>
+                                      <span className="text-[10px] text-slate-400 block mt-0.5 font-medium">
+                                        Profile: {studentAccount.studentProfile?.name || 'Unlinked/Generic'}
+                                      </span>
+                                    </>
+                                  )}
+                                </div>
+                              </div>
+                            </td>
+                            <td className="py-3.5 px-4 text-slate-300 font-mono hidden sm:table-cell">
+                              {studentAccount.studentProfile ? (
+                                <span>Class {studentAccount.studentProfile.class_level} • Roll {studentAccount.studentProfile.roll_number}</span>
                               ) : (
-                                <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-primary-600 to-indigo-400 flex items-center justify-center font-bold text-white text-xs">
-                                  {studentAccount.email[0].toUpperCase()}
+                                <span className="text-slate-500 font-sans italic">Not bound</span>
+                              )}
+                            </td>
+                            <td className="py-3.5 px-4 text-slate-400 font-mono hidden md:table-cell">
+                              {new Date(studentAccount.createdAt).toLocaleDateString(undefined, {
+                                year: 'numeric',
+                                month: 'short',
+                                day: 'numeric'
+                              })}
+                            </td>
+                            <td className="py-3.5 px-4 text-right">
+                              {!isEditing && (
+                                <div className="flex justify-end gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={() => { setEditingStudentId(studentAccount._id); setEditStudentEmail(studentAccount.email); }}
+                                    className="p-2 rounded-lg bg-sky-500/10 hover:bg-sky-500/20 text-sky-400 hover:text-sky-400 transition-colors border border-sky-950/20"
+                                    title="Edit Student Login ID/Email"
+                                  >
+                                    <Edit size={14} className="text-sky-400" />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={deletingStudentId === studentAccount._id}
+                                    onClick={() => handleDeleteStudentAccount(studentAccount._id, studentAccount.email)}
+                                    className="p-2 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 hover:text-rose-400 transition-colors border border-rose-950/20 disabled:opacity-40"
+                                    title="Delete Student Account"
+                                  >
+                                    {deletingStudentId === studentAccount._id ? (
+                                      <div className="w-4 h-4 border-2 border-rose-500/30 border-t-rose-500 rounded-full animate-spin" />
+                                    ) : (
+                                      <Trash2 size={15} />
+                                    )}
+                                  </button>
                                 </div>
                               )}
-                              <div>
-                                <span className="text-white font-semibold block">{studentAccount.email}</span>
-                                <span className="text-[10px] text-slate-400 block mt-0.5 font-medium">
-                                  Profile: {studentAccount.studentProfile?.name || 'Unlinked/Generic'}
-                                </span>
-                              </div>
-                            </div>
-                          </td>
-                          <td className="py-3.5 px-4 text-slate-300 font-mono hidden sm:table-cell">
-                            {studentAccount.studentProfile ? (
-                              <span>Class {studentAccount.studentProfile.class_level} • Roll {studentAccount.studentProfile.roll_number}</span>
-                            ) : (
-                              <span className="text-slate-500 font-sans italic">Not bound</span>
-                            )}
-                          </td>
-                          <td className="py-3.5 px-4 text-slate-400 font-mono hidden md:table-cell">
-                            {new Date(studentAccount.createdAt).toLocaleDateString(undefined, {
-                              year: 'numeric',
-                              month: 'short',
-                              day: 'numeric'
-                            })}
-                          </td>
-                          <td className="py-3.5 px-4 text-right">
-                            <button
-                              type="button"
-                              disabled={deletingStudentId === studentAccount._id}
-                              onClick={() => handleDeleteStudentAccount(studentAccount._id, studentAccount.email)}
-                              className="p-2 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 hover:text-rose-400 transition-colors border border-rose-950/20 disabled:opacity-40"
-                              title="Delete Student Account"
-                            >
-                              {deletingStudentId === studentAccount._id ? (
-                                <div className="w-4 h-4 border-2 border-rose-500/30 border-t-rose-500 rounded-full animate-spin" />
-                              ) : (
-                                <Trash2 size={15} />
-                              )}
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
@@ -753,7 +827,7 @@ const Register = () => {
                   <p className="text-xs text-primary-400 font-medium">
                     Note: The student profile must already exist in the system (created in class lists) to bind.
                   </p>
-                  <div className="grid grid-cols-2 gap-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
                       <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">Class Level</label>
                       <select

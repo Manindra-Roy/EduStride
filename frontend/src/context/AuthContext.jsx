@@ -107,8 +107,12 @@ export const AuthProvider = ({ children }) => {
     setUser(prev => prev ? { ...prev, profile_pic } : null);
   };
 
+  const updateUserThemeColor = (theme_color) => {
+    setUser(prev => prev ? { ...prev, theme_color } : null);
+  };
+
   return (
-    <AuthContext.Provider value={{ user, token, loading, login, register, logout, updateUserProfilePic }}>
+    <AuthContext.Provider value={{ user, token, loading, login, register, logout, updateUserProfilePic, updateUserThemeColor }}>
       {children}
     </AuthContext.Provider>
   );

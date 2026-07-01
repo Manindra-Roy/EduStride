@@ -2,6 +2,19 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  --color-primary-50: #f4f5ff;
+  --color-primary-100: #ebeeff;
+  --color-primary-200: #dbe0ff;
+  --color-primary-300: #bfcbff;
+  --color-primary-400: #9baaff;
+  --color-primary-500: #6366f1;
+  --color-primary-600: #4f46e5;
+  --color-primary-700: #4338ca;
+  --color-primary-800: #3730a3;
+  --color-primary-950: #1e1b4b;
+}
+
 @layer base {
   body {
     @apply bg-dark-950 text-slate-100;
@@ -81,3 +94,12 @@
   background: radial-gradient(circle at 50% 50%, rgba(99, 102, 241, 0.15), transparent 50%);
   animation: glowPulse 8s infinite alternate;
 }
+
+/* EduStride Chat Wallpaper */
+.edustride-chat-bg {
+  background-color: #1b1c31;
+  background-image: radial-gradient(#2a2d53 0.8px, transparent 0.8px), radial-gradient(#2a2d53 0.8px, #1b1c31 0.8px);
+  background-size: 20px 20px;
+  background-position: 0 0, 10px 10px;
+}
+

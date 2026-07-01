@@ -25,6 +25,11 @@ const userSchema = new mongoose.Schema({
   profile_pic: {
     type: String,
     default: null
+  },
+  theme_color: {
+    type: String,
+    enum: ['indigo', 'emerald', 'amber', 'rose', 'violet', 'cyan'],
+    default: 'indigo'
   }
 }, {
   timestamps: true

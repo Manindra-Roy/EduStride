@@ -209,11 +209,19 @@ const LmsDownload = () => {
 
   return (
     <div className="space-y-6">
-      {/* Header and Add Button */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight text-white font-outfit">LMS Download & Notes Library</h1>
-          <p className="text-slate-400 text-sm mt-1">Access notes handouts, assignments, and curriculum updates</p>
+      {/* Header and Add Button - Redesigned to be a gorgeous premium header card */}
+      <div className="relative overflow-hidden rounded-2xl bg-gradient-to-r from-primary-900/40 via-dark-900/30 to-indigo-900/20 border border-dark-800/80 p-6 sm:p-8 shadow-xl flex flex-col md:flex-row md:items-center justify-between gap-6">
+        <div className="absolute top-0 right-0 p-8 opacity-10 pointer-events-none">
+          <BookOpen size={160} className="text-primary-500" />
+        </div>
+        <div className="relative z-10 space-y-2">
+          <span className="px-2.5 py-1 rounded-md text-[10px] font-extrabold uppercase tracking-widest bg-primary-500/10 text-primary-400 border border-primary-500/20">
+            LMS Library
+          </span>
+          <h1 className="text-3xl font-extrabold tracking-tight text-white font-outfit mt-1">Syllabus Handouts & Library</h1>
+          <p className="text-slate-400 text-xs sm:text-sm max-w-2xl">
+            Access chapter notes, assignments handouts, review curriculum pipeline logs, and download syllabus reference documents.
+          </p>
         </div>
 
         {user.role !== 'Student' && (
@@ -222,7 +230,7 @@ const LmsDownload = () => {
               setError('');
               setShowUploadModal(true);
             }}
-            className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-primary-600 hover:bg-primary-500 text-white font-medium text-xs transition duration-150 shadow-lg shadow-primary-500/10 self-start"
+            className="relative z-10 flex items-center gap-2 px-4 py-2.5 rounded-xl bg-primary-600 hover:bg-primary-500 active:bg-primary-750 text-white font-bold text-xs uppercase tracking-wide transition duration-150 shadow-lg shadow-primary-500/10 shrink-0 self-start md:self-center"
           >
             <Upload size={16} />
             <span>Publish Handouts</span>
@@ -231,10 +239,10 @@ const LmsDownload = () => {
       </div>
 
       {/* Filters Strip */}
-      <div className="glass-panel p-4 rounded-xl border border-dark-800 flex flex-col md:flex-row gap-4 items-center justify-between">
+      <div className="glass-panel p-4 rounded-xl border border-dark-800 flex flex-col md:flex-row gap-4 items-center justify-between shadow-md">
         <div className="flex items-center gap-2 text-xs font-semibold text-slate-400">
-          <Filter size={14} />
-          <span>Quick Filters</span>
+          <Filter size={14} className="text-primary-500" />
+          <span>Curriculum Filters</span>
         </div>
 
         <div className="flex flex-col md:flex-row gap-3 w-full md:w-auto">
@@ -243,7 +251,7 @@ const LmsDownload = () => {
             <select
               value={selectedClass}
               onChange={(e) => setSelectedClass(e.target.value)}
-              className="px-3 py-1.5 rounded-lg bg-dark-900 border border-dark-850 text-white text-xs outline-none"
+              className="px-3.5 py-2 rounded-xl bg-dark-900 border border-dark-800 text-white text-xs outline-none focus:border-primary-500 transition font-medium"
             >
               <option value="All">All Classes</option>
               {classes.map(c => <option key={c} value={c}>Class {c}</option>)}
@@ -254,7 +262,7 @@ const LmsDownload = () => {
           <select
             value={selectedSubject}
             onChange={(e) => setSelectedSubject(e.target.value)}
-            className="px-3 py-1.5 rounded-lg bg-dark-900 border border-dark-850 text-white text-xs outline-none"
+            className="px-3.5 py-2 rounded-xl bg-dark-900 border border-dark-800 text-white text-xs outline-none focus:border-primary-500 transition font-medium"
           >
             <option value="All">All Subjects</option>
             {filterSubjects.map(s => <option key={s} value={s}>{s}</option>)}
@@ -272,76 +280,87 @@ const LmsDownload = () => {
           No learning resources uploaded for the selected combination.
         </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {materials.map((material) => (
-            <div key={material._id} className="glass-panel p-5 rounded-2xl border border-dark-800 flex flex-col justify-between hover:border-dark-700 hover:shadow-xl transition-all duration-200">
-              <div className="space-y-4">
-                {/* Subject & Class Headers */}
-                <div className="flex justify-between items-center">
-                  <span className="px-2 py-0.5 rounded bg-primary-950/60 border border-primary-850/40 text-[10px] font-bold text-primary-400">
-                    {material.subject}
-                  </span>
-                  <span className="text-[10px] text-slate-500 font-bold uppercase">Class {material.class_level}</span>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 animate-fadeIn">
+          {materials.map((material) => {
+            const statusGlow = material.status === 'Drafting'
+              ? 'border-l-4 border-l-slate-500/60'
+              : material.status === 'Notes Distributed'
+                ? 'border-l-4 border-l-indigo-500/60 shadow-indigo-950/5'
+                : material.status === 'Assignment Assigned'
+                  ? 'border-l-4 border-l-amber-500/60 shadow-amber-950/5'
+                  : 'border-l-4 border-l-emerald-500/60 shadow-emerald-950/5';
+            return (
+              <div key={material._id} className={`glass-panel p-5 rounded-2xl border border-dark-800 flex flex-col justify-between hover:border-dark-700 hover:scale-[1.01] hover:shadow-xl transition-all duration-300 ${statusGlow}`}>
+                <div className="space-y-4">
+                  {/* Subject & Class Headers */}
+                  <div className="flex justify-between items-center">
+                    <span className="px-2 py-0.5 rounded bg-primary-950/60 border border-primary-850/40 text-[10px] font-bold text-primary-400">
+                      {material.subject}
+                    </span>
+                    <span className="text-[10px] text-slate-450 font-bold uppercase tracking-wider font-mono">Class {material.class_level}</span>
+                  </div>
+
+                  {/* Chapter Name & File Preview */}
+                  <div className="flex gap-3">
+                    <div className="p-3 bg-dark-900 rounded-xl border border-dark-850 text-primary-400 h-fit self-start shadow-inner">
+                      <FileText size={20} />
+                    </div>
+                    <div className="overflow-hidden">
+                      <h4 className="text-sm font-extrabold text-white leading-tight font-outfit">{material.chapter_name}</h4>
+                      <span className="text-[10px] text-slate-500 block mt-1 truncate max-w-[15rem] font-mono" title={material.file_name}>
+                        {material.file_name}
+                      </span>
+                    </div>
+                  </div>
                 </div>
 
-                {/* Chapter Name & File Preview */}
-                <div className="flex gap-3">
-                  <div className="p-3 bg-dark-900 rounded-xl border border-dark-850 text-primary-400 h-fit self-start">
-                    <FileText size={20} />
-                  </div>
+                {/* Status & Action Footer */}
+                <div className="mt-6 pt-4 border-t border-dark-800/80 flex items-center justify-between">
                   <div>
-                    <h4 className="text-sm font-bold text-white leading-tight">{material.chapter_name}</h4>
-                    <span className="text-[10px] text-slate-500 block mt-1 truncate max-w-[15rem]" title={material.file_name}>
-                      {material.file_name}
-                    </span>
+                    <span className="text-[9px] text-slate-500 block uppercase tracking-wider font-bold">Delivery State</span>
+                    {user.role !== 'Student' ? (
+                      <select
+                        value={material.status}
+                        onChange={(e) => handleStatusChange(material._id, e.target.value)}
+                        className={`px-2 py-0.5 mt-1 rounded text-[10px] font-bold border outline-none bg-dark-950 ${getStatusColor(material.status)}`}
+                      >
+                        {pipelineStates.map(state => <option key={state} value={state}>{state}</option>)}
+                      </select>
+                    ) : (
+                      <span className={`px-2.5 py-0.5 mt-1 rounded text-[10px] font-bold border inline-block ${getStatusColor(material.status)}`}>
+                        {material.status}
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="flex gap-2">
+                    {/* Download Action */}
+                    <a
+                      href={material.file_url}
+                      download={material.file_name}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="p-2 rounded-lg bg-dark-900 border border-dark-850 text-primary-400 hover:text-primary-300 hover:bg-dark-800 transition"
+                      title="Download document"
+                    >
+                      <FileDown size={14} />
+                    </a>
+
+                    {/* Delete Action (Admin/Teacher only) */}
+                    {user.role !== 'Student' && (
+                      <button
+                        onClick={() => handleDeleteMaterial(material._id)}
+                        className="p-2 rounded-lg bg-dark-900 border border-dark-850 text-rose-400 hover:text-rose-300 hover:bg-dark-800 transition"
+                        title="Delete handout"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>
-
-              {/* Status & Action Footer */}
-              <div className="mt-6 pt-4 border-t border-dark-800/80 flex items-center justify-between">
-                <div>
-                  <span className="text-[9px] text-slate-500 block uppercase tracking-wider font-semibold">Delivery State</span>
-                  {user.role !== 'Student' ? (
-                    <select
-                      value={material.status}
-                      onChange={(e) => handleStatusChange(material._id, e.target.value)}
-                      className={`px-2 py-0.5 mt-0.5 rounded text-[10px] font-bold border outline-none bg-dark-950 ${getStatusColor(material.status)}`}
-                    >
-                      {pipelineStates.map(state => <option key={state} value={state}>{state}</option>)}
-                    </select>
-                  ) : (
-                    <span className={`px-2.5 py-0.5 mt-0.5 rounded text-[10px] font-bold border inline-block ${getStatusColor(material.status)}`}>
-                      {material.status}
-                    </span>
-                  )}
-                </div>
-
-                <div className="flex gap-2">
-                  {/* Download Action */}
-                  <a
-                    href={material.file_url}
-                    download={material.file_name}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="p-2 rounded-lg bg-dark-900 border border-dark-850 text-primary-400 hover:text-primary-300 hover:bg-dark-800 transition"
-                  >
-                    <FileDown size={14} />
-                  </a>
-
-                  {/* Delete Action (Admin/Teacher only) */}
-                  {user.role !== 'Student' && (
-                    <button
-                      onClick={() => handleDeleteMaterial(material._id)}
-                      className="p-2 rounded-lg bg-dark-900 border border-dark-850 text-rose-400 hover:text-rose-300 hover:bg-dark-800 transition"
-                    >
-                      <Trash2 size={14} />
-                    </button>
-                  )}
-                </div>
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
@@ -363,7 +382,7 @@ const LmsDownload = () => {
             )}
 
             <form onSubmit={handleUploadSubmit} className="p-6 space-y-4">
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-xs font-semibold text-slate-400 mb-1.5">Class Target</label>
                   <select
@@ -398,7 +417,7 @@ const LmsDownload = () => {
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-xs font-semibold text-slate-400 mb-1.5">Delivery Pipeline</label>
                   <select

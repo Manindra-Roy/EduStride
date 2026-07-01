@@ -168,7 +168,8 @@ router.post('/register', async (req, res, next) => {
         email: populatedUser.email,
         role: populatedUser.role,
         studentProfile: populatedUser.studentProfile,
-        profile_pic: populatedUser.profile_pic
+        profile_pic: populatedUser.profile_pic,
+        theme_color: populatedUser.theme_color
       }
     });
   } catch (error) {
@@ -203,7 +204,8 @@ router.post('/login', async (req, res, next) => {
         email: user.email,
         role: user.role,
         studentProfile: user.studentProfile,
-        profile_pic: user.profile_pic
+        profile_pic: user.profile_pic,
+        theme_color: user.theme_color
       }
     });
   } catch (error) {
@@ -224,7 +226,8 @@ router.get('/me', protect, async (req, res, next) => {
         email: user.email,
         role: user.role,
         studentProfile: user.studentProfile,
-        profile_pic: user.profile_pic
+        profile_pic: user.profile_pic,
+        theme_color: user.theme_color
       }
     });
   } catch (error) {
@@ -277,6 +280,42 @@ router.put('/profile-pic', protect, uploadAvatar.single('avatar'), async (req, r
       success: true,
       message: 'Profile picture updated successfully',
       profile_pic: user.profile_pic
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Update a user's theme color preference
+// @route   PUT /api/auth/theme
+// @access  Private
+router.put('/theme', protect, async (req, res, next) => {
+  try {
+    const { theme_color } = req.body;
+    if (!theme_color) {
+      res.status(400);
+      throw new Error('Theme color preference is required');
+    }
+
+    const allowedColors = ['indigo', 'emerald', 'amber', 'rose', 'violet', 'cyan'];
+    if (!allowedColors.includes(theme_color)) {
+      res.status(400);
+      throw new Error('Invalid theme color selection');
+    }
+
+    const userObj = await User.findById(req.user.id);
+    if (!userObj) {
+      res.status(404);
+      throw new Error('User account not found');
+    }
+
+    userObj.theme_color = theme_color;
+    await userObj.save();
+
+    res.json({
+      success: true,
+      message: 'User color theme preference updated successfully',
+      theme_color: userObj.theme_color
     });
   } catch (error) {
     next(error);
@@ -406,6 +445,50 @@ router.delete('/students/:id', protect, authorize('SuperAdmin', 'Teacher'), asyn
     res.json({
       success: true,
       message: 'Student account deleted successfully'
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Update a student's email/login ID
+// @route   PUT /api/auth/students/:id/email
+// @access  Private (SuperAdmin & Teacher)
+router.put('/students/:id/email', protect, authorize('SuperAdmin', 'Teacher'), async (req, res, next) => {
+  try {
+    const { email } = req.body;
+    if (!email) {
+      res.status(400);
+      throw new Error('Email/Login ID is required');
+    }
+
+    const studentUser = await User.findById(req.params.id);
+    if (!studentUser) {
+      res.status(404);
+      throw new Error('Student account not found');
+    }
+    if (studentUser.role !== 'Student') {
+      res.status(400);
+      throw new Error('User is not a student');
+    }
+
+    // Check if email is already taken
+    const existingUser = await User.findOne({ email });
+    if (existingUser && existingUser._id.toString() !== req.params.id) {
+      res.status(400);
+      throw new Error('Email is already in use by another user');
+    }
+
+    studentUser.email = email;
+    await studentUser.save();
+
+    res.json({
+      success: true,
+      message: 'Student login ID/email updated successfully',
+      data: {
+        id: studentUser._id,
+        email: studentUser.email
+      }
     });
   } catch (error) {
     next(error);

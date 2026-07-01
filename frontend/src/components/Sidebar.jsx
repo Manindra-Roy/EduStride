@@ -13,19 +13,29 @@ import {
   Menu, 
   X,
   GraduationCap,
-  UserPlus
+  UserPlus,
+  Palette
 } from 'lucide-react';
 
 import Logo from './Logo';
+import { applyThemeAccent, getSavedThemeAccent, themes } from '../config/theme';
 
 const Sidebar = ({ isOpen, setIsOpen }) => {
-  const { user, logout, updateUserProfilePic } = useAuth();
+  const { user, logout, updateUserProfilePic, updateUserThemeColor } = useAuth();
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [avatarFile, setAvatarFile] = useState(null);
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
   const [avatarError, setAvatarError] = useState('');
   const [classesList, setClassesList] = useState([]);
+  const [activeTheme, setActiveTheme] = useState(user?.theme_color || getSavedThemeAccent());
+  const [systemDefaultTheme, setSystemDefaultTheme] = useState('indigo');
   const navigate = useNavigate();
+
+  useEffect(() => {
+    if (user?.theme_color) {
+      setActiveTheme(user.theme_color);
+    }
+  }, [user?.theme_color]);
 
   // Password Change States
   const [currentPassword, setCurrentPassword] = useState('');
@@ -83,6 +93,46 @@ const Sidebar = ({ isOpen, setIsOpen }) => {
       setPasswordError(err.response?.data?.message || 'Failed to update password.');
     } finally {
       setChangingPassword(false);
+    }
+  };
+
+  const handleThemeChange = async (themeKey) => {
+    try {
+      setActiveTheme(themeKey);
+      applyThemeAccent(themeKey);
+      
+      // Update account theme in database
+      await axios.put('/api/auth/theme', { theme_color: themeKey });
+      
+      // Sync update with Auth Context
+      updateUserThemeColor(themeKey);
+    } catch (err) {
+      console.error('Failed to save account theme selection in backend:', err);
+    }
+  };
+
+  useEffect(() => {
+    const fetchSystemDefault = async () => {
+      try {
+        const res = await axios.get('/api/system/theme');
+        if (res.data.success) {
+          setSystemDefaultTheme(res.data.theme_color);
+        }
+      } catch (err) {
+        console.error('Failed to load system default theme settings:', err);
+      }
+    };
+    if (showProfileModal) {
+      fetchSystemDefault();
+    }
+  }, [showProfileModal]);
+
+  const handleSystemThemeChange = async (themeKey) => {
+    try {
+      setSystemDefaultTheme(themeKey);
+      await axios.put('/api/system/theme', { theme_color: themeKey });
+    } catch (err) {
+      console.error('Failed to save system default theme settings in database:', err);
     }
   };
 
@@ -352,6 +402,95 @@ const Sidebar = ({ isOpen, setIsOpen }) => {
                   </button>
                 </div>
               </form>
+
+              {/* Color Scheme Picker */}
+              <div className="pt-4 border-t border-dark-800/80 space-y-3">
+                <div className="flex items-center gap-2 text-slate-400">
+                  <Palette size={14} className="text-primary-500" />
+                  <h5 className="text-[10px] font-extrabold uppercase tracking-wider">Customize Theme Accent</h5>
+                </div>
+                <div className="grid grid-cols-3 gap-2 select-none">
+                  {Object.keys(themes).map((themeKey) => {
+                    const themeObj = themes[themeKey];
+                    const isSelected = activeTheme === themeKey;
+                    const colorCircleClass = themeKey === 'indigo'
+                      ? 'bg-[#6366f1]'
+                      : themeKey === 'emerald'
+                        ? 'bg-[#10b981]'
+                        : themeKey === 'amber'
+                          ? 'bg-[#f59e0b]'
+                          : themeKey === 'rose'
+                            ? 'bg-[#f43f5e]'
+                            : themeKey === 'violet'
+                              ? 'bg-[#8b5cf6]'
+                              : 'bg-[#06b6d4]'; // cyan
+                    return (
+                      <button
+                        key={themeKey}
+                        type="button"
+                        onClick={() => handleThemeChange(themeKey)}
+                        className={`flex items-center justify-between p-2 rounded-xl bg-dark-900/40 hover:bg-dark-900 border text-left transition ${
+                          isSelected 
+                            ? 'border-primary-500 shadow-md ring-1 ring-primary-500' 
+                            : 'border-dark-850 hover:border-dark-800'
+                        }`}
+                      >
+                        <span className="text-[10px] font-semibold text-white truncate pr-1">
+                          {themeObj.name.split(' ')[1] || themeObj.name}
+                        </span>
+                        <span className={`w-3 h-3 rounded-full shrink-0 border border-white/10 ${colorCircleClass}`} />
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Admin/Teacher System Default Accent Option */}
+              {(user?.role === 'SuperAdmin' || user?.role === 'Teacher') && (
+                <div className="pt-4 border-t border-dark-800/80 space-y-3">
+                  <div className="flex items-center gap-2 text-slate-400">
+                    <Palette size={14} className="text-amber-500" />
+                    <h5 className="text-[10px] font-extrabold uppercase tracking-wider">Set System Default Accent</h5>
+                  </div>
+                  <p className="text-[10px] text-slate-500 leading-normal">
+                    Set the global default color scheme for new accounts and visitors.
+                  </p>
+                  <div className="grid grid-cols-3 gap-2 select-none">
+                    {Object.keys(themes).map((themeKey) => {
+                      const themeObj = themes[themeKey];
+                      const isSystemDefault = systemDefaultTheme === themeKey;
+                      const colorCircleClass = themeKey === 'indigo'
+                        ? 'bg-[#6366f1]'
+                        : themeKey === 'emerald'
+                          ? 'bg-[#10b981]'
+                          : themeKey === 'amber'
+                            ? 'bg-[#f59e0b]'
+                            : themeKey === 'rose'
+                              ? 'bg-[#f43f5e]'
+                              : themeKey === 'violet'
+                                ? 'bg-[#8b5cf6]'
+                                : 'bg-[#06b6d4]'; // cyan
+                      return (
+                        <button
+                          key={`sys-${themeKey}`}
+                          type="button"
+                          onClick={() => handleSystemThemeChange(themeKey)}
+                          className={`flex items-center justify-between p-2 rounded-xl bg-dark-900/40 hover:bg-dark-900 border text-left transition ${
+                            isSystemDefault 
+                              ? 'border-amber-500 shadow-md ring-1 ring-amber-500' 
+                              : 'border-dark-850 hover:border-dark-800'
+                          }`}
+                        >
+                          <span className="text-[10px] font-semibold text-white truncate pr-1">
+                            {themeObj.name.split(' ')[1] || themeObj.name}
+                          </span>
+                          <span className={`w-3 h-3 rounded-full shrink-0 border border-white/10 ${colorCircleClass}`} />
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
 
               {/* Details List */}
               <div className="pt-4 border-t border-dark-800/80 space-y-3 text-xs">

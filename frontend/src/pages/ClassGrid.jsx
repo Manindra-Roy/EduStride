@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useMemo } from 'react';
+import React, { useEffect, useState, useMemo, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { useAuth } from '../context/AuthContext';
@@ -16,7 +16,8 @@ import {
   TrendingUp,
   UserPlus,
   BookOpen,
-  History
+  History,
+  Users
 } from 'lucide-react';
 import { 
   LineChart, 
@@ -47,6 +48,14 @@ const ClassGrid = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [defaulterFilter, setDefaulterFilter] = useState('All'); // 'All', 'Paid', 'Unpaid'
   const [selectedStudent, setSelectedStudent] = useState(null);
+
+  const detailPanelRef = useRef(null);
+
+  useEffect(() => {
+    if (selectedStudent && window.innerWidth < 1024 && detailPanelRef.current) {
+      detailPanelRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, [selectedStudent]);
 
   // Modals state
   const [showAddModal, setShowAddModal] = useState(false);
@@ -846,33 +855,41 @@ const ClassGrid = () => {
 
   return (
     <div className="space-y-6">
-      {/* Header Panel */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight text-white font-outfit">Class {class_level} Isolation Dashboard</h1>
-          <p className="text-slate-400 text-sm mt-1">Manage student profiles, daily attendance logs, and marks entry</p>
+      {/* Header Panel - Redesigned to match premium page header standard */}
+      <div className="relative overflow-hidden rounded-2xl bg-gradient-to-r from-primary-900/40 via-dark-900/30 to-indigo-900/20 border border-dark-800/80 p-6 sm:p-8 shadow-xl flex flex-col md:flex-row md:items-center justify-between gap-6">
+        <div className="absolute top-0 right-0 p-8 opacity-10 pointer-events-none">
+          <Users size={160} className="text-primary-500" />
+        </div>
+        <div className="relative z-10 space-y-2">
+          <span className="px-2.5 py-1 rounded-md text-[10px] font-extrabold uppercase tracking-widest bg-primary-500/10 text-primary-400 border border-primary-500/20">
+            Class Dashboard
+          </span>
+          <h1 className="text-3xl font-extrabold tracking-tight text-white font-outfit mt-1">Class {class_level} Roster & Logs</h1>
+          <p className="text-slate-405 text-xs sm:text-sm max-w-2xl">
+            Manage student academic profiles, record daily attendance compliance metrics, update grading matrices, and allocate handouts.
+          </p>
         </div>
         
         {user.role !== 'Student' && (
-          <div className="flex items-center gap-3">
+          <div className="relative z-10 flex items-center gap-3 shrink-0 self-start md:self-center flex-wrap">
             <button 
               onClick={() => {
                 setSubjectError('');
                 setSubjectSuccess('');
                 setShowSubjectModal(true);
               }}
-              className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-dark-900 border border-dark-800 text-slate-300 hover:text-white transition font-medium text-xs shadow-inner animate-fadeIn"
+              className="flex items-center gap-2 px-3.5 py-2.5 rounded-xl bg-dark-900 border border-dark-800 text-slate-350 hover:text-white hover:bg-dark-805 transition font-bold text-[10px] uppercase tracking-wider shadow-inner"
             >
-              <BookOpen size={16} />
-              <span>Manage Subjects</span>
+              <BookOpen size={14} className="text-primary-500" />
+              <span>Subjects</span>
             </button>
 
             <button 
               onClick={openAttendanceModal}
-              className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-dark-900 border border-dark-800 text-slate-300 hover:text-white transition font-medium text-xs shadow-inner"
+              className="flex items-center gap-2 px-3.5 py-2.5 rounded-xl bg-dark-900 border border-dark-800 text-slate-350 hover:text-white hover:bg-dark-805 transition font-bold text-[10px] uppercase tracking-wider shadow-inner"
             >
-              <CheckSquare size={16} />
-              <span>Bulk Attendance Matrix</span>
+              <CheckSquare size={14} className="text-emerald-500" />
+              <span>Bulk Attendance</span>
             </button>
             
             <button 
@@ -889,9 +906,9 @@ const ClassGrid = () => {
                 setSubmitError('');
                 setShowAddModal(true);
               }}
-              className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-primary-600 hover:bg-primary-500 text-white transition font-medium text-xs shadow-lg shadow-primary-500/10"
+              className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-primary-600 hover:bg-primary-500 active:bg-primary-750 text-white transition font-bold text-[10px] uppercase tracking-wider shadow-lg shadow-primary-500/10"
             >
-              <Plus size={16} />
+              <Plus size={14} />
               <span>Add Student</span>
             </button>
           </div>
@@ -950,18 +967,18 @@ const ClassGrid = () => {
                   No students found matching filters.
                 </div>
               ) : (
-                <table className="custom-table">
+                <table className="w-full text-left border-collapse text-xs select-none">
                   <thead>
-                    <tr>
-                      <th className="w-24 text-center">Rank (Roll)</th>
-                      <th>Student Name</th>
-                      <th>Fee Status</th>
-                      <th className="text-center">Attendance Rate</th>
-                      <th>Primary Phone</th>
-                      {user.role !== 'Student' && <th className="text-right">Actions</th>}
+                    <tr className="border-b border-dark-800 bg-dark-950/60 text-slate-450 uppercase tracking-wider font-bold font-mono">
+                      <th className="py-3.5 px-4 rounded-tl-xl text-center w-24">Rank (Roll)</th>
+                      <th className="py-3.5 px-4">Student Name</th>
+                      <th className="py-3.5 px-4">Fee Status</th>
+                      <th className="py-3.5 px-4 text-center hidden sm:table-cell">Attendance Rate</th>
+                      <th className="py-3.5 px-4 hidden md:table-cell">Primary Phone</th>
+                      {user.role !== 'Student' && <th className="py-3.5 px-4 text-right rounded-tr-xl">Actions</th>}
                     </tr>
                   </thead>
-                  <tbody>
+                  <tbody className="divide-y divide-dark-800/50">
                     {filteredStudents.map((student) => {
                       const attRate = getAttendanceRate(student);
                       const attColor = attRate >= 75 
@@ -974,9 +991,9 @@ const ClassGrid = () => {
                         <tr 
                           key={student._id}
                           onClick={() => setSelectedStudent(student)}
-                          className={`cursor-pointer transition duration-150 ${selectedStudent?._id === student._id ? 'bg-primary-600/5 border-l-4 border-l-primary-500' : ''}`}
+                          className={`group cursor-pointer transition-all duration-150 hover:bg-dark-900/40 ${selectedStudent?._id === student._id ? 'bg-primary-600/5 border-l-2 border-l-primary-500' : ''}`}
                         >
-                          <td className="font-mono font-bold text-slate-350">
+                          <td className="py-4 px-4 font-mono font-bold text-slate-350 text-center group-hover:text-white transition">
                             <div className="flex items-center justify-center gap-1.5">
                               <span className="w-6 text-right">{student.roll_number}</span>
                               {student.roll_number === '01' ? (
@@ -986,49 +1003,49 @@ const ClassGrid = () => {
                               )}
                             </div>
                           </td>
-                          <td>
-                            <div className="font-semibold text-white">{student.name}</div>
+                          <td className="py-4 px-4">
+                            <div className="font-semibold text-white group-hover:text-primary-400 transition">{student.name}</div>
                             <span className="text-[10px] text-slate-500 block mt-0.5">{student.parent_name} (Parent)</span>
                           </td>
-                          <td>
+                          <td className="py-4 px-4">
                             <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
                               student.fee_status === 'Paid' 
-                                ? 'bg-emerald-500/15 text-emerald-400' 
+                                ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/20' 
                                 : student.fee_status === 'Partial/Pending' 
-                                  ? 'bg-amber-500/15 text-amber-400' 
-                                  : 'bg-rose-500/15 text-rose-400'
+                                  ? 'bg-amber-500/15 text-amber-400 border border-amber-500/20' 
+                                  : 'bg-rose-500/15 text-rose-400 border border-rose-500/20'
                             }`}>
                               {student.fee_status}
                             </span>
                           </td>
-                          <td className="text-center">
+                          <td className="py-4 px-4 text-center hidden sm:table-cell">
                             <span className={`px-2 py-0.5 rounded text-xs font-bold ${attColor}`}>
                               {attRate}%
                             </span>
                           </td>
-                          <td className="text-slate-300 font-mono text-xs">{student.primary_contact}</td>
+                          <td className="py-4 px-4 text-slate-300 font-mono text-xs hidden md:table-cell">{student.primary_contact}</td>
                           
                           {user.role !== 'Student' && (
-                            <td className="text-right" onClick={(e) => e.stopPropagation()}>
+                            <td className="py-4 px-4 text-right" onClick={(e) => e.stopPropagation()}>
                               <div className="flex justify-end gap-1.5">
                                 <button 
                                   onClick={() => openTestModal(student)}
                                   title="Log exam marks"
-                                  className="p-1.5 rounded-lg bg-dark-900 border border-dark-800 text-indigo-400 hover:bg-indigo-600/10 transition"
+                                  className="p-1.5 rounded-lg bg-dark-900 border border-dark-850 text-indigo-400 hover:bg-indigo-600/10 hover:text-white transition"
                                 >
                                   <Award size={14} />
                                 </button>
                                 <button 
                                   onClick={() => openEditModal(student)}
                                   title="Edit profile"
-                                  className="p-1.5 rounded-lg bg-dark-900 border border-dark-800 text-sky-400 hover:bg-sky-600/10 transition"
+                                  className="p-1.5 rounded-lg bg-dark-900 border border-dark-850 text-sky-400 hover:bg-sky-600/10 hover:text-white transition"
                                 >
                                   <Edit size={14} />
                                 </button>
                                 <button 
                                   onClick={() => handleDeleteStudent(student._id)}
                                   title="Delete student"
-                                  className="p-1.5 rounded-lg bg-dark-900 border border-dark-800 text-rose-400 hover:bg-rose-600/10 transition"
+                                  className="p-1.5 rounded-lg bg-dark-900 border border-dark-850 text-rose-400 hover:bg-rose-600/10 hover:text-white transition"
                                 >
                                   <Trash2 size={14} />
                                 </button>
@@ -1046,19 +1063,29 @@ const ClassGrid = () => {
         </div>
 
         {/* Right Column - Detail Panel */}
-        <div className="space-y-6">
+        <div className="space-y-6" ref={detailPanelRef}>
           {selectedStudent ? (
             <div className="glass-panel p-6 rounded-2xl border border-dark-800 space-y-6 relative overflow-hidden">
               {/* Decorative Accent Glow */}
               <div className="absolute -top-20 -right-20 w-40 h-40 rounded-full bg-primary-600/5 blur-[50px]" />
               
               {/* Header Profile details */}
-              <div>
-                <div className="w-12 h-12 rounded-xl bg-gradient-to-tr from-primary-600 to-indigo-400 flex items-center justify-center font-bold text-white text-lg mb-3 shadow">
-                  {selectedStudent.name[0].toUpperCase()}
+              <div className="flex justify-between items-start">
+                <div>
+                  <div className="w-12 h-12 rounded-xl bg-gradient-to-tr from-primary-600 to-indigo-400 flex items-center justify-center font-bold text-white text-lg mb-3 shadow">
+                    {selectedStudent.name[0].toUpperCase()}
+                  </div>
+                  <h2 className="text-lg font-bold text-white font-outfit">{selectedStudent.name}</h2>
+                  <p className="text-slate-400 text-xs mt-1">Roll No: {selectedStudent.roll_number} • Class {selectedStudent.class_level}</p>
                 </div>
-                <h2 className="text-lg font-bold text-white font-outfit">{selectedStudent.name}</h2>
-                <p className="text-slate-400 text-xs mt-1">Roll No: {selectedStudent.roll_number} • Class {selectedStudent.class_level}</p>
+                <button
+                  type="button"
+                  onClick={() => setSelectedStudent(null)}
+                  className="p-2 rounded-lg bg-dark-900 border border-dark-850 hover:bg-dark-800 text-slate-500 hover:text-white transition lg:hidden"
+                  title="Close panel"
+                >
+                  <X size={16} />
+                </button>
               </div>
 
               {/* Status & Contact Details */}
@@ -1303,7 +1330,7 @@ const ClassGrid = () => {
             )}
 
             <form onSubmit={handleAddStudent} className="p-6 space-y-4">
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-xs font-semibold text-slate-400 mb-1.5">Full Name</label>
                   <input
@@ -1340,7 +1367,7 @@ const ClassGrid = () => {
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-xs font-semibold text-slate-400 mb-1.5">Primary Contact</label>
                   <input
@@ -1419,7 +1446,7 @@ const ClassGrid = () => {
             )}
 
             <form onSubmit={handleEditStudent} className="p-6 space-y-4">
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-xs font-semibold text-slate-400 mb-1.5">Full Name</label>
                   <input
@@ -1456,7 +1483,7 @@ const ClassGrid = () => {
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-xs font-semibold text-slate-400 mb-1.5">Primary Contact</label>
                   <input
@@ -1573,7 +1600,7 @@ const ClassGrid = () => {
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-xs font-semibold text-slate-400 mb-1.5">Marks Obtained</label>
                   <input

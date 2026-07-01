@@ -22,16 +22,16 @@ export default {
           950: '#1b1c31', // Deep dark backdrop
         },
         primary: {
-          50: '#f4f5ff',
-          100: '#ebeeff',
-          200: '#dbe0ff',
-          300: '#bfcbff',
-          400: '#9baaff',
-          500: '#6366f1', // Indigo Accent
-          600: '#4f46e5',
-          700: '#4338ca',
-          800: '#3730a3',
-          950: '#1e1b4b',
+          50: 'var(--color-primary-50)',
+          100: 'var(--color-primary-100)',
+          200: 'var(--color-primary-200)',
+          300: 'var(--color-primary-300)',
+          400: 'var(--color-primary-400)',
+          500: 'var(--color-primary-500)',
+          600: 'var(--color-primary-600)',
+          700: 'var(--color-primary-700)',
+          800: 'var(--color-primary-800)',
+          950: 'var(--color-primary-950)',
         }
       },
       fontFamily: {

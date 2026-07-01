@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { Mail, Lock, ArrowRight, GraduationCap } from 'lucide-react';
+import { Mail, Lock, ArrowRight, Sparkles, BookOpen, MessageSquare, CreditCard, ShieldCheck } from 'lucide-react';
 import Logo from '../components/Logo';
 import Footer from '../components/Footer';
 
@@ -29,93 +29,173 @@ const Login = () => {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-dark-950 px-4 relative overflow-hidden">
-      {/* Background glow design */}
-      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] rounded-full bg-primary-600/10 blur-[150px] pointer-events-none" />
+    <div className="min-h-screen flex bg-dark-950 text-slate-100 relative overflow-hidden">
+      {/* Background Glows */}
+      <div className="absolute -top-48 -left-48 w-[500px] h-[500px] rounded-full bg-primary-600/10 blur-[160px] pointer-events-none z-0" />
+      <div className="absolute -bottom-48 -right-48 w-[500px] h-[500px] rounded-full bg-indigo-600/10 blur-[160px] pointer-events-none z-0" />
 
-      <div className="w-full max-w-md z-10">
-        {/* Logo */}
-        <div className="flex flex-col items-center mb-8">
-          <div className="bg-primary-600/10 p-2 rounded-2xl border border-primary-500/20 glow-indigo mb-3">
-            <Logo size={56} className="bg-dark-900/30 rounded-xl" />
+      {/* Left Column (Brand Presentation & Feature Showcase) - Only visible on desktop */}
+      <div className="hidden lg:flex lg:w-1/2 bg-dark-900/30 border-r border-dark-850 p-12 flex-col justify-between relative z-10 overflow-hidden">
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_30%_30%,rgba(99,102,241,0.05),transparent_50%)] pointer-events-none" />
+        
+        {/* Header Branding */}
+        <div className="flex items-center gap-3">
+          <div className="bg-primary-600/15 p-1.5 rounded-xl border border-primary-500/25 glow-indigo">
+            <Logo size={36} className="bg-dark-950/40 rounded-lg" />
           </div>
-          <h2 className="text-3xl font-extrabold text-white tracking-tight font-outfit">Welcome Back</h2>
-          <p className="text-slate-400 mt-1 text-sm font-medium">EduStride ERP & LMS Suite</p>
+          <div>
+            <span className="text-base font-extrabold text-white tracking-tight block font-outfit">EduStride</span>
+            <span className="text-[9px] uppercase tracking-wider text-slate-400 font-bold block leading-none">ERP & LMS Suite</span>
+          </div>
         </div>
 
-        {/* Card */}
-        <div className="glass-panel p-8 rounded-2xl border border-dark-800 shadow-2xl relative">
-          <div className="absolute inset-0 bg-gradient-to-b from-white/5 to-transparent pointer-events-none rounded-2xl" />
-
-          {error && (
-            <div className="mb-6 p-4 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-300 text-sm font-medium">
-              {error}
+        {/* Feature Showcase Grid */}
+        <div className="space-y-8 my-auto max-w-lg">
+          <div className="space-y-3">
+            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-primary-500/10 text-primary-400 border border-primary-500/20 uppercase tracking-wider">
+              <Sparkles size={12} className="animate-spin-slow" />
+              <span>Next-Gen Institution Management</span>
             </div>
-          )}
+            <h1 className="text-4xl font-extrabold tracking-tight text-white font-outfit leading-tight">
+              Powering academic journeys with digital stride.
+            </h1>
+            <p className="text-slate-450 text-xs sm:text-sm leading-relaxed">
+              Experience a unified digital environment to manage attendance matrices, distribute syllabus materials, secure ledger systems, and communicate in real-time.
+            </p>
+          </div>
 
-          <form onSubmit={handleSubmit} className="space-y-5 relative">
-            <div>
-              <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">Email Address</label>
-              <div className="relative">
-                <span className="absolute inset-y-0 left-0 pl-3.5 flex items-center text-slate-500">
-                  <Mail size={18} />
-                </span>
-                <input
-                  type="email"
-                  required
-                  placeholder="name@institution.com"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  className="w-full pl-11 pr-4 py-3 rounded-xl bg-dark-900 border border-dark-800 focus:border-primary-500 focus:ring-1 focus:ring-primary-500 text-white placeholder-slate-500 transition duration-150 outline-none text-sm"
-                />
-              </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div className="glass-panel p-4 rounded-xl border border-dark-800 space-y-2 hover:border-dark-700 transition">
+              <MessageSquare className="text-primary-450" size={20} />
+              <h4 className="text-xs font-bold text-white uppercase tracking-wider">Interactive Class Chat</h4>
+              <p className="text-[10px] text-slate-450 leading-relaxed">Real-time room messaging with study handouts & active call systems.</p>
             </div>
-
-            <div>
-              <div className="flex justify-between items-center mb-2">
-                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400">Password</label>
-              </div>
-              <div className="relative">
-                <span className="absolute inset-y-0 left-0 pl-3.5 flex items-center text-slate-500">
-                  <Lock size={18} />
-                </span>
-                <input
-                  type="password"
-                  required
-                  placeholder="••••••••"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  className="w-full pl-11 pr-4 py-3 rounded-xl bg-dark-900 border border-dark-800 focus:border-primary-500 focus:ring-1 focus:ring-primary-500 text-white placeholder-slate-500 transition duration-150 outline-none text-sm"
-                />
-              </div>
+            <div className="glass-panel p-4 rounded-xl border border-dark-800 space-y-2 hover:border-dark-700 transition">
+              <CreditCard className="text-emerald-455" size={20} />
+              <h4 className="text-xs font-bold text-white uppercase tracking-wider">Tuition Fees Audit</h4>
+              <p className="text-[10px] text-slate-455 leading-relaxed">Seamless student invoices, compliant ledger records & Stripe webhook checkout.</p>
             </div>
-
-            <button
-              type="submit"
-              disabled={submitting}
-              className="w-full mt-6 py-3 rounded-xl bg-primary-600 hover:bg-primary-500 active:bg-primary-750 text-white font-medium text-sm transition duration-150 flex items-center justify-center gap-2 shadow-lg hover:shadow-primary-500/10"
-            >
-              {submitting ? (
-                <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-              ) : (
-                <>
-                  <span>Sign In</span>
-                  <ArrowRight size={16} />
-                </>
-              )}
-            </button>
-          </form>
+            <div className="glass-panel p-4 rounded-xl border border-dark-800 space-y-2 hover:border-dark-700 transition">
+              <BookOpen className="text-sky-455" size={20} />
+              <h4 className="text-xs font-bold text-white uppercase tracking-wider">LMS Handout Hub</h4>
+              <p className="text-[10px] text-slate-455 leading-relaxed">Upload study materials, notes logs, syllabus trackers & class checklists.</p>
+            </div>
+            <div className="glass-panel p-4 rounded-xl border border-dark-800 space-y-2 hover:border-dark-700 transition">
+              <ShieldCheck className="text-indigo-455" size={20} />
+              <h4 className="text-xs font-bold text-white uppercase tracking-wider">Secure Access Panel</h4>
+              <p className="text-[10px] text-slate-455 leading-relaxed">Strict role authorizations for student rosters, grading & cron mailers.</p>
+            </div>
+          </div>
         </div>
 
-        {/* Footer Link */}
-        <p className="text-center text-slate-400 text-sm mt-6">
-          Need student access?{' '}
-          <Link to="/register" className="text-primary-400 hover:text-primary-300 font-semibold transition">
-            Register Student Profile
-          </Link>
-        </p>
+        {/* Footer Brand Info */}
+        <div className="text-slate-500 text-[11px] font-mono">
+          © {new Date().getFullYear()} EduStride Institution System. Version 1.0.0
+        </div>
+      </div>
 
-        <Footer className="border-t-0 mt-8 pt-4 justify-center sm:flex-col sm:gap-2 opacity-75" />
+      {/* Right Column (Login Form Area) */}
+      <div className="w-full lg:w-1/2 flex flex-col justify-center items-center px-6 relative z-10 py-12">
+        <div className="w-full max-w-sm space-y-8">
+          
+          {/* Mobile Header Branding (Only visible on mobile) */}
+          <div className="flex flex-col items-center text-center lg:hidden space-y-3">
+            <div className="bg-primary-600/15 p-2 rounded-2xl border border-primary-500/25 glow-indigo">
+              <Logo size={48} className="bg-dark-900/30 rounded-xl" />
+            </div>
+            <h2 className="text-2xl font-extrabold text-white tracking-tight font-outfit">EduStride ERP</h2>
+            <p className="text-slate-400 text-xs font-medium uppercase tracking-wider">Unified Institution Management System</p>
+          </div>
+
+          <div className="space-y-2 text-center lg:text-left animate-fadeIn">
+            <h2 className="text-2xl font-extrabold text-white font-outfit tracking-tight">Access Intranet Dashboard</h2>
+            <p className="text-slate-400 text-xs">Enter credentials to authenticate into the institution intranet portal.</p>
+          </div>
+
+          {/* Form container */}
+          <div className="glass-panel p-6 sm:p-8 rounded-2xl border border-dark-800 shadow-2xl relative">
+            <div className="absolute inset-0 bg-gradient-to-b from-white/5 to-transparent pointer-events-none rounded-2xl" />
+
+            {error && (
+              <div className="mb-6 p-4 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-300 text-xs font-medium">
+                {error}
+              </div>
+            )}
+
+            <form onSubmit={handleSubmit} className="space-y-5 relative">
+              <div>
+                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">Email Address</label>
+                <div className="relative">
+                  <span className="absolute inset-y-0 left-0 pl-3.5 flex items-center text-slate-500">
+                    <Mail size={16} />
+                  </span>
+                  <input
+                    type="email"
+                    required
+                    placeholder="name@institution.com"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    className="w-full pl-11 pr-4 py-3 rounded-xl bg-dark-900/60 border border-dark-800 focus:border-primary-500 focus:ring-1 focus:ring-primary-500 text-white placeholder-slate-550 transition duration-150 outline-none text-xs font-medium"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">Password</label>
+                <div className="relative">
+                  <span className="absolute inset-y-0 left-0 pl-3.5 flex items-center text-slate-550">
+                    <Lock size={16} />
+                  </span>
+                  <input
+                    type="password"
+                    required
+                    placeholder="••••••••"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    className="w-full pl-11 pr-4 py-3 rounded-xl bg-dark-900/60 border border-dark-800 focus:border-primary-500 focus:ring-1 focus:ring-primary-500 text-white placeholder-slate-550 transition duration-150 outline-none text-xs font-medium"
+                  />
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                disabled={submitting}
+                className="w-full mt-6 py-3 rounded-xl bg-primary-600 hover:bg-primary-500 active:bg-primary-750 text-white font-bold text-xs uppercase tracking-wide transition duration-150 flex items-center justify-center gap-1.5 shadow-lg hover:shadow-primary-500/10"
+              >
+                {submitting ? (
+                  <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                ) : (
+                  <>
+                    <span>Sign In</span>
+                    <ArrowRight size={14} />
+                  </>
+                )}
+              </button>
+            </form>
+          </div>
+
+          {/* Registration Trigger Footer */}
+          <div className="text-center animate-fadeIn space-y-4">
+            <p className="text-slate-400 text-xs">
+              Need student credentials?{' '}
+              <Link to="/register" className="text-primary-400 hover:text-primary-300 font-bold transition">
+                Create Account
+              </Link>
+            </p>
+            <div className="text-[10px] text-slate-500 font-medium">
+              Architected by{' '}
+              <a 
+                href="https://manindra.in" 
+                target="_blank" 
+                rel="noreferrer" 
+                className="text-primary-400 hover:text-primary-350 hover:underline transition"
+              >
+                manindra.in
+              </a>
+            </div>
+          </div>
+
+        </div>
       </div>
     </div>
   );

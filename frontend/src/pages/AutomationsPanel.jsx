@@ -497,10 +497,20 @@ const AutomationsPanel = () => {
 
   return (
     <div className="space-y-6">
-      {/* Title */}
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight text-white font-outfit">Background Systems & Planners</h1>
-        <p className="text-slate-400 text-sm mt-1">Audit background cron managers, syllabus progression matrices, and timetables</p>
+      {/* Title - Redesigned to match premium page header standard */}
+      <div className="relative overflow-hidden rounded-2xl bg-gradient-to-r from-primary-900/40 via-dark-900/30 to-indigo-900/20 border border-dark-800/80 p-6 sm:p-8 shadow-xl">
+        <div className="absolute top-0 right-0 p-8 opacity-10 pointer-events-none">
+          <Settings size={160} className="text-primary-500" />
+        </div>
+        <div className="relative z-10 space-y-2">
+          <span className="px-2.5 py-1 rounded-md text-[10px] font-extrabold uppercase tracking-widest bg-primary-500/10 text-primary-400 border border-primary-500/20">
+            System Administration
+          </span>
+          <h1 className="text-3xl font-extrabold tracking-tight text-white font-outfit mt-1">Background Systems & Planners</h1>
+          <p className="text-slate-400 text-xs sm:text-sm max-w-2xl">
+            Audit background cron managers, inspect active syllabus progression matrices, and configure system calendars.
+          </p>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
