@@ -148,6 +148,15 @@ const Sidebar = ({ isOpen, setIsOpen }) => {
       }
     };
     fetchClasses();
+
+    const handleClassesUpdate = () => {
+      fetchClasses();
+    };
+
+    window.addEventListener('classesUpdated', handleClassesUpdate);
+    return () => {
+      window.removeEventListener('classesUpdated', handleClassesUpdate);
+    };
   }, []);
 
   const handleLogout = () => {

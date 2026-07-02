@@ -14,7 +14,7 @@ const router = express.Router();
 const seedDefaultClasses = async () => {
   const count = await ClassLevel.countDocuments();
   if (count === 0) {
-    const defaults = ['VII', 'VIII', 'IX', 'X'].map(name => ({ name }));
+    const defaults = ['VII', 'VIII', 'IX', 'X'].map((name, index) => ({ name, order: index }));
     await ClassLevel.insertMany(defaults);
     console.log('[Seeder] Dynamic ClassLevels seeded: VII, VIII, IX, X');
   }
@@ -28,8 +28,15 @@ router.get('/', async (req, res, next) => {
     await seedDefaultClasses();
     const classes = await ClassLevel.find();
     
-    // Sort class levels in ascending order, handling both Roman numerals and numbers
-    const sortedClassNames = classes.map(c => c.name).sort((a, b) => {
+    // Sort class levels. If order is set, sort by order. Otherwise fallback to alphabetical/roman sorting.
+    const sortedClasses = classes.sort((a, b) => {
+      const orderA = a.order !== undefined ? a.order : 0;
+      const orderB = b.order !== undefined ? b.order : 0;
+      
+      if (orderA !== orderB) {
+        return orderA - orderB;
+      }
+      
       const romanToVal = {
         'I': 1, 'II': 2, 'III': 3, 'IV': 4, 'V': 5,
         'VI': 6, 'VII': 7, 'VIII': 8, 'IX': 9, 'X': 10,
@@ -37,8 +44,8 @@ router.get('/', async (req, res, next) => {
         'XVI': 16, 'XVII': 17, 'XVIII': 18, 'XIX': 19, 'XX': 20
       };
       
-      const cleanA = a.toUpperCase().trim();
-      const cleanB = b.toUpperCase().trim();
+      const cleanA = a.name.toUpperCase().trim();
+      const cleanB = b.name.toUpperCase().trim();
       
       const valA = romanToVal[cleanA] !== undefined ? romanToVal[cleanA] : (parseInt(cleanA.replace(/\D/g, ''), 10) || cleanA);
       const valB = romanToVal[cleanB] !== undefined ? romanToVal[cleanB] : (parseInt(cleanB.replace(/\D/g, ''), 10) || cleanB);
@@ -49,6 +56,7 @@ router.get('/', async (req, res, next) => {
       return String(valA).localeCompare(String(valB));
     });
 
+    const sortedClassNames = sortedClasses.map(c => c.name);
     res.json({ success: true, data: sortedClassNames });
   } catch (error) {
     next(error);
@@ -73,8 +81,37 @@ router.post('/', protect, authorize('SuperAdmin'), async (req, res, next) => {
       throw new Error('Class level already exists');
     }
 
-    const newClass = await ClassLevel.create({ name: cleanName });
+    const count = await ClassLevel.countDocuments();
+    const newClass = await ClassLevel.create({ name: cleanName, order: count });
     res.status(201).json({ success: true, data: newClass.name });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Update order of class levels
+// @route   PUT /api/classes/order
+// @access  Private (SuperAdmin only)
+router.put('/order', protect, authorize('SuperAdmin'), async (req, res, next) => {
+  try {
+    const { order } = req.body;
+    if (!order || !Array.isArray(order)) {
+      res.status(400);
+      throw new Error('Please provide an order array of class names');
+    }
+
+    const bulkOps = order.map((name, index) => ({
+      updateOne: {
+        filter: { name: name.toUpperCase().trim() },
+        update: { $set: { order: index } }
+      }
+    }));
+
+    if (bulkOps.length > 0) {
+      await ClassLevel.bulkWrite(bulkOps);
+    }
+
+    res.json({ success: true, message: 'Class order updated successfully' });
   } catch (error) {
     next(error);
   }

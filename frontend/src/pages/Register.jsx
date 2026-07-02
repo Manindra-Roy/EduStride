@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { Mail, Lock, UserCheck, ArrowRight, GraduationCap, ShieldAlert, CheckCircle2, Trash2, Users, UserPlus, Edit, BookOpen } from 'lucide-react';
+import { Mail, Lock, UserCheck, ArrowRight, GraduationCap, ShieldAlert, CheckCircle2, Trash2, Users, UserPlus, Edit, BookOpen, ArrowUp, ArrowDown } from 'lucide-react';
 import Logo from '../components/Logo';
 import Footer from '../components/Footer';
 import axios from 'axios';
@@ -51,7 +51,7 @@ const Register = () => {
       if (res.data.success && Array.isArray(res.data.data)) {
         setClasses(res.data.data);
         if (res.data.data.length > 0) {
-          setClassLevel(res.data.data[0]);
+          setClassLevel(prev => prev || res.data.data[0]);
         }
       }
     } catch (err) {
@@ -76,6 +76,7 @@ const Register = () => {
         setSuccess(`Class ${newClassName.trim().toUpperCase()} created successfully!`);
         setNewClassName('');
         fetchClasses();
+        window.dispatchEvent(new Event('classesUpdated'));
       }
     } catch (err) {
       setError(err.response?.data?.message || 'Failed to create class');
@@ -96,6 +97,7 @@ const Register = () => {
       if (res.data.success) {
         setSuccess(`Class ${className} deleted successfully!`);
         fetchClasses();
+        window.dispatchEvent(new Event('classesUpdated'));
       }
     } catch (err) {
       setError(err.response?.data?.message || 'Failed to delete class');
@@ -117,11 +119,42 @@ const Register = () => {
         setEditingClassName(null);
         setEditNewName('');
         fetchClasses();
+        window.dispatchEvent(new Event('classesUpdated'));
       }
     } catch (err) {
       setError(err.response?.data?.message || 'Failed to rename class');
     } finally {
       setRenamingClass(false);
+    }
+  };
+
+  const handleMoveClass = async (index, direction) => {
+    if (direction === 'up' && index === 0) return;
+    if (direction === 'down' && index === classes.length - 1) return;
+
+    const newClasses = [...classes];
+    const targetIndex = direction === 'up' ? index - 1 : index + 1;
+
+    // Swap
+    const temp = newClasses[index];
+    newClasses[index] = newClasses[targetIndex];
+    newClasses[targetIndex] = temp;
+
+    // Optimistically update local state
+    setClasses(newClasses);
+
+    try {
+      const res = await axios.put('/api/classes/order', { order: newClasses });
+      if (res.data.success) {
+        setSuccess('Class order updated successfully!');
+        window.dispatchEvent(new Event('classesUpdated'));
+      } else {
+        fetchClasses();
+        setError('Failed to update class order.');
+      }
+    } catch (err) {
+      fetchClasses();
+      setError(err.response?.data?.message || 'Failed to update class order.');
     }
   };
 
@@ -471,15 +504,38 @@ const Register = () => {
                 <table className="w-full text-left border-collapse text-xs">
                   <thead>
                     <tr className="border-b border-dark-800 bg-dark-950/60 text-slate-400 uppercase tracking-wider font-bold font-mono">
+                      <th className="py-3.5 px-4 w-24 text-center">Order</th>
                       <th className="py-3.5 px-4">Class Level Name</th>
                       <th className="py-3.5 px-4 text-right">Actions</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-dark-800/60">
-                    {classes.map((cls) => {
+                    {classes.map((cls, index) => {
                       const isEditing = editingClassName === cls;
                       return (
                         <tr key={cls} className="hover:bg-dark-900/30 transition-colors">
+                          <td className="py-3.5 px-4 text-center">
+                            <div className="flex items-center justify-center gap-1.5">
+                              <button
+                                type="button"
+                                disabled={index === 0}
+                                onClick={() => handleMoveClass(index, 'up')}
+                                className="p-1.5 rounded-lg bg-dark-950 border border-dark-800 hover:border-primary-500/30 text-slate-400 hover:text-primary-400 disabled:opacity-20 disabled:pointer-events-none transition duration-150"
+                                title="Move Up"
+                              >
+                                <ArrowUp size={13} />
+                              </button>
+                              <button
+                                type="button"
+                                disabled={index === classes.length - 1}
+                                onClick={() => handleMoveClass(index, 'down')}
+                                className="p-1.5 rounded-lg bg-dark-950 border border-dark-800 hover:border-primary-500/30 text-slate-400 hover:text-primary-400 disabled:opacity-20 disabled:pointer-events-none transition duration-150"
+                                title="Move Down"
+                              >
+                                <ArrowDown size={13} />
+                              </button>
+                            </div>
+                          </td>
                           <td className="py-3.5 px-4">
                             {isEditing ? (
                               <form onSubmit={handleRenameClass} className="flex items-center gap-2 max-w-xs" onClick={(e) => e.stopPropagation()}>

@@ -6,6 +6,10 @@ const classLevelSchema = new mongoose.Schema({
     required: true,
     unique: true,
     trim: true
+  },
+  order: {
+    type: Number,
+    default: 0
   }
 }, {
   timestamps: true
