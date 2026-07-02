@@ -410,16 +410,16 @@ const FeeLedgerPanel = () => {
                             <td className="py-4 px-4">
                               <div className="flex items-center gap-3">
                                 <div className="w-7 h-7 rounded-lg bg-gradient-to-tr from-primary-600/35 to-indigo-500/20 border border-primary-500/10 flex items-center justify-center font-bold text-white text-[10px] font-outfit uppercase">
-                                  {ledger.student_id?.name[0]}
+                                  {(ledger.student_id?.name || '?')[0]}
                                 </div>
                                 <div>
-                                  <div className="font-semibold text-white group-hover:text-primary-400 transition">{ledger.student_id?.name}</div>
+                                  <div className="font-semibold text-white group-hover:text-primary-400 transition">{ledger.student_id?.name || 'Unknown Student'}</div>
                                 </div>
                               </div>
                             </td>
                             <td className="py-4 px-4">
-                              <span className="px-2.5 py-0.5 rounded-lg bg-dark-900/80 border border-dark-800 text-[10px] text-slate-450 font-bold tracking-wider font-mono">
-                                Class {ledger.student_id?.class_level}
+                              <span className="px-2.5 py-0.5 rounded-lg bg-dark-900/80 border border-dark-800 text-[10px] text-slate-455 font-bold tracking-wider font-mono">
+                                Class {ledger.student_id?.class_level || 'N/A'}
                               </span>
                             </td>
                             <td className="py-4 px-4 text-right">
@@ -458,11 +458,11 @@ const FeeLedgerPanel = () => {
                   <div className="flex justify-between items-start border-b border-dark-800 pb-4">
                     <div className="flex items-center gap-3">
                       <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-primary-600 to-indigo-400 flex items-center justify-center font-bold text-white text-sm font-outfit shadow-md">
-                        {selectedLedger.student_id?.name[0].toUpperCase()}
+                        {((selectedLedger.student_id?.name || '?')[0]).toUpperCase()}
                       </div>
                       <div>
-                        <h3 className="text-base font-extrabold text-white font-outfit">{selectedLedger.student_id?.name}</h3>
-                        <p className="text-slate-455 text-[10px] mt-0.5 font-mono">Roll: {selectedLedger.student_id?.roll_number} • Class {selectedLedger.student_id?.class_level}</p>
+                        <h3 className="text-base font-extrabold text-white font-outfit">{selectedLedger.student_id?.name || 'Unknown Student'}</h3>
+                        <p className="text-slate-455 text-[10px] mt-0.5 font-mono">Roll: {selectedLedger.student_id?.roll_number || 'N/A'} • Class {selectedLedger.student_id?.class_level || 'N/A'}</p>
                       </div>
                     </div>
                     <button
