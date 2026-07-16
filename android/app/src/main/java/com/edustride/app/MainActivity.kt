@@ -20,6 +20,7 @@ import android.widget.Button
 import android.widget.ProgressBar
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
 import com.edustride.app.databinding.ActivityMainBinding
 
@@ -44,9 +45,13 @@ class MainActivity : AppCompatActivity() {
 
     // Set to hosted production URL (customizable via developer settings)
     private var APP_URL = "https://edustride.in"
+    private var isPageLoading = true
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
+        val splashScreen = installSplashScreen()
+        splashScreen.setKeepOnScreenCondition { isPageLoading }
+        
         super.onCreate(savedInstanceState)
         
         val prefs = getSharedPreferences("edustride_prefs", Context.MODE_PRIVATE)
@@ -90,6 +95,7 @@ class MainActivity : AppCompatActivity() {
                 binding.progressBar.visibility = View.GONE
                 binding.swipeRefresh.isRefreshing = false
                 binding.offlineLayout.visibility = View.GONE
+                isPageLoading = false // Smooth transition: dismiss splash screen when web content has finished rendering
             }
 
             override fun onReceivedError(
@@ -99,6 +105,7 @@ class MainActivity : AppCompatActivity() {
             ) {
                 if (request?.isForMainFrame == true) {
                     showOfflineScreen()
+                    isPageLoading = false // Dismiss splash screen on error so offline overlay is visible
                 }
             }
         }
