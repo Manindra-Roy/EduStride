@@ -45,14 +45,14 @@ class ChatSocketManager(private val socketUrl: String = "http://10.0.2.2:5000") 
                         val message = gson.fromJson(messageJson, ChatMessage::class.java)
                         listener.onMessageReceived(message)
                     } catch (e: Exception) {
-                        Log.error("SocketManager", "Failed to parse message json", e)
+                        Log.e("SocketManager", "Failed to parse message json", e)
                     }
                 }
             }
 
             socket?.connect()
         } catch (e: URISyntaxException) {
-            Log.error("SocketManager", "Invalid WebSocket URL syntax", e)
+            Log.e("SocketManager", "Invalid WebSocket URL syntax", e)
         }
     }
 
@@ -70,9 +70,4 @@ class ChatSocketManager(private val socketUrl: String = "http://10.0.2.2:5000") 
         socket?.off()
         socket = null
     }
-}
-
-// Simple Log extension for error printing
-private fun Log.Companion.error(tag: String, msg: String, tr: Throwable) {
-    w(tag, "$msg: ${tr.message}", tr)
 }

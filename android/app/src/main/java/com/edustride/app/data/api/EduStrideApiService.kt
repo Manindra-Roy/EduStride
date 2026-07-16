@@ -35,7 +35,7 @@ interface EduStrideApiService {
     @PUT("api/auth/profile-pic")
     fun uploadProfilePic(
         @Part avatar: MultipartBody.Part
-    ): Call<LoginResponse>
+    ): Call<ProfilePicResponse>
 
     companion object {
         // Change to your server's host IP (10.0.2.2 points to host's localhost in emulator)

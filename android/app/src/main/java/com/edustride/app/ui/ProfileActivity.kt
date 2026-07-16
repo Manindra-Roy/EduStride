@@ -23,6 +23,7 @@ import com.edustride.app.data.models.ApiResponseSingle
 import com.edustride.app.data.models.LoginResponse
 import com.edustride.app.data.models.PrefsManager
 import com.edustride.app.data.models.UserDto
+import com.edustride.app.data.models.ProfilePicResponse
 import com.edustride.app.databinding.ActivityProfileBinding
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.MultipartBody
@@ -218,8 +219,8 @@ class ProfileActivity : AppCompatActivity() {
         val requestFile = tempFile.asRequestBody("image/jpeg".toMediaTypeOrNull())
         val body = MultipartBody.Part.createFormData("avatar", tempFile.name, requestFile)
 
-        apiService.uploadProfilePic(body).enqueue(object : Callback<LoginResponse> {
-            override fun onResponse(call: Call<LoginResponse>, response: Response<LoginResponse>) {
+        apiService.uploadProfilePic(body).enqueue(object : Callback<ProfilePicResponse> {
+            override fun onResponse(call: Call<ProfilePicResponse>, response: Response<ProfilePicResponse>) {
                 binding.btnSaveAvatar.isEnabled = true
                 binding.btnSaveAvatar.text = "Save Repositioned Avatar"
 
@@ -242,7 +243,7 @@ class ProfileActivity : AppCompatActivity() {
                 }
             }
 
-            override fun onFailure(call: Call<LoginResponse>, t: Throwable) {
+            override fun onFailure(call: Call<ProfilePicResponse>, t: Throwable) {
                 binding.btnSaveAvatar.isEnabled = true
                 binding.btnSaveAvatar.text = "Save Repositioned Avatar"
                 Toast.makeText(this@ProfileActivity, "Network failure: ${t.message}", Toast.LENGTH_SHORT).show()

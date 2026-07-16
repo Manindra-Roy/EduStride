@@ -70,3 +70,9 @@ data class ChatMessage(
     val content: String,
     val created_at: String?
 )
+
+data class ProfilePicResponse(
+    val success: Boolean,
+    val message: String?,
+    val profile_pic: String?
+)
