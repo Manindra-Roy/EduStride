@@ -53,7 +53,11 @@ class ChatActivity : AppCompatActivity(), ChatSocketManager.ChatListener {
     }
 
     private fun setupSocket() {
-        socketManager = ChatSocketManager()
+        var url = prefsManager.serverUrl.trim()
+        if (url.endsWith("/")) {
+            url = url.substring(0, url.length - 1)
+        }
+        socketManager = ChatSocketManager(url)
         socketManager?.connect(classRoom, this)
     }
 

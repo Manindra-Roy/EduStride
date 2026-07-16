@@ -93,7 +93,11 @@ class ProfileActivity : AppCompatActivity() {
         if (!avatarUrl.isNullOrEmpty()) {
             var fullAvatarUrl = avatarUrl
             if (avatarUrl.startsWith("/uploads")) {
-                fullAvatarUrl = "http://10.0.2.2:5000" + avatarUrl
+                var base = prefsManager.serverUrl.trim()
+                if (base.endsWith("/")) {
+                    base = base.substring(0, base.length - 1)
+                }
+                fullAvatarUrl = base + avatarUrl
             }
             Glide.with(this)
                 .load(fullAvatarUrl)

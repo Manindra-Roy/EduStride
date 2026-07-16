@@ -12,7 +12,12 @@ class PrefsManager(context: Context) {
         private const val KEY_TOKEN = "jwt_token"
         private const val KEY_USER = "current_user"
         private const val KEY_THEME = "theme_accent"
+        private const val KEY_SERVER = "server_url"
     }
+
+    var serverUrl: String
+        get() = prefs.getString(KEY_SERVER, "http://10.0.2.2:5000/") ?: "http://10.0.2.2:5000/"
+        set(value) = prefs.edit().putString(KEY_SERVER, value).apply()
 
     var token: String?
         get() = prefs.getString(KEY_TOKEN, null)

@@ -111,7 +111,11 @@ class DashboardActivity : AppCompatActivity() {
             try {
                 var fileUrl = handout.file_url
                 if (fileUrl.startsWith("/uploads")) {
-                    fileUrl = "http://10.0.2.2:5000" + fileUrl
+                    var base = prefsManager.serverUrl.trim()
+                    if (base.endsWith("/")) {
+                        base = base.substring(0, base.length - 1)
+                    }
+                    fileUrl = base + fileUrl
                 }
                 val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse(fileUrl))
                 startActivity(browserIntent)
@@ -192,7 +196,11 @@ class DashboardActivity : AppCompatActivity() {
         if (!avatarUrl.isNullOrEmpty()) {
             var fullAvatarUrl = avatarUrl
             if (avatarUrl.startsWith("/uploads")) {
-                fullAvatarUrl = "http://10.0.2.2:5000" + avatarUrl
+                var base = prefsManager.serverUrl.trim()
+                if (base.endsWith("/")) {
+                    base = base.substring(0, base.length - 1)
+                }
+                fullAvatarUrl = base + avatarUrl
             }
             Glide.with(this)
                 .load(fullAvatarUrl)

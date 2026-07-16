@@ -37,6 +37,29 @@ class LoginActivity : AppCompatActivity() {
 
         apiService = EduStrideApiService.create(prefsManager)
 
+        binding.btnServerSettings.setOnClickListener {
+            val input = android.widget.EditText(this).apply {
+                setText(prefsManager.serverUrl)
+                setSingleLine(true)
+                setPadding(50, 40, 50, 40)
+            }
+            
+            androidx.appcompat.app.AlertDialog.Builder(this)
+                .setTitle("Server Connection URL")
+                .setMessage("Enter the backend URL (e.g., http://10.0.2.2:5000 or http://192.168.1.33:5000)")
+                .setView(input)
+                .setPositiveButton("Save") { _, _ ->
+                    val url = input.text.toString().trim()
+                    if (url.isNotEmpty()) {
+                        prefsManager.serverUrl = url
+                        apiService = EduStrideApiService.create(prefsManager)
+                        Toast.makeText(this@LoginActivity, "Server URL updated!", Toast.LENGTH_SHORT).show()
+                    }
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
+
         binding.btnLogin.setOnClickListener {
             handleLogin()
         }

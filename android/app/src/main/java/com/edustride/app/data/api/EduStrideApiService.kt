@@ -38,9 +38,6 @@ interface EduStrideApiService {
     ): Call<ProfilePicResponse>
 
     companion object {
-        // Change to your server's host IP (10.0.2.2 points to host's localhost in emulator)
-        private const val BASE_URL = "http://10.0.2.2:5000/" 
-
         fun create(prefsManager: PrefsManager): EduStrideApiService {
             val logging = HttpLoggingInterceptor().apply {
                 level = HttpLoggingInterceptor.Level.BODY
@@ -63,8 +60,14 @@ interface EduStrideApiService {
                 }
                 .build()
 
+            // Fetch dynamically and ensure trailing slash is present
+            var baseUrl = prefsManager.serverUrl.trim()
+            if (!baseUrl.endsWith("/")) {
+                baseUrl += "/"
+            }
+
             val retrofit = Retrofit.Builder()
-                .baseUrl(BASE_URL)
+                .baseUrl(baseUrl)
                 .client(client)
                 .addConverterFactory(GsonConverterFactory.create())
                 .build()
