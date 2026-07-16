@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
+import axios from 'axios';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { socket } from '../config/socket';
 import { useAuth } from './AuthContext';
@@ -67,16 +68,31 @@ export const CallProvider = ({ children }) => {
     }
 
     // Join room(s)
-    if (user.role === 'Student') {
-      const classLevel = user.studentProfile?.class_level;
-      if (classLevel) {
-        socket.emit('join_room', classLevel);
+    const joinClassrooms = async () => {
+      if (user.role === 'Student') {
+        const classLevel = user.studentProfile?.class_level;
+        if (classLevel) {
+          socket.emit('join_room', classLevel);
+        }
+      } else {
+        // Teachers and Admins join all active classrooms dynamically to monitor call activations
+        try {
+          const res = await axios.get('/api/classes');
+          if (res.data.success && Array.isArray(res.data.data)) {
+            res.data.data.forEach(room => socket.emit('join_room', room));
+          } else {
+            const fallbackRooms = ['VII', 'VIII', 'IX', 'X'];
+            fallbackRooms.forEach(room => socket.emit('join_room', room));
+          }
+        } catch (err) {
+          console.error('Failed to dynamically fetch classrooms for socket joining:', err);
+          const fallbackRooms = ['VII', 'VIII', 'IX', 'X'];
+          fallbackRooms.forEach(room => socket.emit('join_room', room));
+        }
       }
-    } else {
-      // Teachers and Admins join all classrooms to monitor call activations
-      const rooms = ['VII', 'VIII', 'IX', 'X'];
-      rooms.forEach(room => socket.emit('join_room', room));
-    }
+    };
+
+    joinClassrooms();
 
     const handleGlobalIncomingCall = (data) => {
       if (location.pathname !== '/chats') {

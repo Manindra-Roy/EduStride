@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { Mail, Lock, UserCheck, ArrowRight, GraduationCap, ShieldAlert, CheckCircle2, Trash2, Users, UserPlus, Edit, BookOpen, ArrowUp, ArrowDown } from 'lucide-react';
+import { Mail, Lock, UserCheck, ArrowRight, GraduationCap, ShieldAlert, CheckCircle2, Trash2, Users, UserPlus, Edit, BookOpen, ArrowUp, ArrowDown, ChevronDown, ChevronUp, Eye, EyeOff, Database, Server, Check } from 'lucide-react';
 import Logo from '../components/Logo';
 import Footer from '../components/Footer';
 import axios from 'axios';
@@ -44,6 +44,37 @@ const Register = () => {
   const [editingStudentId, setEditingStudentId] = useState(null);
   const [editStudentEmail, setEditStudentEmail] = useState('');
   const [updatingStudentEmail, setUpdatingStudentEmail] = useState(false);
+  const [selectedClassFilter, setSelectedClassFilter] = useState('All');
+  const [showPassword, setShowPassword] = useState(false);
+  const [passwordStrength, setPasswordStrength] = useState({ score: 0, label: '', color: 'bg-dark-800' });
+
+  const checkPasswordStrength = (pass) => {
+    if (!pass) {
+      setPasswordStrength({ score: 0, label: '', color: 'bg-dark-800' });
+      return;
+    }
+    if (pass.length < 6) {
+      setPasswordStrength({ score: 1, label: 'Weak', color: 'bg-rose-500' });
+      return;
+    }
+    let score = 1;
+    if (pass.length >= 8) score++;
+    if (/[A-Z]/.test(pass)) score++;
+    if (/[0-9]/.test(pass)) score++;
+    if (/[^A-Za-z0-9]/.test(pass)) score++;
+
+    let label = 'Weak';
+    let color = 'bg-rose-500';
+    if (score === 3) {
+      label = 'Medium';
+      color = 'bg-amber-500';
+    } else if (score >= 4) {
+      label = 'Strong';
+      color = 'bg-emerald-500';
+    }
+
+    setPasswordStrength({ score, label, color });
+  };
 
   const fetchClasses = async () => {
     try {
@@ -205,10 +236,10 @@ const Register = () => {
   };
 
   useEffect(() => {
-    if (user && user.role === 'SuperAdmin' && activeTab === 'teachers') {
+    if (user && user.role === 'SuperAdmin') {
       fetchTeachers();
     }
-  }, [user, activeTab]);
+  }, [user]);
 
   const handleDeleteTeacher = async (teacherId, teacherEmail) => {
     if (!window.confirm(`Are you sure you want to delete the teacher account for ${teacherEmail}? This action cannot be undone.`)) {
@@ -245,11 +276,13 @@ const Register = () => {
     }
   };
 
+
+
   useEffect(() => {
-    if (user && (user.role === 'SuperAdmin' || user.role === 'Teacher') && activeTab === 'students') {
+    if (user && (user.role === 'SuperAdmin' || user.role === 'Teacher')) {
       fetchStudents();
     }
-  }, [user, activeTab]);
+  }, [user]);
 
   const handleUpdateStudentEmail = async (e, studentUserId) => {
     e.preventDefault();
@@ -367,13 +400,22 @@ const Register = () => {
     );
   }
 
+  const filteredStudents = students.filter(student => {
+    if (selectedClassFilter === 'All') return true;
+    if (selectedClassFilter === 'Unassigned') {
+      const cl = student.studentProfile?.class_level;
+      return !cl || !classes.includes(cl);
+    }
+    return student.studentProfile?.class_level === selectedClassFilter;
+  });
+
   return (
     <div className={user ? "w-full max-w-5xl mx-auto py-2" : "min-h-screen flex items-center justify-center bg-[#07080a] bg-grid-pattern px-4 relative overflow-hidden"}>
       {!user && (
         <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] rounded-full bg-primary-600/10 blur-[150px] pointer-events-none" />
       )}
 
-      <div className={`w-full ${user && (user.role === 'SuperAdmin' || user.role === 'Teacher') && (activeTab === 'teachers' || activeTab === 'students' || activeTab === 'classes') ? 'max-w-5xl' : 'max-w-md'} z-10 mx-auto transition-all duration-300`}>
+      <div className={`w-full ${user && (user.role === 'SuperAdmin' || user.role === 'Teacher') ? 'max-w-5xl' : 'max-w-md'} z-10 mx-auto transition-all duration-300`}>
         {user ? (
           <div className="relative overflow-hidden rounded-2xl bg-gradient-to-r from-primary-900/40 via-dark-900/30 to-indigo-900/20 border border-dark-800/80 p-6 sm:p-8 shadow-xl mb-6">
             <div className="absolute top-0 right-0 p-8 opacity-10 pointer-events-none">
@@ -613,120 +655,175 @@ const Register = () => {
                   <p className="text-xs text-slate-400 mt-1">No student login accounts are currently provisioned.</p>
                 </div>
               ) : (
-                <div className="overflow-x-auto rounded-xl border border-dark-800/80 bg-dark-900/20">
-                  <table className="w-full text-left border-collapse text-xs">
-                    <thead>
-                      <tr className="border-b border-dark-800 bg-dark-950/60 text-slate-400 uppercase tracking-wider font-bold font-mono">
-                        <th className="py-3.5 px-4">Student Profile</th>
-                        <th className="py-3.5 px-4 hidden sm:table-cell">Class / Roll</th>
-                        <th className="py-3.5 px-4 hidden md:table-cell">Created At</th>
-                        <th className="py-3.5 px-4 text-right">Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-dark-800/60">
-                      {students.map((studentAccount) => {
-                        const isEditing = editingStudentId === studentAccount._id;
-                        return (
-                          <tr key={studentAccount._id} className="hover:bg-dark-900/30 transition-colors">
-                            <td className="py-3.5 px-4">
-                              <div className="flex items-center gap-3">
-                                {studentAccount.profile_pic ? (
-                                  <img
-                                    src={studentAccount.profile_pic}
-                                    alt="Avatar"
-                                    className="w-8 h-8 rounded-lg object-cover border border-primary-500/20"
-                                  />
-                                ) : (
-                                  <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-primary-600 to-indigo-400 flex items-center justify-center font-bold text-white text-xs">
-                                    {studentAccount.email[0].toUpperCase()}
-                                  </div>
-                                )}
-                                <div className="flex-1">
-                                  {isEditing ? (
-                                    <form onSubmit={(e) => handleUpdateStudentEmail(e, studentAccount._id)} className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 max-w-md" onClick={(e) => e.stopPropagation()}>
-                                      <input
-                                        type="email"
-                                        required
-                                        value={editStudentEmail}
-                                        onChange={(e) => setEditStudentEmail(e.target.value)}
-                                        className="px-2 py-1 rounded bg-dark-950 border border-dark-800 text-white text-xs outline-none focus:border-primary-500 w-full sm:w-64"
-                                        placeholder="New login/email address"
-                                      />
-                                      <div className="flex items-center gap-1.5 shrink-0">
-                                        <button
-                                          type="submit"
-                                          disabled={updatingStudentEmail}
-                                          className="px-2 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-[10px] font-bold"
-                                        >
-                                          {updatingStudentEmail ? 'Saving...' : 'Save'}
-                                        </button>
-                                        <button
-                                          type="button"
-                                          onClick={() => setEditingStudentId(null)}
-                                          className="px-2 py-1 bg-dark-800 hover:bg-dark-750 text-slate-350 rounded text-[10px] font-bold"
-                                        >
-                                          Cancel
-                                        </button>
-                                      </div>
-                                    </form>
-                                  ) : (
-                                    <>
-                                      <span className="text-white font-semibold block">{studentAccount.email}</span>
-                                      <span className="text-[10px] text-slate-400 block mt-0.5 font-medium">
-                                        Profile: {studentAccount.studentProfile?.name || 'Unlinked/Generic'}
-                                      </span>
-                                    </>
-                                  )}
-                                </div>
-                              </div>
-                            </td>
-                            <td className="py-3.5 px-4 text-slate-300 font-mono hidden sm:table-cell">
-                              {studentAccount.studentProfile ? (
-                                <span>Class {studentAccount.studentProfile.class_level} • Roll {studentAccount.studentProfile.roll_number}</span>
-                              ) : (
-                                <span className="text-slate-500 font-sans italic">Not bound</span>
-                              )}
-                            </td>
-                            <td className="py-3.5 px-4 text-slate-400 font-mono hidden md:table-cell">
-                              {new Date(studentAccount.createdAt).toLocaleDateString(undefined, {
-                                year: 'numeric',
-                                month: 'short',
-                                day: 'numeric'
-                              })}
-                            </td>
-                            <td className="py-3.5 px-4 text-right">
-                              {!isEditing && (
-                                <div className="flex justify-end gap-2">
-                                  <button
-                                    type="button"
-                                    onClick={() => { setEditingStudentId(studentAccount._id); setEditStudentEmail(studentAccount.email); }}
-                                    className="p-2 rounded-lg bg-sky-500/10 hover:bg-sky-500/20 text-sky-400 hover:text-sky-400 transition-colors border border-sky-950/20"
-                                    title="Edit Student Login ID/Email"
-                                  >
-                                    <Edit size={14} className="text-sky-400" />
-                                  </button>
-                                  <button
-                                    type="button"
-                                    disabled={deletingStudentId === studentAccount._id}
-                                    onClick={() => handleDeleteStudentAccount(studentAccount._id, studentAccount.email)}
-                                    className="p-2 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 hover:text-rose-400 transition-colors border border-rose-950/20 disabled:opacity-40"
-                                    title="Delete Student Account"
-                                  >
-                                    {deletingStudentId === studentAccount._id ? (
-                                      <div className="w-4 h-4 border-2 border-rose-500/30 border-t-rose-500 rounded-full animate-spin" />
-                                    ) : (
-                                      <Trash2 size={15} />
-                                    )}
-                                  </button>
-                                </div>
-                              )}
-                            </td>
+                <>
+                  {/* Class Filter Tabs */}
+                  <div className="flex flex-wrap items-center gap-2 mb-4 border-b border-dark-800/60 pb-4">
+                    <span className="text-slate-400 text-xs font-semibold mr-2 font-outfit">Filter by Class:</span>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedClassFilter('All')}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all duration-200 ${
+                        selectedClassFilter === 'All'
+                          ? 'bg-primary-600 text-white shadow-lg shadow-primary-500/20'
+                          : 'bg-dark-900/30 hover:bg-dark-900/60 text-slate-400 border border-dark-800 hover:text-white'
+                      }`}
+                    >
+                      All ({students.length})
+                    </button>
+                    {classes.map(c => {
+                      const count = students.filter(s => s.studentProfile?.class_level === c).length;
+                      return (
+                        <button
+                          key={c}
+                          type="button"
+                          onClick={() => setSelectedClassFilter(c)}
+                          className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all duration-200 ${
+                            selectedClassFilter === c
+                              ? 'bg-primary-600 text-white shadow-lg shadow-primary-500/20'
+                              : 'bg-dark-900/30 hover:bg-dark-900/60 text-slate-400 border border-dark-800 hover:text-white'
+                          }`}
+                        >
+                          Class {c} ({count})
+                        </button>
+                      );
+                    })}
+                    {students.filter(s => !s.studentProfile?.class_level || !classes.includes(s.studentProfile.class_level)).length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setSelectedClassFilter('Unassigned')}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all duration-200 ${
+                          selectedClassFilter === 'Unassigned'
+                            ? 'bg-primary-600 text-white shadow-lg shadow-primary-500/20'
+                            : 'bg-dark-900/30 hover:bg-dark-900/60 text-slate-400 border border-dark-800 hover:text-white'
+                        }`}
+                      >
+                        Unassigned ({students.filter(s => !s.studentProfile?.class_level || !classes.includes(s.studentProfile.class_level)).length})
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Filtered Student Table */}
+                  <div className="overflow-x-auto rounded-xl border border-dark-800/80 bg-dark-900/20">
+                    {filteredStudents.length === 0 ? (
+                      <div className="py-12 text-center text-slate-400 italic">
+                        No students found matching this class filter.
+                      </div>
+                    ) : (
+                      <table className="w-full text-left border-collapse text-xs">
+                        <thead>
+                          <tr className="border-b border-dark-800 bg-dark-950/60 text-slate-400 uppercase tracking-wider font-bold font-mono">
+                            <th className="py-3.5 px-4">Student Profile</th>
+                            <th className="py-3.5 px-4 hidden sm:table-cell">Class / Roll</th>
+                            <th className="py-3.5 px-4 hidden md:table-cell">Created At</th>
+                            <th className="py-3.5 px-4 text-right">Actions</th>
                           </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
+                        </thead>
+                        <tbody className="divide-y divide-dark-800/60">
+                          {filteredStudents.map((studentAccount) => {
+                            const isEditing = editingStudentId === studentAccount._id;
+                            return (
+                              <tr key={studentAccount._id} className="hover:bg-dark-900/30 transition-colors">
+                                <td className="py-3.5 px-4">
+                                  <div className="flex items-center gap-3">
+                                    {studentAccount.profile_pic ? (
+                                      <img
+                                        src={studentAccount.profile_pic}
+                                        alt="Avatar"
+                                        className="w-8 h-8 rounded-lg object-cover border border-primary-500/20"
+                                      />
+                                    ) : (
+                                      <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-primary-600 to-indigo-400 flex items-center justify-center font-bold text-white text-xs">
+                                        {studentAccount.email[0].toUpperCase()}
+                                      </div>
+                                    )}
+                                    <div className="flex-1">
+                                      {isEditing ? (
+                                        <form onSubmit={(e) => handleUpdateStudentEmail(e, studentAccount._id)} className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 max-w-md" onClick={(e) => e.stopPropagation()}>
+                                          <input
+                                            type="email"
+                                            required
+                                            value={editStudentEmail}
+                                            onChange={(e) => setEditStudentEmail(e.target.value)}
+                                            className="px-2 py-1 rounded bg-dark-950 border border-dark-800 text-white text-xs outline-none focus:border-primary-500 w-full sm:w-64"
+                                            placeholder="New login/email address"
+                                          />
+                                          <div className="flex items-center gap-1.5 shrink-0">
+                                            <button
+                                              type="submit"
+                                              disabled={updatingStudentEmail}
+                                              className="px-2 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-[10px] font-bold"
+                                            >
+                                              {updatingStudentEmail ? 'Saving...' : 'Save'}
+                                            </button>
+                                            <button
+                                              type="button"
+                                              onClick={() => setEditingStudentId(null)}
+                                              className="px-2 py-1 bg-dark-800 hover:bg-dark-750 text-slate-350 rounded text-[10px] font-bold"
+                                            >
+                                              Cancel
+                                            </button>
+                                          </div>
+                                        </form>
+                                      ) : (
+                                        <>
+                                          <span className="text-white font-semibold block">{studentAccount.email}</span>
+                                          <span className="text-[10px] text-slate-400 block mt-0.5 font-medium">
+                                            Profile: {studentAccount.studentProfile?.name || 'Unlinked/Generic'}
+                                          </span>
+                                        </>
+                                      )}
+                                    </div>
+                                  </div>
+                                </td>
+                                <td className="py-3.5 px-4 text-slate-300 font-mono hidden sm:table-cell">
+                                  {studentAccount.studentProfile ? (
+                                    <span>Class {studentAccount.studentProfile.class_level} • Roll {studentAccount.studentProfile.roll_number}</span>
+                                  ) : (
+                                    <span className="text-slate-500 font-sans italic">Not bound</span>
+                                  )}
+                                </td>
+                                <td className="py-3.5 px-4 text-slate-400 font-mono hidden md:table-cell">
+                                  {new Date(studentAccount.createdAt).toLocaleDateString(undefined, {
+                                    year: 'numeric',
+                                    month: 'short',
+                                    day: 'numeric'
+                                  })}
+                                </td>
+                                <td className="py-3.5 px-4 text-right">
+                                  {!isEditing && (
+                                    <div className="flex justify-end gap-2">
+                                      <button
+                                        type="button"
+                                        onClick={() => { setEditingStudentId(studentAccount._id); setEditStudentEmail(studentAccount.email); }}
+                                        className="p-2 rounded-lg bg-sky-500/10 hover:bg-sky-500/20 text-sky-400 hover:text-sky-400 transition-colors border border-sky-950/20"
+                                        title="Edit Student Login ID/Email"
+                                      >
+                                        <Edit size={14} className="text-sky-400" />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        disabled={deletingStudentId === studentAccount._id}
+                                        onClick={() => handleDeleteStudentAccount(studentAccount._id, studentAccount.email)}
+                                        className="p-2 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 hover:text-rose-400 transition-colors border border-rose-950/20 disabled:opacity-40"
+                                        title="Delete Student Account"
+                                      >
+                                        {deletingStudentId === studentAccount._id ? (
+                                          <div className="w-4 h-4 border-2 border-rose-500/30 border-t-rose-500 rounded-full animate-spin" />
+                                        ) : (
+                                          <Trash2 size={15} />
+                                        )}
+                                      </button>
+                                    </div>
+                                  )}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    )}
+                  </div>
+                </>
               )}
             </div>
           ) : user && user.role === 'SuperAdmin' && activeTab === 'teachers' ? (
@@ -806,129 +903,230 @@ const Register = () => {
               )}
             </div>
           ) : (
-            <form onSubmit={handleSubmit} className="space-y-4 relative">
-              <div>
-                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">Account Role</label>
-                <div className="relative">
-                  <span className="absolute inset-y-0 left-0 pl-3.5 flex items-center text-slate-500">
-                    <UserCheck size={18} />
-                  </span>
-                  
-                  {/* Conditionally render dropdown options depending on creator role */}
-                  {!user ? (
-                    <select
-                      value={role}
-                      disabled
-                      className="w-full pl-11 pr-4 py-3 rounded-xl bg-dark-900 border border-dark-800 text-white text-sm outline-none appearance-none cursor-not-allowed"
-                    >
-                      <option value="SuperAdmin">SuperAdmin (System Owner)</option>
-                    </select>
-                  ) : user.role === 'SuperAdmin' ? (
-                    <select
-                      value={role}
-                      onChange={(e) => setRole(e.target.value)}
-                      className="w-full pl-11 pr-4 py-3 rounded-xl bg-dark-900 border border-dark-800 focus:border-primary-500 text-white transition outline-none text-sm appearance-none"
-                    >
-                      <option value="Teacher">Academic Educator (Teacher)</option>
-                      <option value="Student">Student / Parent Portal</option>
-                    </select>
-                  ) : (
-                    <select
-                      value={role}
-                      disabled
-                      className="w-full pl-11 pr-4 py-3 rounded-xl bg-dark-900 border border-dark-800 text-white text-sm outline-none appearance-none cursor-not-allowed"
-                    >
-                      <option value="Student">Student / Parent Portal</option>
-                    </select>
-                  )}
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">Email Address</label>
-                <div className="relative">
-                  <span className="absolute inset-y-0 left-0 pl-3.5 flex items-center text-slate-500">
-                    <Mail size={18} />
-                  </span>
-                  <input
-                    type="email"
-                    required
-                    placeholder="name@institution.com"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    className="w-full pl-11 pr-4 py-3 rounded-xl bg-dark-900 border border-dark-800 focus:border-primary-500 focus:ring-1 focus:ring-primary-500 text-white placeholder-slate-500 transition duration-150 outline-none text-sm"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">Password</label>
-                <div className="relative">
-                  <span className="absolute inset-y-0 left-0 pl-3.5 flex items-center text-slate-500">
-                    <Lock size={18} />
-                  </span>
-                  <input
-                    type="password"
-                    required
-                    placeholder="••••••••"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    className="w-full pl-11 pr-4 py-3 rounded-xl bg-dark-900 border border-dark-800 focus:border-primary-500 focus:ring-1 focus:ring-primary-500 text-white placeholder-slate-500 transition duration-150 outline-none text-sm"
-                  />
-                </div>
-              </div>
-
-              {role === 'Student' && (
-                <div className="p-4 rounded-xl bg-primary-950/20 border border-primary-500/10 space-y-4 animate-fadeIn">
-                  <p className="text-xs text-primary-400 font-medium">
-                    Note: The student profile must already exist in the system (created in class lists) to bind.
-                  </p>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">Class Level</label>
-                      <select
-                        value={classLevel}
-                        onChange={(e) => setClassLevel(e.target.value)}
-                        className="w-full px-3 py-2.5 rounded-lg bg-dark-900 border border-dark-800 focus:border-primary-500 text-white text-sm outline-none"
-                      >
-                        {classes.map((c) => (
-                          <option key={c} value={c}>Class {c}</option>
-                        ))}
-                      </select>
-                    </div>
-                    <div>
-                      <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">Roll Number</label>
-                      <input
-                        type="text"
-                        required
-                        placeholder="e.g. 1"
-                        value={rollNumber}
-                        onChange={(e) => setRollNumber(e.target.value)}
-                        className="w-full px-3 py-2.5 rounded-lg bg-dark-900 border border-dark-800 focus:border-primary-500 text-white placeholder-slate-600 text-sm outline-none"
-                      />
-                      <span className="text-[10px] text-slate-500 mt-1 block">
-                        Enter your current progress-based roll number. Roll numbers automatically adjust as classroom progress changes.
+              <div className="grid grid-cols-1 md:grid-cols-12 gap-8 animate-fadeIn">
+                {/* Form Column */}
+                <form onSubmit={handleSubmit} className="space-y-4 md:col-span-7">
+                  <div>
+                    <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">Account Role</label>
+                    <div className="relative">
+                      <span className="absolute inset-y-0 left-0 pl-3.5 flex items-center text-slate-500">
+                        <UserCheck size={18} />
+                      </span>
+                      
+                      {/* Conditionally render dropdown options depending on creator role */}
+                      {!user ? (
+                        <select
+                          value={role}
+                          disabled
+                          className="w-full pl-11 pr-4 py-3 rounded-xl bg-dark-900 border border-dark-800 text-slate-450 text-sm outline-none appearance-none cursor-not-allowed"
+                        >
+                          <option value="SuperAdmin">SuperAdmin (System Owner)</option>
+                        </select>
+                      ) : user.role === 'SuperAdmin' ? (
+                        <select
+                          value={role}
+                          onChange={(e) => setRole(e.target.value)}
+                          className="w-full pl-11 pr-10 py-3 rounded-xl bg-dark-900 border border-dark-800 focus:border-primary-500 text-white transition outline-none text-sm appearance-none cursor-pointer"
+                        >
+                          <option value="Teacher">Academic Educator (Teacher)</option>
+                          <option value="Student">Student / Parent Portal</option>
+                        </select>
+                      ) : (
+                        <select
+                          value={role}
+                          disabled
+                          className="w-full pl-11 pr-4 py-3 rounded-xl bg-dark-900 border border-dark-800 text-slate-450 text-sm outline-none appearance-none cursor-not-allowed"
+                        >
+                          <option value="Student">Student / Parent Portal</option>
+                        </select>
+                      )}
+                      <span className="absolute inset-y-0 right-0 pr-3.5 flex items-center text-slate-500 pointer-events-none">
+                        <ChevronDown size={16} />
                       </span>
                     </div>
                   </div>
-                </div>
-              )}
 
-              <button
-                type="submit"
-                disabled={submitting}
-                className="w-full mt-6 py-3 rounded-xl bg-primary-600 hover:bg-primary-500 active:bg-primary-750 text-white font-medium text-sm transition duration-150 flex items-center justify-center gap-2 shadow-lg hover:shadow-primary-500/10"
-              >
-                {submitting ? (
-                  <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                ) : (
-                  <>
-                    <span>{user ? 'Provision User' : 'Initialize Owner'}</span>
-                    <ArrowRight size={16} />
-                  </>
-                )}
-              </button>
-            </form>
+                  <div>
+                    <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">Email Address</label>
+                    <div className="relative">
+                      <span className="absolute inset-y-0 left-0 pl-3.5 flex items-center text-slate-500">
+                        <Mail size={18} />
+                      </span>
+                      <input
+                        type="email"
+                        required
+                        placeholder="name@institution.com"
+                        value={email}
+                        onChange={(e) => setEmail(e.target.value)}
+                        className="w-full pl-11 pr-4 py-3 rounded-xl bg-dark-900 border border-dark-800 focus:border-primary-500 focus:ring-1 focus:ring-primary-500 text-white placeholder-slate-500 transition duration-150 outline-none text-sm"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">Password</label>
+                    <div className="relative">
+                      <span className="absolute inset-y-0 left-0 pl-3.5 flex items-center text-slate-500">
+                        <Lock size={18} />
+                      </span>
+                      <input
+                        type={showPassword ? "text" : "password"}
+                        required
+                        placeholder="••••••••"
+                        value={password}
+                        onChange={(e) => {
+                          setPassword(e.target.value);
+                          checkPasswordStrength(e.target.value);
+                        }}
+                        className="w-full pl-11 pr-10 py-3 rounded-xl bg-dark-900 border border-dark-800 focus:border-primary-500 focus:ring-1 focus:ring-primary-500 text-white placeholder-slate-500 transition duration-150 outline-none text-sm"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowPassword(!showPassword)}
+                        className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-500 hover:text-white transition"
+                      >
+                        {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+                      </button>
+                    </div>
+                    {/* Password Strength Meter */}
+                    {password && (
+                      <div className="mt-2.5 animate-fadeIn">
+                        <div className="flex items-center justify-between text-[10px] mb-1">
+                          <span className="text-slate-400 font-semibold uppercase tracking-wider">Password Strength:</span>
+                          <span className={`font-bold ${
+                            passwordStrength.label === 'Strong' ? 'text-emerald-400' :
+                            passwordStrength.label === 'Medium' ? 'text-amber-400' : 'text-rose-400'
+                          }`}>
+                            {passwordStrength.label}
+                          </span>
+                        </div>
+                        <div className="h-1.5 w-full bg-dark-950 rounded-full overflow-hidden border border-dark-850">
+                          <div
+                            className={`h-full ${passwordStrength.color} transition-all duration-300`}
+                            style={{ width: `${(passwordStrength.score / 5) * 100}%` }}
+                          />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {role === 'Student' && (
+                    <div className="p-4 rounded-xl bg-primary-950/20 border border-primary-500/10 space-y-4 animate-fadeIn">
+                      <p className="text-xs text-primary-400 font-medium">
+                        Note: The student profile must already exist in the system (created in class lists) to bind.
+                      </p>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">Class Level</label>
+                          <div className="relative">
+                            <select
+                              value={classLevel}
+                              onChange={(e) => setClassLevel(e.target.value)}
+                              className="w-full pl-3 pr-10 py-2.5 rounded-lg bg-dark-900 border border-dark-800 focus:border-primary-500 text-white text-sm outline-none appearance-none cursor-pointer"
+                            >
+                              {classes.map((c) => (
+                                <option key={c} value={c}>Class {c}</option>
+                              ))}
+                            </select>
+                            <span className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-500 pointer-events-none">
+                              <ChevronDown size={14} />
+                            </span>
+                          </div>
+                        </div>
+                        <div>
+                          <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">Roll Number</label>
+                          <input
+                            type="text"
+                            required
+                            placeholder="e.g. 1"
+                            value={rollNumber}
+                            onChange={(e) => setRollNumber(e.target.value)}
+                            className="w-full px-3 py-2.5 rounded-lg bg-dark-900 border border-dark-800 focus:border-primary-500 text-white placeholder-slate-600 text-sm outline-none"
+                          />
+                        </div>
+                      </div>
+                      <span className="text-[10px] text-slate-500 leading-relaxed block mt-1">
+                        Enter your current progress-based roll number. Roll numbers automatically adjust as classroom progress changes.
+                      </span>
+                    </div>
+                  )}
+
+                  <button
+                    type="submit"
+                    disabled={submitting}
+                    className="w-full mt-6 py-3 rounded-xl bg-primary-600 hover:bg-primary-500 active:bg-primary-750 text-white font-medium text-sm transition duration-150 flex items-center justify-center gap-2 shadow-lg hover:shadow-primary-500/10"
+                  >
+                    {submitting ? (
+                      <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    ) : (
+                      <>
+                        <span>{user ? 'Provision User' : 'Initialize Owner'}</span>
+                        <ArrowRight size={16} />
+                      </>
+                    )}
+                  </button>
+                </form>
+
+                {/* Stats & Info Column */}
+                <div className="md:col-span-5 space-y-6">
+                  {/* System Stats Card */}
+                  <div className="bg-dark-900/40 border border-dark-800/80 rounded-xl p-5 space-y-4">
+                    <h4 className="text-xs font-bold text-white uppercase tracking-wider border-b border-dark-800 pb-2 flex items-center gap-2">
+                      <Server size={14} className="text-primary-400" />
+                      System Status
+                    </h4>
+                    
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs text-slate-400">Database Status:</span>
+                        <span className="flex items-center gap-1.5 text-xs text-emerald-400 font-semibold font-mono">
+                          <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping shrink-0" />
+                          Online
+                        </span>
+                      </div>
+
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs text-slate-400">Total Classes Configured:</span>
+                        <span className="text-xs text-white font-bold font-mono">{classes.length}</span>
+                      </div>
+
+                      {user?.role === 'SuperAdmin' && (
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs text-slate-400">Provisioned Teachers:</span>
+                          <span className="text-xs text-white font-bold font-mono">{teachers.length}</span>
+                        </div>
+                      )}
+
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs text-slate-400">Provisioned Students:</span>
+                        <span className="text-xs text-white font-bold font-mono">{students.length}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Provisioning Guide */}
+                  <div className="bg-primary-950/10 border border-primary-900/20 rounded-xl p-5 space-y-3">
+                    <h4 className="text-xs font-bold text-primary-400 uppercase tracking-wider flex items-center gap-2">
+                      <Database size={14} />
+                      Provisioning Rules
+                    </h4>
+                    <ul className="space-y-2.5 text-xs text-slate-400 leading-relaxed list-none pl-0">
+                      <li className="flex gap-2">
+                        <Check size={14} className="text-primary-500 shrink-0 mt-0.5" />
+                        <span><strong>Valid Emails Only:</strong> Student/Teacher user accounts require valid Gmail or GSuite addresses.</span>
+                      </li>
+                      <li className="flex gap-2">
+                        <Check size={14} className="text-primary-500 shrink-0 mt-0.5" />
+                        <span><strong>Student Binding:</strong> Prior to provision student portal access, ensure their academic profile is added under class levels.</span>
+                      </li>
+                      <li className="flex gap-2">
+                        <Check size={14} className="text-primary-500 shrink-0 mt-0.5" />
+                        <span><strong>Permissions:</strong> Administrators are fully audited. Account revocation removes portal access immediately.</span>
+                      </li>
+                    </ul>
+                  </div>
+                </div>
+              </div>
           )}
         </div>
 

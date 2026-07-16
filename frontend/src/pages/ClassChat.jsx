@@ -27,7 +27,8 @@ import {
   GraduationCap,
   PhoneOff,
   MicOff,
-  Menu
+  Menu,
+  CornerUpLeft
 } from 'lucide-react';
 
 // Custom Voice Message Audio Player Component (EduStride Styling)
@@ -146,6 +147,7 @@ const ClassChat = ({ setAppSidebarOpen }) => {
 
   // Delete Confirmation state
   const [deleteConfirmMsgId, setDeleteConfirmMsgId] = useState(null);
+  const [replyToMessage, setReplyToMessage] = useState(null);
 
   // Chat message search filter states
   const [showSearchInChat, setShowSearchInChat] = useState(false);
@@ -526,14 +528,17 @@ const ClassChat = ({ setAppSidebarOpen }) => {
   }, []);
 
   const handleSendMessage = (e) => {
-    e.preventDefault();
+    if (e) e.preventDefault();
+
+    // Check if standard text message
     if (!typedMessage.trim()) return;
 
     const messageData = {
       class_level: currentRoom,
       sender_name: user.studentProfile?.name || (user.role === 'SuperAdmin' ? 'Admin' : 'Teacher'),
       sender_role: user.role,
-      message_text: typedMessage
+      message_text: typedMessage,
+      reply_to: replyToMessage ? replyToMessage._id : null
     };
 
     if (socketRef.current) {
@@ -550,6 +555,7 @@ const ClassChat = ({ setAppSidebarOpen }) => {
       }
     }
     setTypedMessage('');
+    setReplyToMessage(null);
     setShowEmojiTray(false);
   };
 
@@ -684,13 +690,15 @@ const ClassChat = ({ setAppSidebarOpen }) => {
       class_level: currentRoom,
       sender_name: user.studentProfile?.name || (user.role === 'SuperAdmin' ? 'Admin' : 'Teacher'),
       sender_role: user.role,
-      message_text: payload
+      message_text: payload,
+      reply_to: replyToMessage ? replyToMessage._id : null
     };
 
     if (socketRef.current) {
       socketRef.current.emit('send_message', messageData);
     }
 
+    setReplyToMessage(null);
     setSelectedAttachment(null);
     setShowAttachmentPreview(false);
   };
@@ -1070,6 +1078,25 @@ const ClassChat = ({ setAppSidebarOpen }) => {
                           ? `bg-gradient-to-tr from-primary-600 to-indigo-650 text-white border border-primary-500/20 shadow-lg shadow-primary-650/5 ${isSameSender ? 'rounded-br-2xl' : 'rounded-br-none'}` 
                           : `bg-dark-900/90 text-slate-100 border border-dark-800/80 shadow-md ${isSameSender ? 'rounded-bl-2xl' : 'rounded-bl-none'}`}
                       `}>
+                        {/* Reply Preview inside Message Bubble */}
+                        {msg.reply_to && (
+                          <div className={`
+                            mb-1.5 p-2 rounded-lg border-l-2 text-[10px] leading-snug max-w-full truncate
+                            ${isMe 
+                              ? 'bg-primary-950/20 border-primary-300 text-primary-200' 
+                              : 'bg-dark-950/50 border-primary-500/60 text-slate-350'}
+                          `}>
+                            <span className="font-bold block text-[9px] mb-0.5 opacity-90">
+                              {msg.reply_to.sender_name}
+                            </span>
+                            <span className="italic block truncate">
+                              {msg.reply_to.message_text.startsWith('{') && msg.reply_to.message_text.includes('"isAttachment"') 
+                                ? '📎 Attachment' 
+                                : msg.reply_to.message_text}
+                            </span>
+                          </div>
+                        )}
+                        
                         {/* Sender name for other users */}
                         {!isMe && !isSameSender && (
                           <span className={`text-[10px] font-extrabold mb-1.5 flex items-center gap-1.5 leading-none ${getNameColor(msg.sender_name)}`}>
@@ -1177,6 +1204,21 @@ const ClassChat = ({ setAppSidebarOpen }) => {
                           isMe ? 'text-primary-200/85' : 'text-slate-500/85'
                         }`}>
                           {msg._id && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setReplyToMessage(msg);
+                              }}
+                              className={`opacity-60 md:opacity-0 md:group-hover:opacity-100 hover:scale-110 active:scale-90 transition-all cursor-pointer mr-1 ${
+                                isMe ? 'text-primary-200 hover:text-white' : 'text-slate-500 hover:text-primary-400'
+                              }`}
+                              title="Reply to message"
+                            >
+                              <CornerUpLeft size={10} />
+                            </button>
+                          )}
+                          {msg._id && (
                             <div className="relative inline-flex items-center">
                               <button
                                 type="button"
@@ -1281,85 +1323,118 @@ const ClassChat = ({ setAppSidebarOpen }) => {
               {/* Main controls form */}
               <form 
                 onSubmit={handleSendMessage} 
-                className="p-3 bg-dark-900/40 border-t border-dark-800/80 flex gap-2.5 items-center"
+                className="p-3 bg-dark-900/40 border-t border-dark-800/80 flex flex-col gap-2.5"
               >
-                {isRecording ? (
-                  /* Audio recording active control bar */
-                  <div className="flex-1 bg-dark-950 border border-red-500/20 rounded-xl px-4 py-2 flex justify-between items-center gap-3 animate-fadeIn">
-                    <div className="flex items-center gap-2">
-                      <span className="w-2 h-2 bg-red-550 rounded-full animate-ping shrink-0" />
-                      <span className="text-xs font-bold text-red-500 font-mono">Recording {formatDuration(recordingDuration)}</span>
+                {replyToMessage && (
+                  <div className="flex items-center justify-between bg-dark-950/80 border border-dark-800/80 px-3 py-2 rounded-xl text-xs gap-3 border-l-2 border-l-primary-500 select-none animate-fadeIn">
+                    <div className="flex-1 overflow-hidden">
+                      <div className="flex items-center gap-1.5 mb-0.5">
+                        <span className="font-extrabold text-primary-400">Replying to {replyToMessage.sender_name}</span>
+                        <span className={`text-[7px] font-extrabold px-1.5 py-0.5 rounded uppercase font-mono tracking-wider ${
+                          replyToMessage.sender_role === 'SuperAdmin' || replyToMessage.sender_role === 'Admin'
+                            ? 'bg-indigo-500/15 text-indigo-400 border border-indigo-550/20'
+                            : replyToMessage.sender_role === 'Teacher'
+                              ? 'bg-amber-500/15 text-amber-400 border border-amber-550/20'
+                              : 'bg-primary-500/15 text-primary-400 border border-primary-550/20'
+                        }`}>
+                          {replyToMessage.sender_role === 'SuperAdmin' ? 'Admin' : replyToMessage.sender_role}
+                        </span>
+                      </div>
+                      <p className="text-slate-400 truncate italic">
+                        {replyToMessage.message_text.startsWith('{') && replyToMessage.message_text.includes('"isAttachment"') 
+                          ? '📎 Attachment' 
+                          : replyToMessage.message_text}
+                      </p>
                     </div>
-                    <div className="flex items-center gap-2">
-                      <button 
-                        type="button" 
-                        onClick={() => stopRecording(false)}
-                        className="px-3.5 py-1.5 rounded-xl bg-dark-900 border border-dark-800 hover:bg-dark-850 text-slate-400 hover:text-white text-xs font-semibold transition active:scale-95 cursor-pointer"
-                      >
-                        Cancel
-                      </button>
-                      <button 
-                        type="button" 
-                        onClick={() => stopRecording(true)}
-                        className="px-3.5 py-1.5 rounded-xl bg-primary-600 hover:bg-primary-500 text-white font-bold text-xs transition active:scale-95 flex items-center gap-1.5 cursor-pointer shadow-md shadow-primary-500/15"
-                      >
-                        <Send size={10} fill="currentColor" /> Send Voice
-                      </button>
-                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setReplyToMessage(null)}
+                      className="p-1 rounded-lg hover:bg-dark-800 text-slate-400 hover:text-white transition cursor-pointer shrink-0"
+                    >
+                      <X size={14} />
+                    </button>
                   </div>
-                ) : (
-                  /* Standard Input Bar controls */
-                  <>
-                    <div className="flex-1 bg-dark-950/85 border border-dark-850 rounded-xl px-3 py-1 flex items-center gap-2.5 focus-within:border-primary-500/40 transition">
-                      <button 
-                        type="button" 
-                        onClick={() => setShowEmojiTray(!showEmojiTray)}
-                        className={`p-1.5 rounded-lg hover:bg-dark-900/60 transition cursor-pointer ${showEmojiTray ? 'text-primary-400 bg-primary-500/10' : 'text-slate-400 hover:text-slate-200'}`} 
-                        title="Toggle emoji selector tray"
-                      >
-                        <Smile size={18} />
-                      </button>
-                      <button 
-                        type="button" 
-                        onClick={handleAttachmentClick}
-                        className="p-1.5 rounded-lg hover:bg-dark-900/60 text-slate-400 hover:text-slate-200 transition cursor-pointer" 
-                        title="Upload file handout or photo"
-                      >
-                        <Paperclip size={18} />
-                      </button>
-                      <input
-                        type="text"
-                        placeholder="Type a secure message..."
-                        value={typedMessage}
-                        onChange={(e) => setTypedMessage(e.target.value)}
-                        onFocus={() => {
-                          scrollToBottom('smooth');
-                        }}
-                        className="flex-1 bg-transparent border-none outline-none py-2 text-xs text-slate-100 placeholder-slate-550"
-                      />
-                    </div>
-                    
-                    {/* Voice/Send Morph button */}
-                    {typedMessage.trim() ? (
-                      <button
-                        type="submit"
-                        className="w-10 h-10 rounded-xl bg-primary-600 hover:bg-primary-500 text-white transition flex items-center justify-center shrink-0 shadow-lg shadow-primary-500/15 active:scale-95 cursor-pointer"
-                        title="Send text message"
-                      >
-                        <Send size={16} />
-                      </button>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={startRecording}
-                        className="w-10 h-10 rounded-xl bg-primary-600 hover:bg-primary-500 text-white transition flex items-center justify-center shrink-0 shadow-lg shadow-primary-500/15 active:scale-95 cursor-pointer"
-                        title="Press to record voice message"
-                      >
-                        <Mic size={16} />
-                      </button>
-                    )}
-                  </>
                 )}
+
+                <div className="flex gap-2.5 items-center w-full">
+                  {isRecording ? (
+                    /* Audio recording active control bar */
+                    <div className="flex-1 bg-dark-955 border border-red-500/20 rounded-xl px-4 py-2 flex justify-between items-center gap-3 animate-fadeIn">
+                      <div className="flex items-center gap-2">
+                        <span className="w-2 h-2 bg-red-550 rounded-full animate-ping shrink-0" />
+                        <span className="text-xs font-bold text-red-500 font-mono">Recording {formatDuration(recordingDuration)}</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button 
+                          type="button" 
+                          onClick={() => stopRecording(false)}
+                          className="px-3.5 py-1.5 rounded-xl bg-dark-900 border border-dark-800 hover:bg-dark-850 text-slate-400 hover:text-white text-xs font-semibold transition active:scale-95 cursor-pointer"
+                        >
+                          Cancel
+                        </button>
+                        <button 
+                          type="button" 
+                          onClick={() => stopRecording(true)}
+                          className="px-3.5 py-1.5 rounded-xl bg-primary-600 hover:bg-primary-500 text-white font-bold text-xs transition active:scale-95 flex items-center gap-1.5 cursor-pointer shadow-md shadow-primary-500/15"
+                        >
+                          <Send size={10} fill="currentColor" /> Send Voice
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    /* Standard Input Bar controls */
+                    <>
+                      <div className="flex-1 bg-dark-950/85 border border-dark-850 rounded-xl px-3 py-1 flex items-center gap-2.5 focus-within:border-primary-500/40 transition">
+                        <button 
+                          type="button" 
+                          onClick={() => setShowEmojiTray(!showEmojiTray)}
+                          className={`p-1.5 rounded-lg hover:bg-dark-900/60 transition cursor-pointer ${showEmojiTray ? 'text-primary-400 bg-primary-500/10' : 'text-slate-400 hover:text-slate-200'}`} 
+                          title="Toggle emoji selector tray"
+                        >
+                          <Smile size={18} />
+                        </button>
+                        <button 
+                          type="button" 
+                          onClick={handleAttachmentClick}
+                          className="p-1.5 rounded-lg hover:bg-dark-900/60 text-slate-400 hover:text-slate-200 transition cursor-pointer" 
+                          title="Upload file handout or photo"
+                        >
+                          <Paperclip size={18} />
+                        </button>
+                        <input
+                          type="text"
+                          placeholder="Type a secure message..."
+                          value={typedMessage}
+                          onChange={(e) => setTypedMessage(e.target.value)}
+                          onFocus={() => {
+                            scrollToBottom('smooth');
+                          }}
+                          className="flex-1 bg-transparent border-none outline-none py-2 text-xs text-slate-100 placeholder-slate-555"
+                        />
+                      </div>
+                      
+                      {/* Voice/Send Morph button */}
+                      {typedMessage.trim() ? (
+                        <button
+                          type="submit"
+                          className="w-10 h-10 rounded-xl bg-primary-600 hover:bg-primary-500 text-white transition flex items-center justify-center shrink-0 shadow-lg shadow-primary-500/15 active:scale-95 cursor-pointer"
+                          title="Send text message"
+                        >
+                          <Send size={16} />
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={startRecording}
+                          className="w-10 h-10 rounded-xl bg-primary-600 hover:bg-primary-500 text-white transition flex items-center justify-center shrink-0 shadow-lg shadow-primary-500/15 active:scale-95 cursor-pointer"
+                          title="Press to record voice message"
+                        >
+                          <Mic size={16} />
+                        </button>
+                      )}
+                    </>
+                  )}
+                </div>
               </form>
             </div>
           </>

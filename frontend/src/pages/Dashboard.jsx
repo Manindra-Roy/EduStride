@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import axios from 'axios';
 import { useAuth } from '../context/AuthContext';
 import { 
@@ -1021,9 +1022,9 @@ const Dashboard = () => {
               </div>
             </div>
           </div>
-          <a href="/automations" className="w-full mt-4 text-center py-2 rounded-xl bg-dark-900 hover:bg-dark-800 border border-dark-850 text-xs font-semibold text-slate-300 transition duration-150 block">
+          <Link to="/automations" className="w-full mt-4 text-center py-2 rounded-xl bg-dark-900 hover:bg-dark-800 border border-dark-850 text-xs font-semibold text-slate-300 transition duration-150 block">
             Manage Cron Systems
-          </a>
+          </Link>
         </div>
       </div>
     </div>

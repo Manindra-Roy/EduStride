@@ -120,15 +120,20 @@ export const initSocket = (server) => {
     // Listen for send_message
     socket.on('send_message', async (data) => {
       try {
-        const { class_level, sender_name, sender_role, message_text } = data;
+        const { class_level, sender_name, sender_role, message_text, reply_to } = data;
 
         // Save message to MongoDB
-        const chatMsg = await ChatMessage.create({
+        let chatMsg = await ChatMessage.create({
           class_level,
           sender_name,
           sender_role,
-          message_text
+          message_text,
+          reply_to: reply_to || null
         });
+
+        if (reply_to) {
+          chatMsg = await ChatMessage.findById(chatMsg._id).populate('reply_to');
+        }
 
         // Broadcast back to all clients in the class room
         io.to(class_level).emit('new_message', chatMsg);

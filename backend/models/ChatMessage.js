@@ -18,6 +18,11 @@ const chatMessageSchema = new mongoose.Schema({
     type: String,
     required: true
   },
+  reply_to: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'ChatMessage',
+    default: null
+  },
   reactions: [
     {
       emoji: String,

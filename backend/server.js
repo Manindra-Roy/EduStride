@@ -62,6 +62,7 @@ app.get('/api/chats/:class_level', async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'Invalid class level' });
     }
     const messages = await ChatMessage.find({ class_level })
+      .populate('reply_to')
       .sort({ created_at: 1 })
       .limit(100);
     res.json({ success: true, data: messages });
