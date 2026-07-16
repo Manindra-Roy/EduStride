@@ -138,6 +138,11 @@ class MainActivity : AppCompatActivity() {
                 showOfflineScreen()
             }
         }
+
+        // Only trigger pull-to-refresh if the WebView is at the absolute top of the page scroll
+        binding.swipeRefresh.setOnChildScrollUpCallback { _, _ ->
+            binding.webView.canScrollVertically(-1)
+        }
     }
 
     private fun setupOfflineOverlay() {
