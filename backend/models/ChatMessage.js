@@ -18,6 +18,12 @@ const chatMessageSchema = new mongoose.Schema({
     type: String,
     required: true
   },
+  reactions: [
+    {
+      emoji: String,
+      sender_name: String
+    }
+  ],
   created_at: {
     type: Date,
     default: Date.now

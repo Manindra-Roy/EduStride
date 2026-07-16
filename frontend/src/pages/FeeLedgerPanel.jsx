@@ -39,6 +39,7 @@ const FeeLedgerPanel = () => {
   
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
+  const [selectedClassFilter, setSelectedClassFilter] = useState('All');
   
   const [selectedLedger, setSelectedLedger] = useState(null);
   const [chartTab, setChartTab] = useState('revenue'); // 'revenue' or 'breakdown'
@@ -159,14 +160,30 @@ const FeeLedgerPanel = () => {
     fetchData();
   }, [user]);
 
-  // Frontend search
+  // Dynamic class list extraction
+  const classLevelsList = useMemo(() => {
+    const classes = new Set();
+    ledgers.forEach(l => {
+      if (l.student_id?.class_level) {
+        classes.add(l.student_id.class_level);
+      }
+    });
+    return ['All', ...Array.from(classes).sort()];
+  }, [ledgers]);
+
+  // Frontend search & class filter
   const filteredLedgers = useMemo(() => {
     return ledgers.filter(ledger => {
       const studentName = ledger.student_id?.name || '';
       const roll = ledger.student_id?.roll_number || '';
-      return studentName.toLowerCase().includes(searchQuery.toLowerCase()) || roll.includes(searchQuery);
+      const matchesSearch = studentName.toLowerCase().includes(searchQuery.toLowerCase()) || String(roll).includes(searchQuery);
+      
+      const matchesClass = selectedClassFilter === 'All' || 
+        ledger.student_id?.class_level === selectedClassFilter;
+        
+      return matchesSearch && matchesClass;
     });
-  }, [ledgers, searchQuery]);
+  }, [ledgers, searchQuery, selectedClassFilter]);
 
   // Trigger Mock Webhook Payment Confirmation (Student Gateway Checkout simulation)
   const handleCheckoutPayment = async () => {
@@ -265,7 +282,7 @@ const FeeLedgerPanel = () => {
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-stretch">
               {/* Financial stats widgets */}
               <div className="lg:col-span-2 grid grid-cols-1 md:grid-cols-3 gap-4">
-                <div className="glass-panel p-6 rounded-2xl border border-dark-800 flex flex-col justify-between hover:border-dark-700 transition">
+                <div className="glass-panel p-4 sm:p-6 rounded-2xl border border-dark-800 flex flex-col justify-between hover:border-dark-700 transition">
                   <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Total Expected Revenue</span>
                   <div className="mt-4">
                     <p className="text-3xl font-extrabold text-white font-outfit font-mono">₹{stats.totalExpectedRevenue.toLocaleString()}</p>
@@ -273,7 +290,7 @@ const FeeLedgerPanel = () => {
                   </div>
                 </div>
 
-                <div className="glass-panel p-6 rounded-2xl border border-dark-800 flex flex-col justify-between hover:border-dark-700 transition">
+                <div className="glass-panel p-4 sm:p-6 rounded-2xl border border-dark-800 flex flex-col justify-between hover:border-dark-700 transition">
                   <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Actual Collected Revenue</span>
                   <div className="mt-4">
                     <p className="text-3xl font-extrabold text-emerald-400 font-outfit font-mono">₹{stats.actualCollectedRevenue.toLocaleString()}</p>
@@ -285,7 +302,7 @@ const FeeLedgerPanel = () => {
                   </div>
                 </div>
 
-                <div className="glass-panel p-6 rounded-2xl border border-dark-800 flex flex-col justify-between hover:border-dark-700 transition">
+                <div className="glass-panel p-4 sm:p-6 rounded-2xl border border-dark-800 flex flex-col justify-between hover:border-dark-700 transition">
                   <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Outstanding Balance</span>
                   <div className="mt-4">
                     <p className="text-3xl font-extrabold text-rose-400 font-outfit font-mono">₹{stats.outstandingBalance.toLocaleString()}</p>
@@ -364,96 +381,200 @@ const FeeLedgerPanel = () => {
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
             {/* Left Column (Search & Table) */}
             <div className="lg:col-span-2 space-y-4">
-              <div className="relative">
-                <span className="absolute inset-y-0 left-0 pl-3.5 flex items-center text-slate-500 pointer-events-none">
-                  <Search size={16} />
-                </span>
-                <input
-                  type="text"
-                  placeholder="Search student ledgers by name or roll number..."
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  className="w-full pl-11 pr-4 py-3 rounded-xl bg-dark-900/50 border border-dark-800 focus:border-primary-500 focus:ring-1 focus:ring-primary-500 text-xs text-white placeholder-slate-500 outline-none transition duration-150 shadow-inner"
-                />
+              <div className="flex flex-col gap-3">
+                <div className="relative">
+                  <span className="absolute inset-y-0 left-0 pl-3.5 flex items-center text-slate-500 pointer-events-none">
+                    <Search size={16} />
+                  </span>
+                  <input
+                    type="text"
+                    placeholder="Search student ledgers by name or roll number..."
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    className="w-full pl-11 pr-4 py-3 rounded-xl bg-dark-900/50 border border-dark-800 focus:border-primary-500 focus:ring-1 focus:ring-primary-500 text-xs text-white placeholder-slate-500 outline-none transition duration-150 shadow-inner"
+                  />
+                </div>
+
+                {/* Class-Wise Student List filter tabs */}
+                {classLevelsList.length > 1 && (
+                  <div className="flex gap-1.5 overflow-x-auto pb-1 select-none scrollbar-none shrink-0">
+                    {classLevelsList.map((cls) => (
+                      <button
+                        key={cls}
+                        type="button"
+                        onClick={() => setSelectedClassFilter(cls)}
+                        className={`px-3 py-1.5 rounded-xl text-[10px] font-bold uppercase tracking-wider transition shrink-0 cursor-pointer ${
+                          selectedClassFilter === cls
+                            ? 'bg-primary-600 text-white shadow-md shadow-primary-500/15 border border-primary-500/30'
+                            : 'bg-dark-900/40 hover:bg-dark-900 text-slate-400 border border-dark-800'
+                        }`}
+                      >
+                        {cls === 'All' ? 'All Classes' : `Class ${cls}`}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
 
-              <div className="glass-panel rounded-2xl border border-dark-800 overflow-hidden shadow-2xl">
-                <div className="overflow-x-auto">
-                  {loading ? (
-                    <div className="text-center py-20">
-                      <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-primary-500 mx-auto"></div>
-                    </div>
-                  ) : filteredLedgers.length === 0 ? (
-                    <div className="text-center py-20 text-slate-500 text-sm">
-                      No ledgers matching queries.
-                    </div>
-                  ) : (
-                    <table className="w-full text-left border-collapse text-xs select-none">
-                      <thead>
-                        <tr className="border-b border-dark-800 bg-dark-950/60 text-slate-450 uppercase tracking-wider font-bold font-mono">
-                          <th className="py-3.5 px-4 rounded-tl-xl">Roll</th>
-                          <th className="py-3.5 px-4">Student</th>
-                          <th className="py-3.5 px-4">Class</th>
-                          <th className="py-3.5 px-4 text-right rounded-tr-xl">12-Month Matrix</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-dark-800/50">
-                        {filteredLedgers.map((ledger) => (
-                          <tr 
-                            key={ledger._id}
-                            onClick={() => setSelectedLedger(ledger)}
-                            className={`group cursor-pointer transition-all duration-150 hover:bg-dark-900/40 ${selectedLedger?._id === ledger._id ? 'bg-primary-600/5 border-l-2 border-l-primary-500' : ''}`}
-                          >
-                            <td className="py-4 px-4 font-mono font-bold text-slate-400 group-hover:text-white transition">
-                              {ledger.student_id?.roll_number}
-                            </td>
-                            <td className="py-4 px-4">
-                              <div className="flex items-center gap-3">
-                                <div className="w-7 h-7 rounded-lg bg-gradient-to-tr from-primary-600/35 to-indigo-500/20 border border-primary-500/10 flex items-center justify-center font-bold text-white text-[10px] font-outfit uppercase">
-                                  {(ledger.student_id?.name || '?')[0]}
-                                </div>
-                                <div>
-                                  <div className="font-semibold text-white group-hover:text-primary-400 transition">{ledger.student_id?.name || 'Unknown Student'}</div>
-                                </div>
-                              </div>
-                            </td>
-                            <td className="py-4 px-4">
-                              <span className="px-2.5 py-0.5 rounded-lg bg-dark-900/80 border border-dark-800 text-[10px] text-slate-455 font-bold tracking-wider font-mono">
-                                Class {ledger.student_id?.class_level || 'N/A'}
-                              </span>
-                            </td>
-                            <td className="py-4 px-4 text-right">
-                              <div className="flex gap-1.5 justify-end flex-wrap">
-                                {ledger.months.map((m) => (
-                                  <span 
-                                    key={m.month_name} 
-                                    title={`${m.month_name}: ${m.status}`}
-                                    className={`w-3.5 h-3.5 rounded-full flex items-center justify-center text-[7px] font-bold transition duration-150 hover:scale-110 ${
-                                      m.status === 'Paid' 
-                                        ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' 
-                                        : m.status === 'Partial/Pending'
-                                          ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
-                                          : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
-                                    }`}
-                                  >
-                                    {m.month_name[0]}
-                                  </span>
-                                ))}
-                              </div>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  )}
+              {loading ? (
+                <div className="glass-panel p-4 sm:p-6 rounded-2xl border border-dark-800 p-20 text-center shadow-2xl">
+                  <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-primary-500 mx-auto"></div>
                 </div>
-              </div>
+              ) : filteredLedgers.length === 0 ? (
+                <div className="glass-panel p-4 sm:p-6 rounded-2xl border border-dark-800 p-20 text-center text-slate-500 text-sm shadow-2xl">
+                  No ledgers matching queries.
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {/* Desktop Table View */}
+                  <div className="hidden md:block glass-panel p-4 sm:p-6 rounded-2xl border border-dark-800 overflow-hidden shadow-2xl">
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left border-collapse text-xs select-none">
+                        <thead>
+                          <tr className="border-b border-dark-800 bg-dark-950/60 text-slate-455 uppercase tracking-wider font-bold font-mono">
+                            <th className="py-3.5 px-4 rounded-tl-xl">Roll</th>
+                            <th className="py-3.5 px-4">Student</th>
+                            <th className="py-3.5 px-4">Class</th>
+                            <th className="py-3.5 px-4 text-right rounded-tr-xl">12-Month Matrix</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-dark-800/50">
+                          {filteredLedgers.map((ledger) => (
+                            <tr 
+                              key={ledger._id}
+                              onClick={() => setSelectedLedger(ledger)}
+                              className={`group cursor-pointer transition-all duration-150 hover:bg-dark-900/40 ${selectedLedger?._id === ledger._id ? 'bg-primary-600/5 border-l-2 border-l-primary-500' : ''}`}
+                            >
+                              <td className="py-4 px-4 font-mono font-bold text-slate-400 group-hover:text-white transition">
+                                {ledger.student_id?.roll_number}
+                              </td>
+                              <td className="py-4 px-4">
+                                <div className="flex items-center gap-3">
+                                  <div className="w-7 h-7 rounded-lg bg-gradient-to-tr from-primary-600/35 to-indigo-500/20 border border-primary-500/10 flex items-center justify-center font-bold text-white text-[10px] font-outfit uppercase">
+                                    {(ledger.student_id?.name || '?')[0]}
+                                  </div>
+                                  <div>
+                                    <div className="font-semibold text-white group-hover:text-primary-400 transition">{ledger.student_id?.name || 'Unknown Student'}</div>
+                                  </div>
+                                </div>
+                              </td>
+                              <td className="py-4 px-4">
+                                <span className="px-2.5 py-0.5 rounded-lg bg-dark-900/80 border border-dark-800 text-[10px] text-slate-455 font-bold tracking-wider font-mono">
+                                  Class {ledger.student_id?.class_level || 'N/A'}
+                                </span>
+                              </td>
+                              <td className="py-4 px-4 text-right">
+                                <div className="flex gap-1.5 justify-end flex-wrap">
+                                  {ledger.months.map((m) => (
+                                    <span 
+                                      key={m.month_name} 
+                                      title={`${m.month_name}: ${m.status}`}
+                                      className={`w-3.5 h-3.5 rounded-full flex items-center justify-center text-[7px] font-bold transition duration-150 hover:scale-110 ${
+                                        m.status === 'Paid' 
+                                          ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' 
+                                          : m.status === 'Partial/Pending'
+                                            ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
+                                            : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
+                                      }`}
+                                    >
+                                      {m.month_name[0]}
+                                    </span>
+                                  ))}
+                                </div>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  {/* Mobile Roster Cards View */}
+                  <div className="grid grid-cols-1 gap-3 md:hidden">
+                    {filteredLedgers.map((ledger) => {
+                      const isSelected = selectedLedger?._id === ledger._id;
+                      let paidCount = 0;
+                      let unpaidCount = 0;
+                      let pendingCount = 0;
+                      ledger.months.forEach(m => {
+                        if (m.status === 'Paid') paidCount++;
+                        else if (m.status === 'Unpaid') unpaidCount++;
+                        else if (m.status === 'Partial/Pending') pendingCount++;
+                      });
+
+                      return (
+                        <div
+                          key={ledger._id}
+                          onClick={() => setSelectedLedger(ledger)}
+                          className={`glass-panel p-4 rounded-2xl border border-dark-800/80 hover:border-dark-750 flex flex-col gap-3.5 transition cursor-pointer ${
+                            isSelected ? 'bg-primary-600/5 border-l-2 border-l-primary-500' : 'bg-dark-900/10'
+                          }`}
+                        >
+                          {/* Student details top header */}
+                          <div className="flex justify-between items-start">
+                            <div className="flex items-center gap-2.5">
+                              <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-primary-600/35 to-indigo-500/20 border border-primary-500/10 flex items-center justify-center font-bold text-white text-[11px] font-outfit uppercase">
+                                {(ledger.student_id?.name || '?')[0]}
+                              </div>
+                              <div>
+                                <h4 className="font-bold text-white text-xs">{ledger.student_id?.name || 'Unknown Student'}</h4>
+                                <p className="text-[9px] text-slate-450 font-mono mt-0.5">Roll: {ledger.student_id?.roll_number || 'N/A'}</p>
+                              </div>
+                            </div>
+                            <span className="px-2 py-0.5 rounded-lg bg-dark-950/60 border border-dark-800 text-[9px] text-slate-400 font-bold tracking-wider font-mono">
+                              Class {ledger.student_id?.class_level || 'N/A'}
+                            </span>
+                          </div>
+
+                          {/* Quick summary numbers bar */}
+                          <div className="grid grid-cols-3 gap-2 py-2 px-2.5 rounded-xl bg-dark-950/40 border border-dark-850/80 text-center text-[9px] font-bold uppercase tracking-wider select-none font-mono">
+                            <div>
+                              <span className="text-slate-500 block mb-0.5">Paid</span>
+                              <span className="text-emerald-400 text-[10px]">{paidCount}m</span>
+                            </div>
+                            <div className="border-x border-dark-850/60">
+                              <span className="text-slate-500 block mb-0.5">Pending</span>
+                              <span className="text-amber-400 text-[10px]">{pendingCount}m</span>
+                            </div>
+                            <div>
+                              <span className="text-slate-500 block mb-0.5">Unpaid</span>
+                              <span className="text-rose-400 text-[10px]">{unpaidCount}m</span>
+                            </div>
+                          </div>
+
+                          {/* 12-Month Matrix status indicators grid */}
+                          <div className="space-y-1.5">
+                            <span className="text-[8px] font-black uppercase tracking-widest text-slate-500 font-mono">12-Month Matrix</span>
+                            <div className="grid grid-cols-6 gap-1">
+                              {ledger.months.map((m) => (
+                                <span
+                                  key={m.month_name}
+                                  title={`${m.month_name}: ${m.status}`}
+                                  className={`h-5 rounded flex items-center justify-center text-[7.5px] font-extrabold transition duration-150 ${
+                                    m.status === 'Paid'
+                                      ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                                      : m.status === 'Partial/Pending'
+                                        ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
+                                        : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
+                                  }`}
+                                >
+                                  {m.month_name.substring(0, 3)}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Right Column (Single Ledger Detail & Actions) */}
             <div className="space-y-6" ref={detailPanelRef}>
               {selectedLedger ? (
-                <div className="glass-panel p-6 rounded-2xl border border-dark-800 space-y-6 relative overflow-hidden">
+                <div className="glass-panel p-4 sm:p-6 rounded-2xl border border-dark-800 space-y-6 relative overflow-hidden">
                   <div className="absolute -top-20 -right-20 w-40 h-40 rounded-full bg-primary-600/5 blur-[50px]" />
                   <div className="flex justify-between items-start border-b border-dark-800 pb-4">
                     <div className="flex items-center gap-3">
@@ -611,7 +732,7 @@ const FeeLedgerPanel = () => {
           </div>
 
           {/* Right Column (Personal Invoice logs) */}
-          <div className="glass-panel p-6 rounded-2xl border border-dark-800 space-y-6">
+          <div className="glass-panel p-4 sm:p-6 rounded-2xl border border-dark-800 space-y-6">
             <h3 className="text-white text-base font-bold font-outfit mb-3 flex items-center gap-2">
               <FileText className="text-primary-500" size={18} />
               <span>Receipt Logs</span>
@@ -704,65 +825,91 @@ const FeeLedgerPanel = () => {
 
               {/* Online simulator view */}
               {paymentType === 'online' ? (
-                <div className="space-y-4">
-                  {/* Simulated Premium Glass Credit Card */}
-                  <div className="relative h-44 rounded-2xl bg-gradient-to-br from-indigo-600/90 to-purple-800/90 border border-indigo-500/30 p-5 text-white flex flex-col justify-between shadow-xl shadow-indigo-950/20 overflow-hidden font-mono select-none">
-                    <div className="absolute top-0 right-0 p-6 opacity-5 pointer-events-none">
-                      <CreditCard size={150} />
-                    </div>
-                    <div className="flex justify-between items-center">
-                      <span className="text-[10px] font-bold uppercase tracking-wider bg-white/10 px-2 py-0.5 rounded">Stripe Simulator</span>
-                      <div className="w-8 h-6 rounded bg-amber-500/80 border border-amber-400/40 relative overflow-hidden flex items-center justify-center">
-                        <div className="w-full h-0.5 bg-dark-900/10 absolute top-1.5" />
-                        <div className="w-full h-0.5 bg-dark-900/10 absolute top-3" />
+                user.role === 'Student' ? (
+                  /* Restricted warning view for Student accounts */
+                  <div className="space-y-4 animate-fadeIn">
+                    <div className="p-5.5 rounded-2xl bg-rose-500/5 border border-rose-500/20 text-center space-y-3.5 shadow-md relative overflow-hidden">
+                      <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_120%,rgba(244,63,94,0.05),transparent)] pointer-events-none" />
+                      <div className="w-12 h-12 rounded-full bg-rose-500/10 text-rose-450 border border-rose-500/20 flex items-center justify-center text-xl mx-auto shadow-sm">
+                        ⚠️
+                      </div>
+                      <div className="space-y-1 relative z-10">
+                        <h4 className="text-xs font-bold text-white uppercase tracking-wider font-outfit">Online Transactions Restricted</h4>
+                        <p className="text-[10.5px] text-slate-400 font-medium font-sans leading-relaxed px-1">
+                          Online checkouts are currently locked for this portal account. Please visit the institution's main desk during operating hours to settle fees in cash or request direct billing support.
+                        </p>
                       </div>
                     </div>
-                    <div className="text-base font-bold tracking-widest text-center text-slate-100">
-                      4242 •••• •••• {Date.now().toString().substring(9)}
-                    </div>
-                    <div className="flex justify-between items-end text-[10px]">
-                      <div>
-                        <span className="text-slate-400 block text-[8px] uppercase tracking-wider font-semibold">Cardholder</span>
-                        <span className="font-semibold text-slate-200">{user.studentProfile?.name || 'STUDENT USER'}</span>
-                      </div>
-                      <div className="flex gap-4 font-mono">
-                        <div>
-                          <span className="text-slate-400 block text-[8px] uppercase tracking-wider font-semibold">Expiry</span>
-                          <span className="font-semibold text-slate-200">12/28</span>
-                        </div>
-                        <div>
-                          <span className="text-slate-400 block text-[8px] uppercase tracking-wider font-semibold">CVV</span>
-                          <span className="font-semibold text-slate-200">•••</span>
-                        </div>
-                      </div>
-                    </div>
+                    <button
+                      type="button"
+                      disabled
+                      className="w-full py-2.5 rounded-xl bg-dark-950 border border-dark-850/80 text-slate-550 font-bold text-xs text-center cursor-not-allowed select-none border-dashed"
+                    >
+                      Gateway Payments Offline
+                    </button>
                   </div>
+                ) : (
+                  /* Standard simulator view for Admins/Teachers */
+                  <div className="space-y-4">
+                    {/* Simulated Premium Glass Credit Card */}
+                    <div className="relative h-44 rounded-2xl bg-gradient-to-br from-indigo-600/90 to-purple-800/90 border border-indigo-500/30 p-5 text-white flex flex-col justify-between shadow-xl shadow-indigo-950/20 overflow-hidden font-mono select-none">
+                      <div className="absolute top-0 right-0 p-6 opacity-5 pointer-events-none">
+                        <CreditCard size={150} />
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-[10px] font-bold uppercase tracking-wider bg-white/10 px-2 py-0.5 rounded">Stripe Simulator</span>
+                        <div className="w-8 h-6 rounded bg-amber-500/80 border border-amber-400/40 relative overflow-hidden flex items-center justify-center">
+                          <div className="w-full h-0.5 bg-dark-900/10 absolute top-1.5" />
+                          <div className="w-full h-0.5 bg-dark-900/10 absolute top-3" />
+                        </div>
+                      </div>
+                      <div className="text-base font-bold tracking-widest text-center text-slate-100">
+                        4242 •••• •••• {Date.now().toString().substring(9)}
+                      </div>
+                      <div className="flex justify-between items-end text-[10px]">
+                        <div>
+                          <span className="text-slate-400 block text-[8px] uppercase tracking-wider font-semibold">Cardholder</span>
+                          <span className="font-semibold text-slate-200">{user.studentProfile?.name || 'STUDENT USER'}</span>
+                        </div>
+                        <div className="flex gap-4 font-mono">
+                          <div>
+                            <span className="text-slate-400 block text-[8px] uppercase tracking-wider font-semibold">Expiry</span>
+                            <span className="font-semibold text-slate-200">12/28</span>
+                          </div>
+                          <div>
+                            <span className="text-slate-400 block text-[8px] uppercase tracking-wider font-semibold">CVV</span>
+                            <span className="font-semibold text-slate-200">•••</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
 
-                  <div className="p-3 rounded-xl bg-primary-950/40 border border-primary-800/30 space-y-1.5">
-                    <p className="text-[11px] text-slate-350 leading-relaxed">
-                      Settle this ledger month instantly by firing a transaction to the public webhook API.
-                    </p>
+                    <div className="p-3 rounded-xl bg-primary-950/40 border border-primary-800/30 space-y-1.5">
+                      <p className="text-[11px] text-slate-350 leading-relaxed">
+                        Settle this ledger month instantly by firing a transaction to the public webhook API.
+                      </p>
+                    </div>
+
+                    <button 
+                      type="button"
+                      onClick={handleCheckoutPayment}
+                      disabled={submitting}
+                      className="w-full py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs transition duration-150 flex items-center justify-center gap-1.5 shadow-md shadow-emerald-500/10 disabled:opacity-40"
+                    >
+                      {submitting ? (
+                        <>
+                          <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                          <span>Simulating webhook hook...</span>
+                        </>
+                      ) : (
+                        <>
+                          <CheckCircle size={14} />
+                          <span>Authorize Stripe Webhook Checkout</span>
+                        </>
+                      )}
+                    </button>
                   </div>
-
-                  <button 
-                    type="button"
-                    onClick={handleCheckoutPayment}
-                    disabled={submitting}
-                    className="w-full py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs transition duration-150 flex items-center justify-center gap-1.5 shadow-md shadow-emerald-500/10 disabled:opacity-40"
-                  >
-                    {submitting ? (
-                      <>
-                        <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                        <span>Simulating webhook hook...</span>
-                      </>
-                    ) : (
-                      <>
-                        <CheckCircle size={14} />
-                        <span>Authorize Stripe Webhook Checkout</span>
-                      </>
-                    )}
-                  </button>
-                </div>
+                )
               ) : (
                 /* Cash offline instructions view */
                 <div className="space-y-4 animate-fadeIn">

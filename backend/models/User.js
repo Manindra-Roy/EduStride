@@ -28,8 +28,8 @@ const userSchema = new mongoose.Schema({
   },
   theme_color: {
     type: String,
-    enum: ['indigo', 'emerald', 'amber', 'rose', 'violet', 'cyan'],
-    default: 'indigo'
+    enum: ['indigo', 'emerald', 'amber', 'rose', 'violet', 'cyan', null],
+    default: null
   }
 }, {
   timestamps: true

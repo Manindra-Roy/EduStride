@@ -2,6 +2,7 @@ import { Server } from 'socket.io';
 import ChatMessage from '../models/ChatMessage.js';
 
 const activeCalls = new Map(); // class_level -> callDetails
+const roomMembers = new Map(); // class_level -> Map of socket.id -> { sender_name, sender_role }
 
 export const initSocket = (server) => {
   const io = new Server(server, {
@@ -10,6 +11,30 @@ export const initSocket = (server) => {
       methods: ['GET', 'POST']
     }
   });
+
+  const sendMembersList = (class_level) => {
+    const membersMap = roomMembers.get(class_level);
+    const membersList = membersMap ? Array.from(membersMap.values()) : [];
+    // De-duplicate members by sender_name
+    const uniqueMembers = [];
+    const seen = new Set();
+    for (const m of membersList) {
+      if (!seen.has(m.sender_name)) {
+        seen.add(m.sender_name);
+        uniqueMembers.push(m);
+      }
+    }
+    io.to(class_level).emit('room_members', uniqueMembers);
+  };
+
+  const removeUserFromRooms = (socketId) => {
+    for (const [class_level, members] of roomMembers.entries()) {
+      if (members.has(socketId)) {
+        members.delete(socketId);
+        sendMembersList(class_level);
+      }
+    }
+  };
 
   io.on('connection', (socket) => {
     console.log(`Socket connected: ${socket.id}`);
@@ -22,6 +47,73 @@ export const initSocket = (server) => {
       // Immediately notify the user if there is an active call in this room
       if (activeCalls.has(class_level)) {
         socket.emit('incoming_call', activeCalls.get(class_level));
+      }
+    });
+
+    // Listen for chat presence room joining
+    socket.on('join_room_chat', (data) => {
+      const { class_level, sender_name, sender_role } = data;
+      socket.join(class_level);
+      
+      // Remove from any other rooms first
+      removeUserFromRooms(socket.id);
+      
+      if (!roomMembers.has(class_level)) {
+        roomMembers.set(class_level, new Map());
+      }
+      roomMembers.get(class_level).set(socket.id, { sender_name, sender_role });
+      
+      console.log(`User ${sender_name} (${sender_role}) joined chat presence for room: ${class_level}`);
+      sendMembersList(class_level);
+
+      // Immediately notify active call
+      if (activeCalls.has(class_level)) {
+        socket.emit('incoming_call', activeCalls.get(class_level));
+      }
+    });
+
+    // Listen for leaving chat room presence
+    socket.on('leave_room_chat', () => {
+      removeUserFromRooms(socket.id);
+    });
+
+    // Listen for typing indicators
+    socket.on('typing_status', (data) => {
+      const { class_level, sender_name, is_typing } = data;
+      socket.to(class_level).emit('typing_status', { sender_name, is_typing });
+    });
+
+    // Listen for message reactions
+    socket.on('add_reaction', async (data) => {
+      try {
+        const { message_id, class_level, emoji, sender_name } = data;
+        
+        // Find message
+        const message = await ChatMessage.findById(message_id);
+        if (!message) return;
+
+        // If user already reacted with this emoji, toggle it off (remove it)
+        const existingIndex = message.reactions.findIndex(
+          (r) => r.emoji === emoji && r.sender_name === sender_name
+        );
+
+        if (existingIndex > -1) {
+          // Remove reaction
+          message.reactions.splice(existingIndex, 1);
+        } else {
+          // Add new reaction (and optionally remove any other reaction by this user on this message)
+          message.reactions.push({ emoji, sender_name });
+        }
+
+        await message.save();
+
+        // Broadcast update to all clients in the room
+        io.to(class_level).emit('message_reaction_updated', {
+          message_id,
+          reactions: message.reactions
+        });
+      } catch (error) {
+        console.error('Socket error in add_reaction:', error.message);
       }
     });
 
@@ -89,6 +181,8 @@ export const initSocket = (server) => {
 
     socket.on('disconnect', () => {
       console.log(`Socket disconnected: ${socket.id}`);
+      removeUserFromRooms(socket.id);
+      
       // Terminate any calls hosted by this socket after a 5-second grace period
       for (const [class_level, callData] of activeCalls.entries()) {
         if (callData.hostSocketId === socket.id) {

@@ -16,7 +16,7 @@ import {
   CheckCheck, 
   Search,
   Lock,
-  Sparkles,
+  Bell,
   X,
   Play,
   Pause,
@@ -26,7 +26,8 @@ import {
   Trash2,
   GraduationCap,
   PhoneOff,
-  MicOff
+  MicOff,
+  Menu
 } from 'lucide-react';
 
 // Custom Voice Message Audio Player Component (EduStride Styling)
@@ -56,40 +57,48 @@ const VoicePlayer = ({ src }) => {
     }
   }, [src]);
 
+  // Curated premium waveform pattern (18 bars)
+  const wavePattern = [2, 3, 5, 2, 6, 7, 4, 3, 2, 4, 6, 8, 7, 5, 3, 6, 2, 4];
+
   return (
-    <div className="flex items-center gap-3 bg-dark-950/70 backdrop-blur p-3 rounded-xl border border-dark-800 w-52 sm:w-60 mt-1 select-none shadow-md">
+    <div className="flex items-center gap-3 bg-dark-950/85 backdrop-blur-md p-3.5 rounded-2xl border border-dark-800/80 w-56 sm:w-64 mt-1.5 select-none shadow-lg shadow-black/20">
       <audio ref={audioRef} src={src} className="hidden" />
       <button 
         type="button" 
         onClick={togglePlay}
-        className="w-8 h-8 rounded-xl bg-primary-600 text-white flex items-center justify-center hover:bg-primary-500 transition shrink-0 shadow-md shadow-primary-500/20 cursor-pointer active:scale-90"
+        className="w-9 h-9 rounded-xl bg-gradient-to-tr from-primary-650 to-indigo-550 text-white flex items-center justify-center hover:scale-105 hover:shadow-lg hover:shadow-primary-500/10 transition-all duration-300 shrink-0 cursor-pointer active:scale-95 border border-primary-500/20"
       >
-        {playing ? <Pause size={12} fill="currentColor" /> : <Play size={12} className="ml-0.5" fill="currentColor" />}
+        {playing ? <Pause size={14} fill="currentColor" /> : <Play size={14} className="ml-0.5" fill="currentColor" />}
       </button>
       
       {/* Waveform graphic */}
-      <div className="flex-1 flex items-center gap-0.5 h-6 justify-center">
-        {[2, 3, 1, 4, 2, 3, 1, 4, 2, 3].map((val, idx) => {
-          const heights = ['h-1.5', 'h-2.5', 'h-3.5', 'h-5'];
+      <div className="flex-1 flex items-center gap-[3px] h-6 justify-center">
+        {wavePattern.map((heightVal, idx) => {
+          const heights = ['h-2', 'h-3', 'h-4', 'h-5', 'h-6', 'h-7', 'h-8', 'h-9'];
+          const barHeight = heights[heightVal - 1] || 'h-3';
           return (
             <span 
               key={idx}
-              className={`w-0.5 rounded-full bg-slate-700 transition-all duration-300 ${
+              className={`w-[2.5px] rounded-full transition-all duration-300 ${
                 playing 
-                  ? `animate-pulse ${heights[val - 1]} bg-primary-400` 
-                  : `${heights[val % 2 ? 0 : 1]} bg-slate-600`
-              }`} 
+                  ? `animate-wave bg-gradient-to-t from-primary-500 to-indigo-400 ${barHeight}` 
+                  : `bg-slate-700 ${barHeight} opacity-60`
+              }`}
+              style={playing ? {
+                animationDelay: `${idx * 60}ms`,
+                animationDuration: '0.8s'
+              } : undefined}
             />
           );
         })}
       </div>
       
-      <span className="text-[9px] text-slate-500 font-bold uppercase tracking-wider font-outfit shrink-0">Voice</span>
+      <span className="text-[8px] text-slate-500 font-extrabold uppercase tracking-wider font-outfit shrink-0 bg-dark-900 border border-dark-800 px-1.5 py-0.5 rounded-md select-none">Voice</span>
     </div>
   );
 };
 
-const ClassChat = () => {
+const ClassChat = ({ setAppSidebarOpen }) => {
   const { user } = useAuth();
   const {
     activeCall,
@@ -146,8 +155,129 @@ const ClassChat = () => {
   const [showEmojiTray, setShowEmojiTray] = useState(false);
   const emojis = ['😀', '😂', '😍', '👍', '🙏', '🔥', '🎉', '👏', '💔', '😢', '💯', '🤔', '😎', '💡', '✅', '❌', '👀', '📌', '🚀', '⭐'];
   
-  const socketRef = useRef(null);
-  const scrollRef = useRef(null);
+  const socketRef = useRef(socket);
+  const messagesContainerRef = useRef(null);
+
+  // suggested features states
+  const [unreadCounts, setUnreadCounts] = useState({});
+  const [typingUsers, setTypingUsers] = useState({});
+  const [roomMembers, setRoomMembers] = useState([]);
+  const [showMembersPanel, setShowMembersPanel] = useState(false);
+  const [activeEmojiPickerMsgId, setActiveEmojiPickerMsgId] = useState(null);
+
+  // Close emoji reactions picker on global click
+  useEffect(() => {
+    const handleGlobalClick = () => {
+      setActiveEmojiPickerMsgId(null);
+    };
+    window.addEventListener('click', handleGlobalClick);
+    return () => window.removeEventListener('click', handleGlobalClick);
+  }, []);
+
+  // Custom styling-aware Markdown / link parser
+  const renderMessageText = (text) => {
+    if (!text) return null;
+
+    // Split by code blocks first
+    const codeBlockRegex = /```([\s\S]*?)```/g;
+    const parts = text.split(codeBlockRegex);
+
+    return parts.map((part, index) => {
+      if (index % 2 === 1) {
+        return (
+          <pre key={index} className="bg-dark-950 border border-dark-850/60 p-2.5 rounded-xl font-mono text-[10px] text-primary-400 my-1.5 overflow-x-auto whitespace-pre-wrap select-all">
+            <code>{part}</code>
+          </pre>
+        );
+      }
+
+      const lines = part.split('\n');
+
+      return (
+        <React.Fragment key={index}>
+          {lines.map((line, lineIdx) => {
+            const isBullet = line.startsWith('- ') || line.startsWith('* ');
+            const renderedLine = isBullet ? line.substring(2) : line;
+            const inlineParts = parseInlineMarkdown(renderedLine);
+
+            if (isBullet) {
+              return (
+                <div key={lineIdx} className="flex items-start gap-1.5 ml-2.5 my-1 text-slate-100">
+                  <span className="text-primary-400 mt-1 shrink-0 select-none text-xs">•</span>
+                  <span className="flex-1">{inlineParts}</span>
+                </div>
+              );
+            }
+
+            return (
+              <div key={lineIdx} className={lineIdx > 0 ? "mt-1.5 text-slate-100" : "text-slate-100"}>
+                {inlineParts}
+              </div>
+            );
+          })}
+        </React.Fragment>
+      );
+    });
+  };
+
+  const parseInlineMarkdown = (line) => {
+    if (!line) return '';
+
+    const urlRegex = /(https?:\/\/[^\s]+)/g;
+    const urlParts = line.split(urlRegex);
+
+    return urlParts.map((urlPart, idx) => {
+      if (idx % 2 === 1) {
+        return (
+          <a
+            key={idx}
+            href={urlPart}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline text-primary-300 hover:text-primary-200 font-semibold cursor-pointer break-all"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {urlPart}
+          </a>
+        );
+      }
+
+      return parseStyles(urlPart);
+    });
+  };
+
+  const parseStyles = (text) => {
+    if (!text) return '';
+
+    const codeParts = text.split(/`([^`]+)`/g);
+
+    return codeParts.map((codePart, cIdx) => {
+      if (cIdx % 2 === 1) {
+        return (
+          <code key={cIdx} className="bg-dark-950 px-1.5 py-0.5 rounded text-[10px] font-mono border border-dark-850/50 text-indigo-400 font-bold mx-0.5">
+            {codePart}
+          </code>
+        );
+      }
+
+      const boldParts = codePart.split(/\*\*([^*]+)\*\*/g);
+
+      return boldParts.map((boldPart, bIdx) => {
+        if (bIdx % 2 === 1) {
+          return <strong key={bIdx} className="font-extrabold text-white">{boldPart}</strong>;
+        }
+
+        const italicParts = boldPart.split(/_([^_]+)_/g);
+
+        return italicParts.map((italicPart, iIdx) => {
+          if (iIdx % 2 === 1) {
+            return <em key={iIdx} className="italic text-slate-200">{italicPart}</em>;
+          }
+          return italicPart;
+        });
+      });
+    });
+  };
 
   const roomPreviews = {
     'VII': { text: 'Class teacher: Remember to submit the math assignment by Monday.', time: '08:02 AM' },
@@ -238,49 +368,155 @@ const ClassChat = () => {
     if (!socket.connected) {
       socket.connect();
     }
-    socketRef.current = socket;
   }, []);
 
-  // Handle room switching, join events, and state listeners
+  // Handle room switching, presence join, and real-time socket events
   useEffect(() => {
     if (!currentRoom || !socketRef.current) return;
-    const socket = socketRef.current;
+    const sock = socketRef.current;
 
-    // Join room
-    socket.emit('join_room', currentRoom);
+    // Join chat presence room
+    sock.emit('join_room_chat', {
+      class_level: currentRoom,
+      sender_name: user.studentProfile?.name || (user.role === 'SuperAdmin' ? 'Admin' : 'Teacher'),
+      sender_role: user.role
+    });
 
-    // Message stream listener
-    const handleNewMessage = (msg) => {
+    // Clear unread counts when entering the active room
+    setUnreadCounts((prev) => ({ ...prev, [currentRoom]: 0 }));
+
+    // Global message listener (handles active stream and unread badges)
+    const handleNewMessageGlobal = (msg) => {
       if (msg.class_level === currentRoom) {
         setMessages((prev) => [...prev, msg]);
+      } else {
+        setUnreadCounts((prev) => ({
+          ...prev,
+          [msg.class_level]: (prev[msg.class_level] || 0) + 1
+        }));
       }
     };
 
-    // Message deletion listener
     const handleMessageDeleted = (msgId) => {
       setMessages((prev) => prev.filter((msg) => msg._id !== msgId));
     };
 
-    socket.on('new_message', handleNewMessage);
-    socket.on('message_deleted', handleMessageDeleted);
+    const handleReactionUpdated = (data) => {
+      const { message_id, reactions } = data;
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg._id === message_id ? { ...msg, reactions } : msg
+        )
+      );
+    };
 
-    // Reset page view states and pull lounge messages
+    const handleTypingStatus = (data) => {
+      const { sender_name, is_typing } = data;
+      setTypingUsers((prev) => ({
+        ...prev,
+        [sender_name]: is_typing
+      }));
+    };
+
+    const handleRoomMembers = (members) => {
+      setRoomMembers(members);
+    };
+
+    sock.on('new_message', handleNewMessageGlobal);
+    sock.on('message_deleted', handleMessageDeleted);
+    sock.on('message_reaction_updated', handleReactionUpdated);
+    sock.on('typing_status', handleTypingStatus);
+    sock.on('room_members', handleRoomMembers);
+
+    // Reset view states and fetch lounge messages
     setChatSearchQuery('');
     setShowSearchInChat(false);
+    setTypingUsers({});
     fetchChatHistory(currentRoom);
 
     return () => {
-      socket.off('new_message', handleNewMessage);
-      socket.off('message_deleted', handleMessageDeleted);
+      sock.emit('leave_room_chat');
+      sock.off('new_message', handleNewMessageGlobal);
+      sock.off('message_deleted', handleMessageDeleted);
+      sock.off('message_reaction_updated', handleReactionUpdated);
+      sock.off('typing_status', handleTypingStatus);
+      sock.off('room_members', handleRoomMembers);
     };
   }, [currentRoom]);
 
+  // Handle typing triggers based on input modifications
+  const isTypingRef = useRef(false);
+  const typingTimeoutRef = useRef(null);
+
+  useEffect(() => {
+    if (!socketRef.current || !currentRoom) return;
+
+    if (typedMessage.trim() && !isTypingRef.current) {
+      isTypingRef.current = true;
+      socketRef.current.emit('typing_status', {
+        class_level: currentRoom,
+        sender_name: user.studentProfile?.name || (user.role === 'SuperAdmin' ? 'Admin' : 'Teacher'),
+        is_typing: true
+      });
+    }
+
+    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+
+    typingTimeoutRef.current = setTimeout(() => {
+      if (isTypingRef.current) {
+        isTypingRef.current = false;
+        socketRef.current.emit('typing_status', {
+          class_level: currentRoom,
+          sender_name: user.studentProfile?.name || (user.role === 'SuperAdmin' ? 'Admin' : 'Teacher'),
+          is_typing: false
+        });
+      }
+    }, 2000);
+
+    return () => {
+      if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+    };
+  }, [typedMessage, currentRoom]);
+
+  const handleReactToMessage = (messageId, emoji) => {
+    if (socketRef.current) {
+      socketRef.current.emit('add_reaction', {
+        message_id: messageId,
+        class_level: currentRoom,
+        emoji,
+        sender_name: user.studentProfile?.name || (user.role === 'SuperAdmin' ? 'Admin' : 'Teacher')
+      });
+    }
+  };
+
+  const scrollToBottom = (behavior = 'smooth') => {
+    if (messagesContainerRef.current) {
+      setTimeout(() => {
+        if (messagesContainerRef.current) {
+          messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight;
+        }
+      }, 50);
+    }
+  };
+
   // Scroll to bottom helper
   useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollIntoView({ behavior: 'smooth' });
-    }
+    scrollToBottom('smooth');
   }, [messages]);
+
+  // Scroll to bottom on viewport resize (e.g. mobile keyboard opens)
+  useEffect(() => {
+    if (!window.visualViewport) return;
+
+    const handleResize = () => {
+      scrollToBottom('smooth');
+    };
+
+    window.visualViewport.addEventListener('resize', handleResize);
+    return () => {
+      window.visualViewport.removeEventListener('resize', handleResize);
+    };
+  }, []);
 
   // Clean recording timers on unmount
   useEffect(() => {
@@ -302,6 +538,16 @@ const ClassChat = () => {
 
     if (socketRef.current) {
       socketRef.current.emit('send_message', messageData);
+
+      // Immediately reset typing status
+      if (isTypingRef.current) {
+        isTypingRef.current = false;
+        socketRef.current.emit('typing_status', {
+          class_level: currentRoom,
+          sender_name: user.studentProfile?.name || (user.role === 'SuperAdmin' ? 'Admin' : 'Teacher'),
+          is_typing: false
+        });
+      }
     }
     setTypedMessage('');
     setShowEmojiTray(false);
@@ -501,7 +747,14 @@ const ClassChat = () => {
       }`}>
         {/* Sidebar Header */}
         <div className="p-4 bg-dark-900/40 border-b border-dark-800/80 flex justify-between items-center text-slate-100 shrink-0">
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
+            <button 
+              onClick={() => setAppSidebarOpen && setAppSidebarOpen(true)}
+              className="p-1.5 rounded-lg bg-dark-900 border border-dark-800 text-slate-350 hover:text-white md:hidden cursor-pointer shrink-0"
+              title="Open Navigation"
+            >
+              <Menu size={16} />
+            </button>
             {user?.profile_pic ? (
               <img 
                 src={user.profile_pic} 
@@ -509,18 +762,18 @@ const ClassChat = () => {
                 className="w-10 h-10 rounded-xl object-cover border border-primary-500/20 shadow-sm"
               />
             ) : (
-              <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-primary-600 to-indigo-500 flex items-center justify-center font-bold text-white text-base shadow-sm">
+              <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-primary-600 to-indigo-500 flex items-center justify-center font-bold text-white text-base shadow-sm shrink-0">
                 {user?.email[0].toUpperCase()}
               </div>
             )}
-            <div>
-              <h3 className="text-sm font-bold font-outfit">{user?.role === 'SuperAdmin' ? 'System Admin' : user?.role}</h3>
+            <div className="overflow-hidden">
+              <h3 className="text-sm font-bold font-outfit truncate">{user?.role === 'SuperAdmin' ? 'System Admin' : user?.role}</h3>
               <span className="text-[10px] text-slate-400 font-medium leading-none block mt-0.5">My Chats</span>
             </div>
           </div>
           <div className="flex items-center gap-1.5 text-slate-400">
-            <button className="p-1.5 rounded-xl hover:bg-dark-900/60 transition animate-pulse-slow cursor-pointer" title="Notifications Lounge Channel">
-              <Sparkles size={16} />
+            <button className="p-1.5 rounded-xl hover:bg-dark-900/60 transition cursor-pointer" title="Notifications Lounge Channel">
+              <Bell size={16} />
             </button>
             <button className="p-1.5 rounded-xl hover:bg-dark-900/60 transition cursor-pointer">
               <MoreVertical size={16} />
@@ -574,14 +827,21 @@ const ClassChat = () => {
                 <div className="flex-1 overflow-hidden">
                   <div className="flex justify-between items-baseline">
                     <h4 className="text-xs font-bold text-white truncate font-outfit">Class {room} Lounge</h4>
-                    <span className="text-[9px] text-slate-500 font-mono shrink-0">{getLastMessageTime(room)}</span>
+                    <div className="flex flex-col items-end gap-1 shrink-0">
+                      <span className="text-[9px] text-slate-500 font-mono">{getLastMessageTime(room)}</span>
+                      {unreadCounts[room] > 0 && (
+                        <span className="bg-gradient-to-r from-primary-600 to-indigo-500 text-white text-[9px] font-extrabold px-1.5 py-0.5 rounded-full font-mono shadow-md shadow-primary-500/10 select-none">
+                          {unreadCounts[room]}
+                        </span>
+                      )}
+                    </div>
                   </div>
                   <div className="flex justify-between items-center mt-1">
                     <p className="text-[11px] text-slate-400 truncate flex-1 pr-2">
                       {getLastMessagePreview(room)}
                     </p>
                     {isDisabled && (
-                      <span className="text-[7px] tracking-wider uppercase bg-rose-950/40 text-rose-400 border border-rose-900/30 px-1 py-0.5 rounded font-extrabold flex items-center gap-0.5 shrink-0">
+                      <span className="text-[7px] tracking-wider uppercase bg-rose-950/40 text-rose-455 border border-rose-900/30 px-1 py-0.5 rounded font-extrabold flex items-center gap-0.5 shrink-0">
                         <Lock size={8} /> Locked
                       </span>
                     )}
@@ -607,8 +867,16 @@ const ClassChat = () => {
             {/* Chat Header */}
             <div className="p-3.5 bg-dark-900/40 border-b border-dark-800/80 flex justify-between items-center text-slate-100 shrink-0 z-20 backdrop-blur-md">
               <div className="flex items-center gap-3">
-                {/* Back button for mobile */}
-                {user.role !== 'Student' && (
+                {/* Mobile Navigation Toggle (Hamburger for Locked Students, Back arrow for Teachers/Admins) */}
+                {user.role === 'Student' ? (
+                  <button 
+                    onClick={() => setAppSidebarOpen && setAppSidebarOpen(true)}
+                    className="p-1.5 rounded-xl hover:bg-dark-900/60 text-slate-400 transition md:hidden mr-1 cursor-pointer"
+                    title="Open Navigation"
+                  >
+                    <Menu size={18} />
+                  </button>
+                ) : (
                   <button 
                     onClick={() => setShowSidebarOnMobile(true)}
                     className="p-1.5 rounded-xl hover:bg-dark-900/60 text-slate-400 transition md:hidden mr-1 cursor-pointer"
@@ -623,14 +891,23 @@ const ClassChat = () => {
                   <GraduationCap size={18} />
                 </div>
                 
-                <div>
-                  <h3 className="text-xs font-bold text-white font-outfit">Class {currentRoom} Lounge</h3>
-                  <span className="text-[10px] text-primary-405 flex items-center gap-1.5 mt-0.5 font-medium leading-none">
-                    <span className="relative flex h-1.5 w-1.5">
-                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                      <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500"></span>
+                <div 
+                  onClick={() => setShowMembersPanel(prev => !prev)}
+                  className="cursor-pointer hover:opacity-85 active:scale-95 transition"
+                  title="Click to view online lounge roster"
+                >
+                  <h3 className="text-xs font-bold text-white font-outfit flex items-center gap-2">
+                    Class {currentRoom} Lounge
+                    <span className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 text-[8px] font-extrabold px-1.5 py-0.5 rounded-full font-mono flex items-center gap-1.5 shrink-0 shadow-sm shadow-emerald-500/5 select-none">
+                      <span className="relative flex h-1.5 w-1.5">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                        <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500"></span>
+                      </span>
+                      <span>{roomMembers.length} active</span>
                     </span>
-                    <span>active institutional lounge</span>
+                  </h3>
+                  <span className="text-[9px] text-primary-400 flex items-center gap-1 mt-0.5 font-medium leading-none">
+                    Click to view online roster
                   </span>
                 </div>
               </div>
@@ -744,7 +1021,7 @@ const ClassChat = () => {
             )}
 
             {/* Message Stream with Wallpaper */}
-            <div className="flex-1 overflow-y-auto p-4 space-y-3.5 edustride-chat-bg flex flex-col">
+            <div ref={messagesContainerRef} className="flex-1 overflow-y-auto p-4 space-y-3.5 edustride-chat-bg flex flex-col">
               <div className="self-center bg-dark-900/80 backdrop-blur border border-dark-800 text-slate-400 text-[10px] font-medium px-3.5 py-1 rounded-full shadow-sm mb-3 select-none flex items-center gap-1.5 font-outfit">
                 <Lock size={10} className="text-primary-400" />
                 <span>End-to-end institutional encrypted</span>
@@ -761,6 +1038,8 @@ const ClassChat = () => {
                 </div>
               ) : (
                 searchedMessages.map((msg, index) => {
+                  const prevMsg = index > 0 ? searchedMessages[index - 1] : null;
+                  const isSameSender = prevMsg && prevMsg.sender_name === msg.sender_name;
                   const isMe = msg.sender_name === (user.studentProfile?.name || (user.role === 'SuperAdmin' ? 'Admin' : 'Teacher'));
                   const time = new Date(msg.created_at || msg.timestamp || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
                   const parsed = parseMessage(msg.message_text);
@@ -769,27 +1048,38 @@ const ClassChat = () => {
                   return (
                     <div 
                       key={index} 
-                      className={`flex flex-col ${isMe ? 'items-end' : 'items-start'} max-w-[85%] sm:max-w-[70%] ${
-                        isMe ? 'self-end' : 'self-start'
-                      }`}
+                      className={`flex gap-2.5 items-end max-w-[85%] sm:max-w-[70%] ${
+                        isMe ? 'self-end flex-row-reverse' : 'self-start flex-row'
+                      } ${isSameSender ? 'mt-1' : 'mt-3.5'} group relative`}
                     >
+                      {/* Avatar for other senders */}
+                      {!isMe && (
+                        <div className="w-8 shrink-0 flex justify-center">
+                          {!isSameSender ? (
+                            <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-primary-650 to-indigo-500 flex items-center justify-center font-bold text-white text-xs shadow-md shadow-primary-500/10 select-none">
+                              {msg.sender_name[0].toUpperCase()}
+                            </div>
+                          ) : null}
+                        </div>
+                      )}
+
                       {/* Message Bubble */}
                       <div className={`
-                        px-3.5 py-2 rounded-2xl text-xs leading-relaxed shadow-sm relative flex flex-col
+                        px-3.5 py-2 rounded-2xl text-xs leading-relaxed shadow-md flex flex-col relative
                         ${isMe 
-                          ? 'bg-gradient-to-tr from-primary-600/90 to-indigo-650/90 text-white rounded-tr-none border border-primary-500/20 shadow-lg shadow-primary-650/5' 
-                          : 'bg-dark-900/90 text-slate-100 rounded-tl-none border border-dark-800/80'}
+                          ? `bg-gradient-to-tr from-primary-600 to-indigo-650 text-white border border-primary-500/20 shadow-lg shadow-primary-650/5 ${isSameSender ? 'rounded-br-2xl' : 'rounded-br-none'}` 
+                          : `bg-dark-900/90 text-slate-100 border border-dark-800/80 shadow-md ${isSameSender ? 'rounded-bl-2xl' : 'rounded-bl-none'}`}
                       `}>
                         {/* Sender name for other users */}
-                        {!isMe && (
+                        {!isMe && !isSameSender && (
                           <span className={`text-[10px] font-extrabold mb-1.5 flex items-center gap-1.5 leading-none ${getNameColor(msg.sender_name)}`}>
                             {msg.sender_name} 
-                            <span className={`text-[8px] font-extrabold px-1.5 py-0.5 rounded uppercase font-mono tracking-wider ${
+                            <span className={`text-[7px] font-extrabold px-1.5 py-0.5 rounded uppercase font-mono tracking-wider ${
                               msg.sender_role === 'SuperAdmin' || msg.sender_role === 'Admin'
-                                ? 'bg-indigo-500/10 text-indigo-400 border border-indigo-550/20'
+                                ? 'bg-indigo-500/15 text-indigo-400 border border-indigo-550/20'
                                 : msg.sender_role === 'Teacher'
-                                  ? 'bg-amber-500/10 text-amber-400 border border-amber-550/20'
-                                  : 'bg-primary-500/10 text-primary-400 border border-primary-550/20'
+                                  ? 'bg-amber-500/15 text-amber-400 border border-amber-550/20'
+                                  : 'bg-primary-500/15 text-primary-400 border border-primary-550/20'
                             }`}>
                               {msg.sender_role === 'SuperAdmin' ? 'Admin' : msg.sender_role}
                             </span>
@@ -798,7 +1088,7 @@ const ClassChat = () => {
                         
                         {/* Rich Content Renderers */}
                         {parsed.isAttachment ? (
-                          <div className="space-y-1.5 pt-0.5 pb-3">
+                          <div className="space-y-1.5 pt-0.5 pb-1">
                             {parsed.type === 'image' && (
                               <div className="relative group cursor-zoom-in rounded-lg overflow-hidden border border-dark-800 max-w-full">
                                 <img 
@@ -816,7 +1106,7 @@ const ClassChat = () => {
 
                             {parsed.type === 'document' && (
                               <div className="flex items-center gap-3 p-3 rounded-xl bg-dark-950/70 border border-dark-800 w-52 sm:w-60">
-                                <div className="p-2 rounded bg-rose-600/20 text-rose-450 border border-rose-500/10 shrink-0">
+                                <div className="p-2 rounded bg-rose-600/20 text-rose-455 border border-rose-500/10 shrink-0">
                                   <FileText size={18} />
                                 </div>
                                 <div className="flex-1 overflow-hidden">
@@ -836,42 +1126,139 @@ const ClassChat = () => {
 
                             {/* Caption if exists */}
                             {parsed.caption && (
-                              <p className="whitespace-pre-wrap text-[12px] pt-1">{parsed.caption}</p>
+                              <div className="whitespace-pre-wrap text-[12px] pt-1 text-slate-100">
+                                {renderMessageText(parsed.caption)}
+                              </div>
                             )}
                           </div>
                         ) : (
-                          /* Text Content */
-                          <p className="whitespace-pre-wrap pr-12 break-words text-[12px] pb-3">{parsed.text}</p>
+                          /* Text Content (Markdown enabled) */
+                          <div className="whitespace-pre-wrap break-words text-[12px] pb-0.5 text-slate-100">
+                            {renderMessageText(parsed.text)}
+                          </div>
+                        )}
+
+                        {/* Reactions Pills */}
+                        {msg.reactions && msg.reactions.length > 0 && (
+                          <div className="flex flex-wrap gap-1 mt-1.5 mb-1 select-none">
+                            {Object.entries(
+                              msg.reactions.reduce((acc, r) => {
+                                acc[r.emoji] = acc[r.emoji] || [];
+                                acc[r.emoji].push(r.sender_name);
+                                return acc;
+                              }, {})
+                            ).map(([emoji, users]) => {
+                              const myName = user.studentProfile?.name || (user.role === 'SuperAdmin' ? 'Admin' : 'Teacher');
+                              const didIReact = users.includes(myName);
+                              return (
+                                <button
+                                  key={emoji}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleReactToMessage(msg._id, emoji);
+                                  }}
+                                  title={`Reacted by: ${users.join(', ')}`}
+                                  className={`flex items-center gap-1 px-1.5 py-0.5 rounded-lg text-[9px] border transition cursor-pointer active:scale-90 ${
+                                    didIReact 
+                                      ? 'bg-primary-500/20 border-primary-550/40 text-primary-300 font-extrabold shadow-sm' 
+                                      : 'bg-dark-950/40 border-dark-800 text-slate-400 hover:text-white'
+                                  }`}
+                                >
+                                  <span>{emoji}</span>
+                                  <span className="font-mono text-[8px]">{users.length}</span>
+                                </button>
+                              );
+                            })}
+                          </div>
                         )}
                         
-                        {/* Time & status checks */}
-                        <div className="absolute bottom-1 right-2 flex items-center gap-1.5 text-[8px] text-slate-400/80 font-mono select-none">
+                        {/* Time & inline action tools */}
+                        <div className={`flex items-center justify-end gap-1.5 mt-1 select-none text-[8.5px] font-mono leading-none align-self-end ${
+                          isMe ? 'text-primary-200/85' : 'text-slate-500/85'
+                        }`}>
+                          {msg._id && (
+                            <div className="relative inline-flex items-center">
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setActiveEmojiPickerMsgId(activeEmojiPickerMsgId === msg._id ? null : msg._id);
+                                }}
+                                className={`opacity-60 md:opacity-0 md:group-hover:opacity-100 hover:scale-110 active:scale-90 transition-all cursor-pointer mr-1 ${
+                                  isMe ? 'text-primary-200 hover:text-white' : 'text-slate-500 hover:text-primary-400'
+                                }`}
+                                title="React"
+                              >
+                                <Smile size={10} />
+                              </button>
+                              {/* Reactions popover */}
+                              {activeEmojiPickerMsgId === msg._id && (
+                                <div className={`absolute bottom-full ${isMe ? 'right-0' : 'left-0'} mb-2 flex bg-dark-900/95 backdrop-blur-md border border-dark-800/80 p-1.5 rounded-full shadow-2xl gap-2 z-40 animate-scaleUp border-primary-500/20 select-none`}>
+                                  {['👍', '❤️', '😂', '🎉', '😢'].map(emoji => (
+                                    <button
+                                      key={emoji}
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        handleReactToMessage(msg._id, emoji);
+                                        setActiveEmojiPickerMsgId(null);
+                                      }}
+                                      className="text-sm hover:bg-dark-800 p-1 rounded-full transition-all duration-200 hover:scale-125 active:scale-90 cursor-pointer"
+                                    >
+                                      {emoji}
+                                    </button>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          )}
                           {canDelete && msg._id && (
                             <button
                               type="button"
-                              onClick={() => handleDeleteMessage(msg._id)}
-                              className="text-slate-400 hover:text-rose-400 transition mr-0.5 cursor-pointer"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleDeleteMessage(msg._id);
+                              }}
+                              className={`opacity-60 md:opacity-0 md:group-hover:opacity-100 hover:scale-110 active:scale-90 transition-all cursor-pointer mr-1 ${
+                                isMe ? 'text-primary-200 hover:text-rose-300' : 'text-slate-550 hover:text-rose-455'
+                              }`}
                               title="Delete message"
                             >
                               <Trash2 size={10} />
                             </button>
                           )}
                           <span>{time}</span>
-                          {isMe && <CheckCheck size={12} className="text-primary-400" />}
+                          {isMe && <CheckCheck size={11} className="text-primary-300" />}
                         </div>
                       </div>
                     </div>
                   );
                 })
               )}
-              <div ref={scrollRef} />
+              {/* Typing Indicators */}
+              {Object.entries(typingUsers)
+                .filter(([name, typing]) => typing && name !== (user.studentProfile?.name || (user.role === 'SuperAdmin' ? 'Admin' : 'Teacher')))
+                .map(([name]) => (
+                  <div key={name} className="flex items-center gap-2 text-slate-450 text-[10px] pl-4 py-1 select-none animate-fadeIn">
+                    <div className="flex items-center gap-1 bg-dark-900/60 border border-dark-800/85 px-3 py-1.5 rounded-full rounded-tl-none">
+                      <span className="font-bold text-primary-455">{name}</span>
+                      <span className="text-slate-400">is typing</span>
+                      <span className="flex gap-0.5 ml-1 items-center h-2">
+                        <span className="w-1.5 h-1.5 bg-primary-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                        <span className="w-1.5 h-1.5 bg-primary-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                        <span className="w-1.5 h-1.5 bg-primary-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              {/* End of message list */}
             </div>
 
             {/* Input Bar */}
             <div className="relative shrink-0">
               {/* Emoji Tray Overlay */}
               {showEmojiTray && (
-                <div className="absolute bottom-full left-3 bg-dark-900/95 border border-dark-800 backdrop-blur-lg p-3 rounded-2xl shadow-2xl w-64 z-40 grid grid-cols-5 gap-2 animate-scaleUp mb-2">
+                <div className="absolute bottom-full left-3 w-64 max-w-[calc(100%-1.5rem)] bg-dark-900/95 border border-dark-800 backdrop-blur-lg p-3 rounded-2xl shadow-2xl z-40 grid grid-cols-5 gap-2 animate-scaleUp mb-2">
                   <div className="col-span-5 flex justify-between items-center pb-1.5 border-b border-dark-800 mb-1.5">
                     <span className="text-[10px] uppercase font-bold text-slate-400 font-outfit">Popular Emojis</span>
                     <button onClick={() => setShowEmojiTray(false)} className="text-slate-500 hover:text-white cursor-pointer">
@@ -945,6 +1332,9 @@ const ClassChat = () => {
                         placeholder="Type a secure message..."
                         value={typedMessage}
                         onChange={(e) => setTypedMessage(e.target.value)}
+                        onFocus={() => {
+                          scrollToBottom('smooth');
+                        }}
                         className="flex-1 bg-transparent border-none outline-none py-2 text-xs text-slate-100 placeholder-slate-550"
                       />
                     </div>
@@ -1011,6 +1401,59 @@ const ClassChat = () => {
           </div>
         )}
       </div>
+
+      {/* Lounge Members Sidebar */}
+      {showMembersPanel && (
+        <>
+          {/* Mobile backdrop overlay */}
+          <div 
+            onClick={() => setShowMembersPanel(false)}
+            className="fixed inset-0 bg-black/45 backdrop-blur-[1px] md:hidden z-25"
+          />
+          <div className="w-64 bg-dark-950 border-l border-dark-800/80 flex flex-col shrink-0 z-30 absolute right-0 top-0 bottom-0 md:relative h-full animate-fadeIn shadow-2xl">
+            <div className="p-4 bg-dark-900/40 border-b border-dark-800/80 flex justify-between items-center text-slate-100 shrink-0">
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-bold font-outfit uppercase tracking-wider text-slate-300">Lounge Roster</span>
+                <span className="bg-primary-500/10 text-primary-400 text-[8px] font-bold px-1.5 py-0.5 rounded-full font-mono">
+                  {roomMembers.length}
+                </span>
+              </div>
+              <button 
+                onClick={() => setShowMembersPanel(false)} 
+                className="text-slate-500 hover:text-white cursor-pointer transition"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            
+            <div className="flex-1 overflow-y-auto p-3.5 space-y-2">
+              {roomMembers.map((member, idx) => (
+                <div key={idx} className="flex items-center gap-2.5 p-2 rounded-xl bg-dark-900/20 border border-dark-850/30 hover:border-dark-800 transition">
+                  <div className="w-7 h-7 rounded-lg bg-gradient-to-tr from-primary-600 to-indigo-500 flex items-center justify-center font-bold text-white text-xs shrink-0 relative">
+                    <span className="absolute -bottom-0.5 -right-0.5 flex h-2 w-2">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                      <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500 border border-dark-950"></span>
+                    </span>
+                    {member.sender_name[0].toUpperCase()}
+                  </div>
+                  <div className="overflow-hidden flex-1">
+                    <p className="text-[11px] font-bold text-white truncate leading-tight font-outfit">{member.sender_name}</p>
+                    <span className={`text-[7px] font-extrabold px-1 py-0.2 rounded uppercase font-mono tracking-wider leading-none mt-0.5 inline-block ${
+                      member.sender_role === 'SuperAdmin' || member.sender_role === 'Admin'
+                        ? 'bg-indigo-500/10 text-indigo-400'
+                        : member.sender_role === 'Teacher'
+                          ? 'bg-amber-500/10 text-amber-400'
+                          : 'bg-primary-500/10 text-primary-400'
+                    }`}>
+                      {member.sender_role === 'SuperAdmin' ? 'Admin' : member.sender_role}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
 
       {/* --- ATTACHMENT PREVIEW MODAL --- */}
       {showAttachmentPreview && selectedAttachment && (

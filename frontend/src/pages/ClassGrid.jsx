@@ -467,7 +467,7 @@ const ClassGrid = () => {
     return (
       <div className="space-y-6">
         {/* Header */}
-        <div className="glass-panel p-6 rounded-2xl border border-dark-800 flex flex-col md:flex-row md:items-center justify-between gap-4 relative overflow-hidden animate-fadeIn">
+        <div className="glass-panel p-4 sm:p-6 rounded-2xl border border-dark-800 flex flex-col md:flex-row md:items-center justify-between gap-4 relative overflow-hidden animate-fadeIn">
           <div className="absolute top-0 right-0 p-8 opacity-10 pointer-events-none">
             <BookOpen size={120} className="text-primary-500" />
           </div>
@@ -561,7 +561,7 @@ const ClassGrid = () => {
           {/* Right Column - Detail Panel */}
           <div className="lg:col-span-2 space-y-6">
             {selectedStudent ? (
-              <div className="glass-panel p-6 rounded-2xl border border-dark-800 space-y-6 relative overflow-hidden animate-fadeIn">
+              <div className="glass-panel p-4 sm:p-6 rounded-2xl border border-dark-800 space-y-6 relative overflow-hidden animate-fadeIn">
                 <div className="absolute -top-20 -right-20 w-40 h-40 rounded-full bg-primary-600/5 blur-[50px]" />
                 
                 {/* Header Profile details */}
@@ -1065,7 +1065,7 @@ const ClassGrid = () => {
         {/* Right Column - Detail Panel */}
         <div className="space-y-6" ref={detailPanelRef}>
           {selectedStudent ? (
-            <div className="glass-panel p-6 rounded-2xl border border-dark-800 space-y-6 relative overflow-hidden">
+            <div className="glass-panel p-4 sm:p-6 rounded-2xl border border-dark-800 space-y-6 relative overflow-hidden">
               {/* Decorative Accent Glow */}
               <div className="absolute -top-20 -right-20 w-40 h-40 rounded-full bg-primary-600/5 blur-[50px]" />
               

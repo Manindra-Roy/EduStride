@@ -43,7 +43,7 @@ const fileFilter = (req, file, cb) => {
 const uploadAvatar = multer({
   storage,
   fileFilter,
-  limits: { fileSize: 2 * 1024 * 1024 } // 2 MB limit
+  limits: { fileSize: 10 * 1024 * 1024 } // 10 MB limit for high resolution pictures
 });
 
 // Generate Token
@@ -292,15 +292,17 @@ router.put('/profile-pic', protect, uploadAvatar.single('avatar'), async (req, r
 router.put('/theme', protect, async (req, res, next) => {
   try {
     const { theme_color } = req.body;
-    if (!theme_color) {
+    if (theme_color === undefined) {
       res.status(400);
       throw new Error('Theme color preference is required');
     }
 
-    const allowedColors = ['indigo', 'emerald', 'amber', 'rose', 'violet', 'cyan'];
-    if (!allowedColors.includes(theme_color)) {
-      res.status(400);
-      throw new Error('Invalid theme color selection');
+    if (theme_color !== null) {
+      const allowedColors = ['indigo', 'emerald', 'amber', 'rose', 'violet', 'cyan'];
+      if (!allowedColors.includes(theme_color)) {
+        res.status(400);
+        throw new Error('Invalid theme color selection');
+      }
     }
 
     const userObj = await User.findById(req.user.id);

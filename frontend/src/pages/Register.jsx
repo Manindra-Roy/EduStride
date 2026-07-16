@@ -331,7 +331,7 @@ const Register = () => {
 
   if (checkingInit) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-dark-950">
+      <div className="min-h-screen flex items-center justify-center bg-[#07080a] bg-grid-pattern">
         <div className="animate-spin rounded-full h-10 w-10 border-t-2 border-primary-500"></div>
       </div>
     );
@@ -340,7 +340,7 @@ const Register = () => {
   // Self-registration is disabled if system is initialized and user is NOT logged in
   if (!user && initialized) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-dark-950 px-4 relative overflow-hidden">
+      <div className="min-h-screen flex items-center justify-center bg-[#07080a] bg-grid-pattern px-4 relative overflow-hidden">
         <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] rounded-full bg-primary-600/5 blur-[150px] pointer-events-none" />
         <div className="w-full max-w-md z-10 text-center space-y-6">
           <div className="bg-primary-600/10 p-2 rounded-2xl border border-primary-500/20 glow-indigo mb-3 w-fit mx-auto animate-pulse">
@@ -368,7 +368,7 @@ const Register = () => {
   }
 
   return (
-    <div className={user ? "w-full max-w-5xl mx-auto py-2" : "min-h-screen flex items-center justify-center bg-dark-950 px-4 relative overflow-hidden"}>
+    <div className={user ? "w-full max-w-5xl mx-auto py-2" : "min-h-screen flex items-center justify-center bg-[#07080a] bg-grid-pattern px-4 relative overflow-hidden"}>
       {!user && (
         <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] rounded-full bg-primary-600/10 blur-[150px] pointer-events-none" />
       )}
@@ -401,16 +401,16 @@ const Register = () => {
           </div>
         )}
 
-        <div className="glass-panel p-8 rounded-2xl border border-dark-800 shadow-2xl relative">
+        <div className="glass-panel p-4 sm:p-6 md:p-8 rounded-2xl border border-dark-800 shadow-2xl relative">
           <div className="absolute inset-0 bg-gradient-to-b from-white/5 to-transparent pointer-events-none rounded-2xl" />
 
           {/* Tabs - Show to SuperAdmin and Teacher */}
           {user && (user.role === 'SuperAdmin' || user.role === 'Teacher') && (
-            <div className="flex border-b border-dark-800 mb-6 bg-dark-900/40 p-1 rounded-xl gap-1">
+            <div className="flex overflow-x-auto gap-1.5 w-full scrollbar-none shrink-0 border-b border-dark-800 mb-6 bg-dark-900/40 p-1 rounded-xl">
               <button
                 type="button"
                 onClick={() => { setActiveTab('provision'); setError(''); setSuccess(''); }}
-                className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all duration-200 flex items-center justify-center gap-1.5 ${
+                className={`flex-1 py-2 px-3.5 text-xs font-bold rounded-lg transition-all duration-200 flex items-center justify-center gap-1.5 shrink-0 ${
                   activeTab === 'provision'
                     ? 'bg-primary-600 text-white shadow-md'
                     : 'text-slate-400 hover:text-slate-200'
@@ -424,7 +424,7 @@ const Register = () => {
                 <button
                   type="button"
                   onClick={() => { setActiveTab('teachers'); setError(''); setSuccess(''); }}
-                  className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all duration-200 flex items-center justify-center gap-1.5 ${
+                  className={`flex-1 py-2 px-3.5 text-xs font-bold rounded-lg transition-all duration-200 flex items-center justify-center gap-1.5 shrink-0 ${
                     activeTab === 'teachers'
                       ? 'bg-primary-600 text-white shadow-md'
                       : 'text-slate-400 hover:text-slate-200'
@@ -438,7 +438,7 @@ const Register = () => {
               <button
                 type="button"
                 onClick={() => { setActiveTab('students'); setError(''); setSuccess(''); }}
-                className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all duration-200 flex items-center justify-center gap-1.5 ${
+                className={`flex-1 py-2 px-3.5 text-xs font-bold rounded-lg transition-all duration-200 flex items-center justify-center gap-1.5 shrink-0 ${
                   activeTab === 'students'
                     ? 'bg-primary-600 text-white shadow-md'
                     : 'text-slate-400 hover:text-slate-200'
@@ -452,7 +452,7 @@ const Register = () => {
                 <button
                   type="button"
                   onClick={() => { setActiveTab('classes'); setError(''); setSuccess(''); }}
-                  className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all duration-200 flex items-center justify-center gap-1.5 ${
+                  className={`flex-1 py-2 px-3.5 text-xs font-bold rounded-lg transition-all duration-200 flex items-center justify-center gap-1.5 shrink-0 ${
                     activeTab === 'classes'
                       ? 'bg-primary-600 text-white shadow-md'
                       : 'text-slate-400 hover:text-slate-200'
@@ -481,19 +481,19 @@ const Register = () => {
           {user && user.role === 'SuperAdmin' && activeTab === 'classes' ? (
             <div className="space-y-6 animate-fadeIn">
               {/* Add Class Form */}
-              <form onSubmit={handleAddClass} className="flex gap-2 p-4 rounded-xl bg-dark-900 border border-dark-850">
+              <form onSubmit={handleAddClass} className="flex flex-col sm:flex-row gap-2 p-4 rounded-xl bg-dark-900 border border-dark-850">
                 <input
                   type="text"
                   required
                   placeholder="New Class Name (e.g. XI)"
                   value={newClassName}
                   onChange={(e) => setNewClassName(e.target.value)}
-                  className="flex-1 px-3.5 py-2.5 rounded-lg bg-dark-950 border border-dark-800 focus:border-primary-500 text-white text-xs outline-none"
+                  className="flex-1 px-3.5 py-2.5 rounded-lg bg-dark-950 border border-dark-800 focus:border-primary-500 text-white text-xs outline-none w-full"
                 />
                 <button
                   type="submit"
                   disabled={creatingClass}
-                  className="px-4 py-2.5 bg-primary-600 hover:bg-primary-500 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition shrink-0"
+                  className="px-4 py-2.5 bg-primary-600 hover:bg-primary-500 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition shrink-0 w-full sm:w-auto"
                 >
                   {creatingClass ? 'Adding...' : 'Add Class'}
                 </button>

@@ -41,6 +41,11 @@ export const uploadToCloud = async (localFilePath, folderName = 'general') => {
       uploadOptions.public_id = filename; // Include the extension in public_id for raw files
     } else {
       uploadOptions.resource_type = 'auto';
+      if (folderName === 'avatars') {
+        uploadOptions.transformation = [
+          { width: 500, height: 500, crop: 'fill', gravity: 'face', quality: 'auto:best', fetch_format: 'auto' }
+        ];
+      }
     }
 
     const result = await cloudinary.uploader.upload(localFilePath, uploadOptions);

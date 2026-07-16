@@ -11,7 +11,6 @@ import {
   Clock, 
   Calendar,
   ChevronRight,
-  Sparkles,
   User
 } from 'lucide-react';
 import { 
@@ -220,9 +219,9 @@ const Dashboard = () => {
     return (
       <div className="space-y-6">
         {/* Welcome Section */}
-        <div className="glass-panel p-6 rounded-2xl border border-dark-800 flex flex-col md:flex-row md:items-center justify-between gap-4 relative overflow-hidden">
+        <div className="glass-panel p-4 sm:p-6 rounded-2xl border border-dark-800 flex flex-col md:flex-row md:items-center justify-between gap-4 relative overflow-hidden">
           <div className="absolute top-0 right-0 p-8 opacity-10 pointer-events-none">
-            <Sparkles size={120} className="text-primary-500" />
+            <BookOpen size={120} className="text-primary-500" />
           </div>
           <div className="flex items-center gap-4">
             {user?.profile_pic ? (
@@ -262,7 +261,7 @@ const Dashboard = () => {
         {/* Dashboard Grid */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           {/* Card 1: Attendance Gauge */}
-          <div className="glass-panel p-6 rounded-2xl border border-dark-800 flex flex-col items-center justify-center text-center">
+          <div className="glass-panel p-4 sm:p-6 rounded-2xl border border-dark-800 flex flex-col items-center justify-center text-center">
             <h3 className="text-slate-400 text-sm font-semibold uppercase tracking-wider mb-4 self-start">Monthly Attendance</h3>
             <div className={`relative flex items-center justify-center w-28 h-28 rounded-full border-4 ${attendanceColor.split(' ')[1]} mb-4`}>
               <div className="text-2xl font-extrabold text-white font-outfit">{attendancePercentage}%</div>
@@ -295,7 +294,7 @@ const Dashboard = () => {
           </div>
 
           {/* Card 2: Syllabus Status */}
-          <div className="glass-panel p-6 rounded-2xl border border-dark-800 flex flex-col justify-between">
+          <div className="glass-panel p-4 sm:p-6 rounded-2xl border border-dark-800 flex flex-col justify-between">
             <div>
               <h3 className="text-slate-400 text-sm font-semibold uppercase tracking-wider mb-3">Syllabus Progress</h3>
               <div className="space-y-3 max-h-36 overflow-y-auto pr-1">
@@ -335,7 +334,7 @@ const Dashboard = () => {
         </div>
 
         {/* Weekly Timetable */}
-        <div className="glass-panel p-6 rounded-2xl border border-dark-800 space-y-4">
+        <div className="glass-panel p-4 sm:p-6 rounded-2xl border border-dark-800 space-y-4">
           <div className="border-b border-dark-800 pb-3 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
             <div>
               <h3 className="text-white text-base font-bold font-outfit flex items-center gap-2">
@@ -396,7 +395,7 @@ const Dashboard = () => {
         {/* Charts & Marks */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Performance curve chart */}
-          <div className="glass-panel p-6 rounded-2xl border border-dark-800 lg:col-span-2">
+          <div className="glass-panel p-4 sm:p-6 rounded-2xl border border-dark-800 lg:col-span-2">
             <h3 className="text-white text-base font-bold font-outfit mb-6 flex items-center gap-2">
               <TrendingUp className="text-primary-500" size={18} />
               <span>Academic Performance Curve</span>
@@ -425,7 +424,7 @@ const Dashboard = () => {
           </div>
 
           {/* Recent Marks / Attendance Tabs Card */}
-          <div className="glass-panel p-6 rounded-2xl border border-dark-800 flex flex-col h-[22rem]">
+          <div className="glass-panel p-4 sm:p-6 rounded-2xl border border-dark-800 flex flex-col h-[22rem]">
             <div className="flex justify-between items-center border-b border-dark-800 pb-3 mb-4 shrink-0">
               <div className="flex gap-2 bg-dark-950 p-0.5 rounded-lg border border-dark-850">
                 <button
@@ -507,7 +506,7 @@ const Dashboard = () => {
         {/* Scores Grid */}
         <div className="grid grid-cols-1 2xl:grid-cols-2 gap-6">
           {/* School Exam Scores Section */}
-          <div className="glass-panel p-6 rounded-2xl border border-dark-800 space-y-4">
+          <div className="glass-panel p-4 sm:p-6 rounded-2xl border border-dark-800 space-y-4">
             <div className="border-b border-dark-800 pb-4 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
               <div>
                 <h3 className="text-white text-base font-bold font-outfit flex items-center gap-2">
@@ -651,7 +650,7 @@ const Dashboard = () => {
           </div>
 
           {/* Tuition Exam Scores Section */}
-          <div className="glass-panel p-6 rounded-2xl border border-dark-800 space-y-4">
+          <div className="glass-panel p-4 sm:p-6 rounded-2xl border border-dark-800 space-y-4">
             <div className="border-b border-dark-800 pb-4 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
               <div>
                 <h3 className="text-white text-base font-bold font-outfit flex items-center gap-2">
@@ -814,7 +813,7 @@ const Dashboard = () => {
       {/* Welcome & Stats Row - Redesigned to be a gorgeous premium header card */}
       <div className="relative overflow-hidden rounded-2xl bg-gradient-to-r from-primary-900/40 via-dark-900/30 to-indigo-900/20 border border-dark-800/80 p-6 sm:p-8 shadow-xl flex flex-col md:flex-row md:items-center justify-between gap-6">
         <div className="absolute top-0 right-0 p-8 opacity-10 pointer-events-none">
-          <Sparkles size={160} className="text-primary-500" />
+          <BookOpen size={160} className="text-primary-500" />
         </div>
         <div className="relative z-10 flex items-center gap-4 animate-fadeIn">
           {user?.profile_pic ? (
@@ -847,7 +846,7 @@ const Dashboard = () => {
       {/* Analytics Cards Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         {/* Total Students */}
-        <div className="glass-panel p-6 rounded-2xl border border-dark-800 relative">
+        <div className="glass-panel p-4 sm:p-6 rounded-2xl border border-dark-800 relative">
           <div className="flex justify-between items-center mb-4">
             <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Active Students</span>
             <div className="p-2 rounded-lg bg-primary-600/10 text-primary-400">
@@ -859,7 +858,7 @@ const Dashboard = () => {
         </div>
 
         {/* Total Collected Revenue */}
-        <div className="glass-panel p-6 rounded-2xl border border-dark-800 relative">
+        <div className="glass-panel p-4 sm:p-6 rounded-2xl border border-dark-800 relative">
           <div className="flex justify-between items-center mb-4">
             <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Collected Revenue</span>
             <div className="p-2 rounded-lg bg-emerald-600/10 text-emerald-400">
@@ -871,7 +870,7 @@ const Dashboard = () => {
         </div>
 
         {/* Outstanding Balance */}
-        <div className="glass-panel p-6 rounded-2xl border border-dark-800 relative">
+        <div className="glass-panel p-4 sm:p-6 rounded-2xl border border-dark-800 relative">
           <div className="flex justify-between items-center mb-4">
             <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Outstanding Balance</span>
             <div className="p-2 rounded-lg bg-rose-600/10 text-rose-400">
@@ -883,7 +882,7 @@ const Dashboard = () => {
         </div>
 
         {/* Defaulter / Attendance Warnings */}
-        <div className="glass-panel p-6 rounded-2xl border border-dark-800 relative">
+        <div className="glass-panel p-4 sm:p-6 rounded-2xl border border-dark-800 relative">
           <div className="flex justify-between items-center mb-4">
             <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Low Attendance Alerts</span>
             <div className="p-2 rounded-lg bg-amber-600/10 text-amber-400">
@@ -898,7 +897,7 @@ const Dashboard = () => {
       {/* Visual Analytics */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Class distribution charts */}
-        <div className="glass-panel p-6 rounded-2xl border border-dark-800 lg:col-span-2">
+        <div className="glass-panel p-4 sm:p-6 rounded-2xl border border-dark-800 lg:col-span-2">
           <h3 className="text-white text-base font-bold font-outfit mb-4">Class Enrollment Ratios</h3>
           <div className="flex flex-col md:flex-row items-center justify-around gap-4">
             <div className="w-full md:w-1/2 h-64">
@@ -936,7 +935,7 @@ const Dashboard = () => {
         </div>
 
         {/* Quick Task Schedules */}
-        <div className="glass-panel p-6 rounded-2xl border border-dark-800 flex flex-col justify-between">
+        <div className="glass-panel p-4 sm:p-6 rounded-2xl border border-dark-800 flex flex-col justify-between">
           <div>
             <h3 className="text-white text-base font-bold font-outfit mb-4 flex items-center gap-2">
               <Clock className="text-primary-500" size={18} />

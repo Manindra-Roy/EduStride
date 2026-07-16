@@ -72,7 +72,7 @@ const Preloader = ({ loading, onFinished }) => {
 
   return (
     <div 
-      className={`fixed inset-0 z-[9999] flex flex-col items-center justify-center bg-dark-950 text-slate-100 overflow-hidden transition-all duration-500 ease-in-out ${
+      className={`fixed inset-0 z-[9999] flex flex-col items-center justify-center bg-[#07080a] bg-grid-pattern text-slate-100 overflow-hidden transition-all duration-500 ease-in-out ${
         fadeOut ? 'opacity-0 scale-95 pointer-events-none' : 'opacity-100'
       }`}
     >

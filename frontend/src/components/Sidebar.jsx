@@ -24,6 +24,14 @@ const Sidebar = ({ isOpen, setIsOpen }) => {
   const { user, logout, updateUserProfilePic, updateUserThemeColor } = useAuth();
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [avatarFile, setAvatarFile] = useState(null);
+  const [rawImageSrc, setRawImageSrc] = useState('');
+  const [loadedImage, setLoadedImage] = useState(null);
+  const [imageDimensions, setImageDimensions] = useState({ width: 0, height: 0 });
+  const [cropZoom, setCropZoom] = useState(1);
+  const [cropX, setCropX] = useState(0);
+  const [cropY, setCropY] = useState(0);
+  const [isDragging, setIsDragging] = useState(false);
+  const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
   const [avatarError, setAvatarError] = useState('');
   const [classesList, setClassesList] = useState([]);
@@ -32,10 +40,10 @@ const Sidebar = ({ isOpen, setIsOpen }) => {
   const navigate = useNavigate();
 
   useEffect(() => {
-    if (user?.theme_color) {
+    if (user) {
       setActiveTheme(user.theme_color);
     }
-  }, [user?.theme_color]);
+  }, [user]);
 
   // Password Change States
   const [currentPassword, setCurrentPassword] = useState('');
@@ -50,6 +58,15 @@ const Sidebar = ({ isOpen, setIsOpen }) => {
     setShowProfileModal(false);
     setAvatarFile(null);
     setAvatarError('');
+    if (rawImageSrc) {
+      URL.revokeObjectURL(rawImageSrc);
+      setRawImageSrc('');
+    }
+    setLoadedImage(null);
+    setImageDimensions({ width: 0, height: 0 });
+    setCropZoom(1);
+    setCropX(0);
+    setCropY(0);
     setCurrentPassword('');
     setNewPassword('');
     setConfirmPassword('');
@@ -99,9 +116,17 @@ const Sidebar = ({ isOpen, setIsOpen }) => {
   const handleThemeChange = async (themeKey) => {
     try {
       setActiveTheme(themeKey);
-      applyThemeAccent(themeKey);
       
-      // Update account theme in database
+      if (themeKey) {
+        applyThemeAccent(themeKey);
+      } else {
+        // Fetch and apply the current global default system theme
+        const res = await axios.get('/api/system/theme');
+        const defaultColor = res.data.success ? res.data.theme_color : 'indigo';
+        applyThemeAccent(defaultColor);
+      }
+      
+      // Update account theme in database (saves null if inheriting system default)
       await axios.put('/api/auth/theme', { theme_color: themeKey });
       
       // Sync update with Auth Context
@@ -131,6 +156,8 @@ const Sidebar = ({ isOpen, setIsOpen }) => {
     try {
       setSystemDefaultTheme(themeKey);
       await axios.put('/api/system/theme', { theme_color: themeKey });
+      // Broadcast system theme update event to the whole app
+      window.dispatchEvent(new Event('systemThemeUpdated'));
     } catch (err) {
       console.error('Failed to save system default theme settings in database:', err);
     }
@@ -165,9 +192,130 @@ const Sidebar = ({ isOpen, setIsOpen }) => {
   };
 
   const handleAvatarChange = (e) => {
-    setAvatarFile(e.target.files[0]);
+    const file = e.target.files[0];
+    if (!file) return;
+
     setAvatarError('');
+    
+    // Validate image format
+    if (!file.type.startsWith('image/')) {
+      setAvatarError('Please select a valid image file.');
+      return;
+    }
+
+    if (rawImageSrc) {
+      URL.revokeObjectURL(rawImageSrc);
+    }
+
+    const src = URL.createObjectURL(file);
+    setRawImageSrc(src);
+
+    const img = new Image();
+    img.onload = () => {
+      setLoadedImage(img);
+      const viewportSize = 192; // 48 * 4 = 192px
+      let w = viewportSize;
+      let h = viewportSize;
+      if (img.width > img.height) {
+        w = viewportSize * (img.width / img.height);
+      } else {
+        h = viewportSize * (img.height / img.width);
+      }
+      setImageDimensions({ width: w, height: h });
+      setCropZoom(1);
+      setCropX(0);
+      setCropY(0);
+    };
+    img.onerror = () => {
+      setAvatarError('Failed to load image for position adjustments.');
+    };
+    img.src = src;
   };
+
+  // Drag and drop / reposition handlers
+  const handleDragStart = (e) => {
+    setIsDragging(true);
+    setDragStart({
+      x: e.clientX - cropX,
+      y: e.clientY - cropY
+    });
+  };
+
+  const handleDragMove = (e) => {
+    if (!isDragging) return;
+    setCropX(e.clientX - dragStart.x);
+    setCropY(e.clientY - dragStart.y);
+  };
+
+  const handleDragEnd = () => {
+    setIsDragging(false);
+  };
+
+  const handleTouchStart = (e) => {
+    if (e.touches.length !== 1) return;
+    setIsDragging(true);
+    setDragStart({
+      x: e.touches[0].clientX - cropX,
+      y: e.touches[0].clientY - cropY
+    });
+  };
+
+  const handleTouchMove = (e) => {
+    if (!isDragging || e.touches.length !== 1) return;
+    setCropX(e.touches[0].clientX - dragStart.x);
+    setCropY(e.touches[0].clientY - dragStart.y);
+  };
+
+  // Effect to update the compressed/cropped upload blob on pan/zoom changes
+  useEffect(() => {
+    if (!loadedImage) return;
+
+    const canvas = document.createElement('canvas');
+    const size = 500;
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+
+    // Base dimensions fitting shorter side to canvas
+    let w = size;
+    let h = size;
+    if (loadedImage.width > loadedImage.height) {
+      w = size * (loadedImage.width / loadedImage.height);
+    } else {
+      h = size * (loadedImage.height / loadedImage.width);
+    }
+
+    // Zoom
+    const scaledW = w * cropZoom;
+    const scaledH = h * cropZoom;
+
+    // Symmetrical center crop base coordinates
+    const cx = (size - scaledW) / 2;
+    const cy = (size - scaledH) / 2;
+
+    // Viewport scale offset factor: viewport viewportSize = 192px, canvas size = 500px
+    const scaleRatio = size / 192;
+    const px = cropX * scaleRatio;
+    const py = cropY * scaleRatio;
+
+    // Draw panned/zoomed crop onto the 500x500 canvas
+    ctx.drawImage(loadedImage, cx + px, cy + py, scaledW, scaledH);
+
+    // Convert canvas to high quality JPEG Blob
+    canvas.toBlob((blob) => {
+      if (blob) {
+        const processedFile = new File(
+          [blob], 
+          'avatar.jpg', 
+          { type: 'image/jpeg', lastModified: Date.now() }
+        );
+        setAvatarFile(processedFile);
+      }
+    }, 'image/jpeg', 0.95);
+  }, [loadedImage, cropZoom, cropX, cropY]);
 
   const handleAvatarUpload = async (e) => {
     e.preventDefault();
@@ -190,6 +338,15 @@ const Sidebar = ({ isOpen, setIsOpen }) => {
       if (res.data.success) {
         updateUserProfilePic(res.data.profile_pic);
         setAvatarFile(null);
+        if (rawImageSrc) {
+          URL.revokeObjectURL(rawImageSrc);
+          setRawImageSrc('');
+        }
+        setLoadedImage(null);
+        setImageDimensions({ width: 0, height: 0 });
+        setCropZoom(1);
+        setCropX(0);
+        setCropY(0);
         const fileInput = document.getElementById('avatar-input-file');
         if (fileInput) fileInput.value = '';
       }
@@ -394,14 +551,64 @@ const Sidebar = ({ isOpen, setIsOpen }) => {
                     {avatarError}
                   </div>
                 )}
-                <div className="flex flex-col gap-3">
+                <div className="flex flex-col gap-4">
                   <input
                     id="avatar-input-file"
                     type="file"
                     accept="image/*"
                     onChange={handleAvatarChange}
-                    className="w-full text-slate-550 text-xs file:mr-3 file:py-2 file:px-4 file:rounded-xl file:border-0 file:bg-dark-900 file:text-slate-350 file:hover:bg-dark-850 file:cursor-pointer outline-none transition"
+                    className="w-full text-slate-500 text-xs file:mr-3 file:py-2 file:px-4 file:rounded-xl file:border-0 file:bg-dark-900 file:text-slate-350 file:hover:bg-dark-850 file:cursor-pointer outline-none transition"
                   />
+
+                  {/* Interactive Position Offset repositioner */}
+                  {rawImageSrc && (
+                    <div className="flex flex-col items-center gap-3 py-3 bg-dark-950/40 rounded-2xl border border-dark-800/80 p-4">
+                      <span className="text-[10px] text-slate-400 font-medium tracking-wide">Drag to adjust crop center, slider to zoom</span>
+                      
+                      <div 
+                        className="w-48 h-48 rounded-full overflow-hidden border-2 border-primary-500/40 relative cursor-move bg-dark-950 shadow-inner select-none touch-none active:border-primary-500/80 transition-colors"
+                        onMouseDown={handleDragStart}
+                        onMouseMove={handleDragMove}
+                        onMouseUp={handleDragEnd}
+                        onMouseLeave={handleDragEnd}
+                        onTouchStart={handleTouchStart}
+                        onTouchMove={handleTouchMove}
+                        onTouchEnd={handleDragEnd}
+                      >
+                        <img
+                          src={rawImageSrc}
+                          alt="Crop Preview"
+                          draggable="false"
+                          className="absolute max-w-none origin-center pointer-events-none select-none"
+                          style={{
+                            width: imageDimensions.width || '100%',
+                            height: imageDimensions.height || '100%',
+                            left: '50%',
+                            top: '50%',
+                            transform: `translate(calc(-50% + ${cropX}px), calc(-50% + ${cropY}px)) scale(${cropZoom})`,
+                          }}
+                        />
+                        {/* Circular crop boundary overlay and dimming shadow */}
+                        <div className="absolute inset-0 rounded-full border border-white/10 pointer-events-none shadow-[0_0_0_9999px_rgba(27,28,49,0.7)]" />
+                      </div>
+                      
+                      {/* Zoom Slider Control */}
+                      <div className="w-full flex items-center gap-3 px-1 mt-1">
+                        <span className="text-[9px] text-slate-500 font-extrabold uppercase tracking-widest">Zoom</span>
+                        <input 
+                          type="range"
+                          min="1"
+                          max="3"
+                          step="0.02"
+                          value={cropZoom}
+                          onChange={(e) => setCropZoom(parseFloat(e.target.value))}
+                          className="flex-1 accent-primary-500 h-1 bg-dark-900 rounded-lg appearance-none cursor-pointer"
+                        />
+                        <span className="text-[10px] font-bold text-primary-400 w-9 text-right font-mono">{Math.round(cropZoom * 100)}%</span>
+                      </div>
+                    </div>
+                  )}
+
                   <button
                     type="submit"
                     disabled={uploadingAvatar || !avatarFile}
@@ -452,6 +659,25 @@ const Sidebar = ({ isOpen, setIsOpen }) => {
                     );
                   })}
                 </div>
+
+                {/* Inherit Default System Theme button */}
+                <button
+                  type="button"
+                  onClick={() => handleThemeChange(null)}
+                  className={`w-full flex items-center justify-between p-2.5 rounded-xl bg-dark-900/40 hover:bg-dark-900 border text-left transition select-none ${
+                    activeTheme === null || activeTheme === undefined
+                      ? 'border-primary-500 shadow-md ring-1 ring-primary-500'
+                      : 'border-dark-850 hover:border-dark-800'
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    <Settings size={14} className="text-slate-400" />
+                    <span className="text-[10px] font-semibold text-white">Inherit System Default Accent</span>
+                  </div>
+                  <span className="text-[9px] font-bold text-primary-400 font-mono capitalize">
+                    ({systemDefaultTheme})
+                  </span>
+                </button>
               </div>
 
               {/* Admin/Teacher System Default Accent Option */}
