@@ -16,7 +16,7 @@ class PrefsManager(context: Context) {
     }
 
     var serverUrl: String
-        get() = prefs.getString(KEY_SERVER, "http://10.0.2.2:5000/") ?: "http://10.0.2.2:5000/"
+        get() = prefs.getString(KEY_SERVER, "https://edustride.in/") ?: "https://edustride.in/"
         set(value) = prefs.edit().putString(KEY_SERVER, value).apply()
 
     var token: String?
