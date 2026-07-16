@@ -73,6 +73,11 @@ class MainActivity : AppCompatActivity() {
         webSettings.loadWithOverviewMode = true
         webSettings.useWideViewPort = true
         webSettings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+        webSettings.userAgentString = webSettings.userAgentString + " EduStrideAndroidApp/1.0"
+
+        // Hide scrollbars from the WebView layout
+        binding.webView.isVerticalScrollBarEnabled = false
+        binding.webView.isHorizontalScrollBarEnabled = false
 
         // Set WebViewClient to handle transitions and loading failures
         binding.webView.webViewClient = object : WebViewClient() {
@@ -129,20 +134,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupSwipeToRefresh() {
-        binding.swipeRefresh.setColorSchemeResources(R.color.primary_indigo)
-        binding.swipeRefresh.setOnRefreshListener {
-            if (isNetworkAvailable()) {
-                binding.webView.reload()
-            } else {
-                binding.swipeRefresh.isRefreshing = false
-                showOfflineScreen()
-            }
-        }
-
-        // Only trigger pull-to-refresh if the WebView is at the absolute top of the page scroll
-        binding.swipeRefresh.setOnChildScrollUpCallback { _, _ ->
-            binding.webView.canScrollVertically(-1)
-        }
+        binding.swipeRefresh.isEnabled = false // Disable pull-to-refresh container to avoid inner scroll conflicts
     }
 
     private fun setupOfflineOverlay() {
