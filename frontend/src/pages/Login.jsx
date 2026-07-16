@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { Mail, Lock, ArrowRight, BookOpen, Eye, EyeOff } from 'lucide-react';
+import { Mail, Lock, ArrowRight, BookOpen, Eye, EyeOff, Smartphone } from 'lucide-react';
 import Logo from '../components/Logo';
 
 const Login = () => {
@@ -135,6 +135,23 @@ const Login = () => {
             </button>
           </form>
 
+        </div>
+
+        {/* Get Mobile App Banner */}
+        <div className="animate-slideUp flex justify-center" style={{ animationDelay: '150ms' }}>
+          <a
+            href="/EduStride.apk"
+            download="EduStride.apk"
+            className="flex items-center gap-3 px-5 py-3 rounded-2xl border border-primary-500/10 bg-primary-950/20 backdrop-blur-xl hover:bg-primary-950/30 hover:border-primary-500/20 transition-all duration-300 group shadow-md hover:shadow-lg shadow-primary-500/2"
+          >
+            <span className="p-2 rounded-xl bg-primary-600/10 text-primary-400 group-hover:scale-105 transition-transform duration-300">
+              <Smartphone size={18} />
+            </span>
+            <div className="text-left">
+              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block leading-none mb-1">Get the Mobile Portal</span>
+              <span className="text-xs font-black text-white group-hover:text-primary-450 transition-colors">Download Android App</span>
+            </div>
+          </a>
         </div>
 
         {/* Footer Navigation & Credits */}
