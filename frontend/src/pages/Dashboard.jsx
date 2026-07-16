@@ -218,10 +218,10 @@ const Dashboard = () => {
     const recentScores = studentDetails?.test_scores || [];
     const tuitionScores = studentDetails?.tuition_test_scores || [];
     
-    const latestAttendance = attendanceRecords[attendanceRecords.length - 1] || { total_classes: 20, attended: 16 };
+    const latestAttendance = attendanceRecords[attendanceRecords.length - 1] || { total_classes: 0, attended: 0 };
     const attendancePercentage = latestAttendance.total_classes > 0 
       ? Math.round((latestAttendance.attended / latestAttendance.total_classes) * 100) 
-      : 80;
+      : 0;
 
     const attendanceColor = attendancePercentage >= 75 
       ? 'text-emerald-400 border-emerald-500/20 bg-emerald-500/5' 
@@ -242,15 +242,6 @@ const Dashboard = () => {
       percentage: Math.round((score.marks_obtained / score.total_marks) * 100),
       subject: score.subject
     })).slice(-6); // Last 6 tests
-
-    const defaultChartData = [
-      { name: 'Unit Test 1', percentage: 72, subject: 'Math' },
-      { name: 'Pop Quiz 1', percentage: 85, subject: 'Science' },
-      { name: 'Unit Test 2', percentage: 68, subject: 'English' },
-      { name: 'Mid Term', percentage: 78, subject: 'Math' },
-      { name: 'Pop Quiz 2', percentage: 92, subject: 'Science' },
-      { name: 'Finals Prep', percentage: 84, subject: 'Geography' }
-    ];
 
     return (
       <div className="space-y-6">
@@ -437,34 +428,46 @@ const Dashboard = () => {
               <span>Academic Performance Curve</span>
             </h3>
             <div className="h-64">
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={chartData.length > 0 ? chartData : defaultChartData}>
-                  <defs>
-                    <linearGradient id="performanceGrad" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#6366f1" stopOpacity={0.35}/>
-                      <stop offset="95%" stopColor="#6366f1" stopOpacity={0}/>
-                    </linearGradient>
-                    <linearGradient id="performanceLineGrad" x1="0" y1="0" x2="1" y2="0">
-                      <stop offset="0%" stopColor="#6366f1" />
-                      <stop offset="50%" stopColor="#818cf8" />
-                      <stop offset="100%" stopColor="#fbbf24" />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#2e3155" opacity={0.3} />
-                  <XAxis dataKey="name" stroke="#94a3b8" fontSize={11} tickLine={false} axisLine={false} />
-                  <YAxis domain={[0, 100]} stroke="#94a3b8" fontSize={11} tickLine={false} axisLine={false} />
-                  <Tooltip content={<CustomTooltip />} />
-                  <Area 
-                    type="monotone" 
-                    dataKey="percentage" 
-                    stroke="url(#performanceLineGrad)" 
-                    strokeWidth={3} 
-                    fill="url(#performanceGrad)" 
-                    dot={{ fill: '#6366f1', stroke: '#1b1c31', strokeWidth: 2, r: 5 }} 
-                    activeDot={{ fill: '#fbbf24', stroke: '#1b1c31', strokeWidth: 2, r: 8 }} 
-                  />
-                </AreaChart>
-              </ResponsiveContainer>
+              {chartData.length > 0 ? (
+                <ResponsiveContainer width="100%" height="100%">
+                  <AreaChart data={chartData}>
+                    <defs>
+                      <linearGradient id="performanceGrad" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#6366f1" stopOpacity={0.35}/>
+                        <stop offset="95%" stopColor="#6366f1" stopOpacity={0}/>
+                      </linearGradient>
+                      <linearGradient id="performanceLineGrad" x1="0" y1="0" x2="1" y2="0">
+                        <stop offset="0%" stopColor="#6366f1" />
+                        <stop offset="50%" stopColor="#818cf8" />
+                        <stop offset="100%" stopColor="#fbbf24" />
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#2e3155" opacity={0.3} />
+                    <XAxis dataKey="name" stroke="#94a3b8" fontSize={11} tickLine={false} axisLine={false} />
+                    <YAxis domain={[0, 100]} stroke="#94a3b8" fontSize={11} tickLine={false} axisLine={false} />
+                    <Tooltip content={<CustomTooltip />} />
+                    <Area 
+                      type="monotone" 
+                      dataKey="percentage" 
+                      stroke="url(#performanceLineGrad)" 
+                      strokeWidth={3} 
+                      fill="url(#performanceGrad)" 
+                      dot={{ fill: '#6366f1', stroke: '#1b1c31', strokeWidth: 2, r: 5 }} 
+                      activeDot={{ fill: '#fbbf24', stroke: '#1b1c31', strokeWidth: 2, r: 8 }} 
+                    />
+                  </AreaChart>
+                </ResponsiveContainer>
+              ) : (
+                <div className="h-full flex flex-col items-center justify-center border border-dashed border-dark-800 rounded-2xl bg-dark-950/10 p-6 select-none animate-fadeIn">
+                  <div className="w-12 h-12 rounded-xl bg-dark-900 border border-dark-800 flex items-center justify-center text-slate-500 mb-3 shadow-inner">
+                    <TrendingUp size={22} />
+                  </div>
+                  <span className="text-xs font-bold text-slate-300">No score records found</span>
+                  <span className="text-[10px] text-slate-500 text-center max-w-xs mt-1 leading-normal">
+                    Academic performance tracking curves will render automatically once you participate in term examinations.
+                  </span>
+                </div>
+              )}
             </div>
           </div>
 
