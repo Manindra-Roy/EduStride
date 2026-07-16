@@ -23,10 +23,46 @@ import {
   ResponsiveContainer, 
   LineChart, 
   Line, 
+  AreaChart,
+  Area,
   PieChart, 
   Pie, 
   Cell 
 } from 'recharts';
+
+const CustomTooltip = ({ active, payload, label }) => {
+  if (active && payload && payload.length) {
+    return (
+      <div className="glass-panel p-3 rounded-xl border border-primary-500/20 bg-dark-950/95 shadow-2xl relative z-50">
+        <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">{label}</p>
+        <div className="flex items-center gap-2">
+          <span className="w-2.5 h-2.5 rounded-full bg-primary-500"></span>
+          <p className="text-sm font-black text-white">
+            {payload[0].value}% <span className="text-xs font-medium text-slate-400">({payload[0].payload.subject})</span>
+          </p>
+        </div>
+      </div>
+    );
+  }
+  return null;
+};
+
+const CustomPieTooltip = ({ active, payload }) => {
+  if (active && payload && payload.length) {
+    const data = payload[0].payload;
+    return (
+      <div className="glass-panel p-2.5 rounded-xl border border-primary-500/20 bg-dark-950/95 shadow-2xl relative z-50">
+        <div className="flex items-center gap-2">
+          <span className="w-2 h-2 rounded-full" style={{ backgroundColor: data.color }}></span>
+          <p className="text-xs font-bold text-white uppercase tracking-wide">
+            {data.name}: <span className="font-black text-xs">{data.value}</span> ({data.percentage}%)
+          </p>
+        </div>
+      </div>
+    );
+  }
+  return null;
+};
 
 const Dashboard = () => {
   const { user } = useAuth();
@@ -402,23 +438,32 @@ const Dashboard = () => {
             </h3>
             <div className="h-64">
               <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={chartData.length > 0 ? chartData : defaultChartData}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#2e3155" />
-                  <XAxis dataKey="name" stroke="#94a3b8" fontSize={12} />
-                  <YAxis domain={[0, 100]} stroke="#94a3b8" fontSize={12} />
-                  <Tooltip 
-                    contentStyle={{ backgroundColor: '#1b1c31', borderColor: '#2e3155', borderRadius: '12px' }}
-                    labelStyle={{ color: '#fff', fontWeight: 'bold' }}
-                  />
-                  <Line 
+                <AreaChart data={chartData.length > 0 ? chartData : defaultChartData}>
+                  <defs>
+                    <linearGradient id="performanceGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#6366f1" stopOpacity={0.35}/>
+                      <stop offset="95%" stopColor="#6366f1" stopOpacity={0}/>
+                    </linearGradient>
+                    <linearGradient id="performanceLineGrad" x1="0" y1="0" x2="1" y2="0">
+                      <stop offset="0%" stopColor="#6366f1" />
+                      <stop offset="50%" stopColor="#818cf8" />
+                      <stop offset="100%" stopColor="#fbbf24" />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#2e3155" opacity={0.3} />
+                  <XAxis dataKey="name" stroke="#94a3b8" fontSize={11} tickLine={false} axisLine={false} />
+                  <YAxis domain={[0, 100]} stroke="#94a3b8" fontSize={11} tickLine={false} axisLine={false} />
+                  <Tooltip content={<CustomTooltip />} />
+                  <Area 
                     type="monotone" 
                     dataKey="percentage" 
-                    stroke="#6366f1" 
+                    stroke="url(#performanceLineGrad)" 
                     strokeWidth={3} 
-                    dot={{ fill: '#4f46e5', r: 5 }} 
-                    activeDot={{ r: 8 }} 
+                    fill="url(#performanceGrad)" 
+                    dot={{ fill: '#6366f1', stroke: '#1b1c31', strokeWidth: 2, r: 5 }} 
+                    activeDot={{ fill: '#fbbf24', stroke: '#1b1c31', strokeWidth: 2, r: 8 }} 
                   />
-                </LineChart>
+                </AreaChart>
               </ResponsiveContainer>
             </div>
           </div>
@@ -802,11 +847,16 @@ const Dashboard = () => {
   const COLORS = ['#6366f1', '#3b82f6', '#10b981', '#f59e0b', '#ec4899', '#8b5cf6', '#06b6d4', '#14b8a6', '#f43f5e'];
 
   // Pie chart data
-  const pieData = classes.map((c, index) => ({
-    name: `Class ${c}`,
-    value: stats.classCounts[c] || 0,
-    color: COLORS[index % COLORS.length]
-  }));
+  const totalStudentsEnrolled = classes.reduce((sum, c) => sum + (stats.classCounts[c] || 0), 0);
+  const pieData = classes.map((c, index) => {
+    const val = stats.classCounts[c] || 0;
+    return {
+      name: `Class ${c}`,
+      value: val,
+      percentage: totalStudentsEnrolled > 0 ? Math.round((val / totalStudentsEnrolled) * 100) : 0,
+      color: COLORS[index % COLORS.length]
+    };
+  });
 
   return (
     <div className="space-y-6">
@@ -900,23 +950,32 @@ const Dashboard = () => {
         <div className="glass-panel p-4 sm:p-6 rounded-2xl border border-dark-800 lg:col-span-2">
           <h3 className="text-white text-base font-bold font-outfit mb-4">Class Enrollment Ratios</h3>
           <div className="flex flex-col md:flex-row items-center justify-around gap-4">
-            <div className="w-full md:w-1/2 h-64">
+            <div className="w-full md:w-1/2 h-64 relative">
+              {/* Central Donut Hole label displaying total enrolled students */}
+              <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none z-0">
+                <span className="text-3xl font-black text-white font-outfit leading-none">
+                  {totalStudentsEnrolled}
+                </span>
+                <span className="text-[9px] font-extrabold uppercase tracking-widest text-slate-400 mt-1">
+                  Enrolled
+                </span>
+              </div>
               <ResponsiveContainer width="100%" height="100%">
                 <PieChart>
                   <Pie
                     data={pieData}
                     cx="50%"
                     cy="50%"
-                    innerRadius={60}
-                    outerRadius={80}
-                    paddingAngle={5}
+                    innerRadius={62}
+                    outerRadius={82}
+                    paddingAngle={4}
                     dataKey="value"
                   >
                     {pieData.map((entry, index) => (
-                      <Cell key={`cell-${index}`} fill={entry.color} />
+                      <Cell key={`cell-${index}`} fill={entry.color} style={{ outline: 'none' }} />
                     ))}
                   </Pie>
-                  <Tooltip />
+                  <Tooltip content={<CustomPieTooltip />} />
                 </PieChart>
               </ResponsiveContainer>
             </div>

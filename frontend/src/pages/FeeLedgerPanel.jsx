@@ -28,6 +28,23 @@ import {
 
 const FeeLedgerPanel = () => {
   const { user } = useAuth();
+
+  const CustomFeeTooltip = ({ active, payload }) => {
+    if (active && payload && payload.length) {
+      const data = payload[0].payload;
+      return (
+        <div className="glass-panel p-2.5 rounded-xl border border-primary-500/20 bg-dark-950/95 shadow-2xl relative z-50">
+          <div className="flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full" style={{ backgroundColor: data.color }}></span>
+            <p className="text-[10px] font-bold text-white uppercase tracking-wide">
+              {data.name}: <span className="font-black text-xs">{chartTab === 'revenue' ? `₹${data.value.toLocaleString()}` : `${data.value} Months`}</span>
+            </p>
+          </div>
+        </div>
+      );
+    }
+    return null;
+  };
   
   const [ledgers, setLedgers] = useState([]);
   const [stats, setStats] = useState({
@@ -339,27 +356,40 @@ const FeeLedgerPanel = () => {
 
                 <div className="flex-1 min-h-[7rem] flex items-center justify-center relative">
                   {stats.totalExpectedRevenue > 0 ? (
-                    <ResponsiveContainer width="100%" height="100%">
-                      <PieChart>
-                        <Pie
-                          data={chartTab === 'revenue' ? revenueChartData : breakdownChartData}
-                          cx="50%"
-                          cy="50%"
-                          innerRadius={38}
-                          outerRadius={52}
-                          dataKey="value"
-                          paddingAngle={2}
-                        >
-                          {(chartTab === 'revenue' ? revenueChartData : breakdownChartData).map((entry, index) => (
-                            <Cell key={`cell-${index}`} fill={entry.color} />
-                          ))}
-                        </Pie>
-                        <Tooltip 
-                          contentStyle={{ backgroundColor: '#0b0c16', borderColor: '#2e3155', borderRadius: '12px' }}
-                          itemStyle={{ fontSize: '10px', color: '#fff', fontWeight: 'bold' }}
-                        />
-                      </PieChart>
-                    </ResponsiveContainer>
+                    <>
+                      {/* Central Donut Hole label displaying collection/paid percentage */}
+                      <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none z-0">
+                        <span className="text-sm font-black text-white font-outfit leading-none">
+                          {chartTab === 'revenue' 
+                            ? `${stats.totalExpectedRevenue > 0 ? Math.round((stats.actualCollectedRevenue / stats.totalExpectedRevenue) * 100) : 0}%`
+                            : `${(stats.breakdown?.paid_months + stats.breakdown?.partial_months + stats.breakdown?.unpaid_months) > 0 
+                                ? Math.round((stats.breakdown?.paid_months / (stats.breakdown?.paid_months + stats.breakdown?.partial_months + stats.breakdown?.unpaid_months)) * 100) 
+                                : 0}%`
+                          }
+                        </span>
+                        <span className="text-[7px] font-extrabold uppercase tracking-widest text-slate-400 mt-0.5">
+                          {chartTab === 'revenue' ? 'Collected' : 'Paid'}
+                        </span>
+                      </div>
+                      <ResponsiveContainer width="100%" height="100%">
+                        <PieChart>
+                          <Pie
+                            data={chartTab === 'revenue' ? revenueChartData : breakdownChartData}
+                            cx="50%"
+                            cy="50%"
+                            innerRadius={38}
+                            outerRadius={50}
+                            dataKey="value"
+                            paddingAngle={3}
+                          >
+                            {(chartTab === 'revenue' ? revenueChartData : breakdownChartData).map((entry, index) => (
+                              <Cell key={`cell-${index}`} fill={entry.color} style={{ outline: 'none' }} />
+                            ))}
+                          </Pie>
+                          <Tooltip content={<CustomFeeTooltip />} />
+                        </PieChart>
+                      </ResponsiveContainer>
+                    </>
                   ) : (
                     <span className="text-slate-500 text-xs">Waiting for financial records...</span>
                   )}
