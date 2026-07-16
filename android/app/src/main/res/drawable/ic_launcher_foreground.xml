@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    
+    <!-- Left Indigo Chevron representing learning path -->
+    <path
+        android:fillColor="#6366F1"
+        android:pathData="M38,36 L54,52 L38,68 L32,62 L42,52 L32,42 Z" />
+        
+    <!-- Right Gold Chevron representing progress/stride -->
+    <path
+        android:fillColor="#FBBF24"
+        android:pathData="M52,36 L68,52 L52,68 L46,62 L56,52 L46,42 Z" />
+        
+    <!-- Bottom solid white horizon baseline representing growth -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M30,74 h48 v2 h-48 z" />
+</vector>

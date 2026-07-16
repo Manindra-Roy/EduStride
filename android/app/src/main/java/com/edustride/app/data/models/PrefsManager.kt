@@ -12,7 +12,7 @@ class PrefsManager(context: Context) {
         private const val KEY_TOKEN = "jwt_token"
         private const val KEY_USER = "current_user"
         private const val KEY_THEME = "theme_accent"
-        private const val KEY_SERVER = "server_url"
+        private const val KEY_SERVER = "server_url_v2"
     }
 
     var serverUrl: String
