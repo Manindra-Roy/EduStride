@@ -42,18 +42,23 @@ class MainActivity : AppCompatActivity() {
         fileCallback = null
     }
 
-    // Set to local development server (or hosted production URL)
-    private val APP_URL = "http://10.0.2.2:5173" 
+    // Set to hosted production URL (customizable via developer settings)
+    private var APP_URL = "https://edustride.in"
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        
+        val prefs = getSharedPreferences("edustride_prefs", Context.MODE_PRIVATE)
+        APP_URL = prefs.getString("web_url", "https://edustride.in") ?: "https://edustride.in"
+
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
         setupWebView()
         setupSwipeToRefresh()
         setupOfflineOverlay()
+        setupSecretSettings()
         
         loadApp()
     }
@@ -165,6 +170,37 @@ class MainActivity : AppCompatActivity() {
         return activeNetwork.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
                 activeNetwork.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) ||
                 activeNetwork.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
+    }
+
+    private fun setupSecretSettings() {
+        // Hidden debug helper: clicking the horizontal progress bar launches the config dialog
+        binding.progressBar.setOnClickListener {
+            showUrlConfigDialog()
+        }
+    }
+
+    private fun showUrlConfigDialog() {
+        val input = android.widget.EditText(this).apply {
+            setText(APP_URL)
+            setSingleLine(true)
+            setPadding(50, 40, 50, 40)
+        }
+
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Configure Target URL")
+            .setMessage("Set the WebView target address (e.g. https://edustride.in or http://10.0.2.2:5173)")
+            .setView(input)
+            .setPositiveButton("Apply") { _, _ ->
+                val newUrl = input.text.toString().trim()
+                if (newUrl.isNotEmpty()) {
+                    APP_URL = newUrl
+                    getSharedPreferences("edustride_prefs", Context.MODE_PRIVATE)
+                        .edit().putString("web_url", newUrl).apply()
+                    loadApp()
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     // Handle back button navigation inside WebView
