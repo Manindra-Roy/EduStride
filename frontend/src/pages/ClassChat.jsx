@@ -123,6 +123,13 @@ const ClassChat = ({ setAppSidebarOpen }) => {
   useEffect(() => {
     setCallContextRoom(currentRoom);
   }, [currentRoom]);
+
+  // Sync external changes in global CallContext back to local room selection
+  useEffect(() => {
+    if (callContextRoom && callContextRoom !== currentRoom) {
+      setCurrentRoom(callContextRoom);
+    }
+  }, [callContextRoom]);
   const [messages, setMessages] = useState([]);
   const [typedMessage, setTypedMessage] = useState('');
   const [rooms, setRooms] = useState([]);

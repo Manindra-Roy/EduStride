@@ -10,6 +10,12 @@ const subjectSchema = new mongoose.Schema({
     type: String,
     required: true,
     trim: true
+  },
+  total_chapters: {
+    type: Number,
+    required: true,
+    default: 4,
+    min: 1
   }
 }, {
   timestamps: true

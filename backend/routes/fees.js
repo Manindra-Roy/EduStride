@@ -108,7 +108,9 @@ router.put('/manual', protect, authorize('SuperAdmin', 'Teacher'), async (req, r
 
     await ledger.save();
 
-    res.json({ success: true, data: ledger });
+    const populatedLedger = await FeeLedger.findById(ledger._id).populate('student_id');
+
+    res.json({ success: true, data: populatedLedger });
   } catch (error) {
     next(error);
   }

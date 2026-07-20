@@ -3,6 +3,9 @@ import ChatMessage from '../models/ChatMessage.js';
 
 const activeCalls = new Map(); // class_level -> callDetails
 const roomMembers = new Map(); // class_level -> Map of socket.id -> { sender_name, sender_role }
+let ioInstance = null;
+
+export const getIO = () => ioInstance;
 
 export const initSocket = (server) => {
   const io = new Server(server, {
@@ -11,6 +14,7 @@ export const initSocket = (server) => {
       methods: ['GET', 'POST']
     }
   });
+  ioInstance = io;
 
   const sendMembersList = (class_level) => {
     const membersMap = roomMembers.get(class_level);

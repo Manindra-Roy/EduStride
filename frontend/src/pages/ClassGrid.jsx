@@ -94,9 +94,12 @@ const ClassGrid = () => {
   // Subject Management State
   const [showSubjectModal, setShowSubjectModal] = useState(false);
   const [newSubjectName, setNewSubjectName] = useState('');
+  const [newSubjectChapters, setNewSubjectChapters] = useState('4');
   const [subjectError, setSubjectError] = useState('');
   const [subjectSuccess, setSubjectSuccess] = useState('');
   const [addingSubject, setAddingSubject] = useState(false);
+  const [savingSubjectId, setSavingSubjectId] = useState(null);
+  const [savedSubjectId, setSavedSubjectId] = useState(null);
 
   const fetchClassSubjects = async () => {
     try {
@@ -128,11 +131,13 @@ const ClassGrid = () => {
     try {
       const res = await axios.post('/api/subjects', {
         name: newSubjectName.trim(),
-        class_level
+        class_level,
+        total_chapters: parseInt(newSubjectChapters, 10) || 4
       });
       if (res.data.success) {
         setSubjectSuccess(`Subject '${newSubjectName.trim()}' added successfully!`);
         setNewSubjectName('');
+        setNewSubjectChapters('4');
         await fetchClassSubjects();
       }
     } catch (err) {
@@ -1780,7 +1785,7 @@ const ClassGrid = () => {
               )}
 
               {/* Add Subject Form */}
-              <form onSubmit={handleAddSubject} className="flex gap-2">
+              <form onSubmit={handleAddSubject} className="flex flex-col sm:flex-row gap-2">
                 <input
                   type="text"
                   required
@@ -1789,13 +1794,25 @@ const ClassGrid = () => {
                   onChange={(e) => setNewSubjectName(e.target.value)}
                   className="flex-1 px-3 py-2 rounded-xl bg-dark-900 border border-dark-850 focus:border-primary-500 text-white text-xs outline-none"
                 />
-                <button
-                  type="submit"
-                  disabled={addingSubject}
-                  className="px-4 py-2 bg-primary-600 hover:bg-primary-500 disabled:opacity-50 text-white text-xs font-semibold rounded-xl transition duration-150 shrink-0"
-                >
-                  {addingSubject ? 'Adding...' : 'Add Subject'}
-                </button>
+                <div className="flex gap-2">
+                  <input
+                    type="number"
+                    min="1"
+                    required
+                    placeholder="Chapters"
+                    title="Number of Chapters"
+                    value={newSubjectChapters}
+                    onChange={(e) => setNewSubjectChapters(e.target.value)}
+                    className="w-20 px-3 py-2 rounded-xl bg-dark-900 border border-dark-850 focus:border-primary-500 text-white text-xs outline-none text-center"
+                  />
+                  <button
+                    type="submit"
+                    disabled={addingSubject}
+                    className="px-4 py-2 bg-primary-600 hover:bg-primary-500 disabled:opacity-50 text-white text-xs font-semibold rounded-xl transition duration-150 shrink-0"
+                  >
+                    {addingSubject ? 'Adding...' : 'Add Subject'}
+                  </button>
+                </div>
               </form>
 
               {/* Subjects List */}
@@ -1810,16 +1827,49 @@ const ClassGrid = () => {
                     </div>
                   ) : (
                     subjectsList.map((sub) => (
-                      <div key={sub._id} className="flex justify-between items-center p-3 text-xs hover:bg-dark-900/40">
+                      <div key={sub._id} className="flex justify-between items-center p-2.5 text-xs hover:bg-dark-900/40">
                         <span className="font-semibold text-white">{sub.name}</span>
-                        <button
-                          type="button"
-                          onClick={() => handleDeleteSubject(sub._id, sub.name)}
-                          className="p-1 rounded text-rose-450 hover:bg-rose-500/10 hover:text-rose-305 transition animate-fadeIn"
-                          title={`Delete ${sub.name}`}
-                        >
-                          <Trash2 size={14} />
-                        </button>
+                        <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-1">
+                            <span className="text-[10px] text-slate-450">Chapters:</span>
+                            <input
+                              type="number"
+                              min="1"
+                              value={sub.total_chapters || 4}
+                              onChange={async (e) => {
+                                const newTotal = parseInt(e.target.value, 10);
+                                if (!isNaN(newTotal) && newTotal >= 1) {
+                                  try {
+                                    setSavingSubjectId(sub._id);
+                                    setSubjectsList(prev => prev.map(item => item._id === sub._id ? { ...item, total_chapters: newTotal } : item));
+                                    await axios.put(`/api/subjects/${sub._id}`, { total_chapters: newTotal });
+                                    setSavingSubjectId(null);
+                                    setSavedSubjectId(sub._id);
+                                    setTimeout(() => setSavedSubjectId(null), 1000);
+                                  } catch (err) {
+                                    setSavingSubjectId(null);
+                                    console.error('Failed to update chapters', err);
+                                  }
+                                }
+                              }}
+                              className={`w-12 px-1 py-0.5 rounded text-white text-[10px] text-center outline-none transition-all duration-300 font-semibold border ${
+                                savingSubjectId === sub._id
+                                  ? 'border-amber-500 bg-amber-500/5 shadow-[0_0_10px_rgba(245,158,11,0.2)]'
+                                  : savedSubjectId === sub._id
+                                    ? 'border-emerald-500 bg-emerald-500/5 shadow-[0_0_10px_rgba(16,185,129,0.2)]'
+                                    : 'border-dark-850 bg-dark-900 focus:border-primary-500'
+                              }`}
+                            />
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteSubject(sub._id, sub.name)}
+                            className="p-1 rounded text-rose-450 hover:bg-rose-500/10 hover:text-rose-305 transition animate-fadeIn"
+                            title={`Delete ${sub.name}`}
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
                       </div>
                     ))
                   )}

@@ -16,6 +16,30 @@ import {
   Plus
 } from 'lucide-react';
 
+const normalizeChapterName = (name) => {
+  if (!name) return 'GENERAL';
+  let str = name.trim();
+
+  // Split by common delimiters like ':', '-', '|' and take the first part
+  const separators = /[:\-\|]/;
+  const parts = str.split(separators);
+  if (parts.length > 1) {
+    str = parts[0].trim();
+  }
+
+  // Standardize "Ch-1", "Ch. 1", "Chap 1", "Chapter 01" to "CHAPTER 1"
+  const chapterRegex = /^(chapter|ch|chap|unit|lesson|module)[.\s\-]*0*(\d+)/i;
+  const match = str.match(chapterRegex);
+  if (match) {
+    const type = match[1].toUpperCase();
+    const num = match[2];
+    const standardType = ['CH', 'CHAP', 'CHAPTER'].includes(type) ? 'CHAPTER' : type;
+    return `${standardType} ${num}`;
+  }
+
+  return str.toUpperCase();
+};
+
 const AutomationsPanel = () => {
   const [loading, setLoading] = useState(true);
   const [progressData, setProgressData] = useState([]);
@@ -440,48 +464,51 @@ const AutomationsPanel = () => {
       try {
         // Fetch subjects dynamically class-wise
         const subjectsRes = syllabusClass ? await axios.get(`/api/subjects?class_level=${syllabusClass}`) : { data: { success: true, data: [] } };
-        const subjectsList = subjectsRes.data.success && Array.isArray(subjectsRes.data.data)
-          ? subjectsRes.data.data.map(s => s.name)
+        const subjectsData = subjectsRes.data.success && Array.isArray(subjectsRes.data.data)
+          ? subjectsRes.data.data
           : [];
 
         const res = await axios.get('/api/study-materials');
         if (res.data.success) {
           const list = res.data.data || [];
-          const counts = {};
+          const formatted = [];
 
-          // Initialize subject counters
-          subjectsList.forEach(sub => {
-            counts[sub] = { total: 4, completed: 0 }; // Assume 4 chapters standard
-          });
+          subjectsData.forEach(subjectObj => {
+            const subjectName = subjectObj.name;
+            
+            // Filter materials belonging to this subject and class
+            const subjectMaterials = list.filter(m => 
+              m.class_level?.trim().toUpperCase() === syllabusClass?.trim().toUpperCase() &&
+              m.subject?.trim().toUpperCase() === subjectName.trim().toUpperCase()
+            );
 
-          // Group uploaded materials and count status
-          list.forEach(m => {
-            if (m.class_level === syllabusClass) {
-              if (!counts[m.subject]) {
-                counts[m.subject] = { total: 4, completed: 0 };
+            // Group by chapter name (case-insensitive)
+            const chaptersMap = {};
+            subjectMaterials.forEach(m => {
+              const chapterKey = normalizeChapterName(m.chapter_name);
+              if (!chaptersMap[chapterKey]) {
+                chaptersMap[chapterKey] = [];
               }
-              // Count if status is notes distributed or revised
-              if (m.status === 'Notes Distributed' || m.status === 'Revised') {
-                counts[m.subject].completed += 1;
-              }
-              // If total materials is more than 4, adjust chapters total
-              if (list.filter(x => x.class_level === syllabusClass && x.subject === m.subject).length > counts[m.subject].total) {
-                counts[m.subject].total = list.filter(x => x.class_level === syllabusClass && x.subject === m.subject).length;
-              }
-            }
-          });
+              chaptersMap[chapterKey].push(m);
+            });
 
-          // Convert to chart-friendly format
-          const formatted = Object.keys(counts).map(sub => {
-            const pct = counts[sub].total > 0 
-              ? Math.round((counts[sub].completed / counts[sub].total) * 100) 
-              : 0;
-            return {
-              subject: sub,
-              completed: counts[sub].completed,
-              total: counts[sub].total,
-              percentage: pct
-            };
+            // Calculate unique chapters count and completed chapters count
+            const uniqueChaptersUploaded = Object.keys(chaptersMap);
+            const completedCount = uniqueChaptersUploaded.filter(chapKey => {
+              const materials = chaptersMap[chapKey];
+              return materials.some(m => m.status === 'Notes Distributed' || m.status === 'Revised');
+            }).length;
+
+            // The total chapters count is the maximum of the defined total_chapters or the unique chapters uploaded
+            const totalChapters = Math.max(subjectObj.total_chapters || 4, uniqueChaptersUploaded.length);
+            const percentage = totalChapters > 0 ? Math.round((completedCount / totalChapters) * 100) : 0;
+
+            formatted.push({
+              subject: subjectName,
+              completed: completedCount,
+              total: totalChapters,
+              percentage
+            });
           });
 
           setProgressData(formatted);

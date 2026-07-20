@@ -7,38 +7,11 @@ import { protect, authorize } from '../middleware/auth.js';
 
 const router = express.Router();
 
-// Seed default subjects if none exist
-const seedDefaultSubjects = async () => {
-  const count = await Subject.countDocuments();
-  if (count === 0) {
-    const classes = await ClassLevel.find();
-    let classNames = classes.map(c => c.name);
-    
-    // Seed default class names if ClassLevel is empty
-    if (classNames.length === 0) {
-      classNames = ['VII', 'VIII', 'IX', 'X'];
-    }
-    
-    const defaultSubjects = ['Mathematics', 'Science', 'History', 'English', 'Geography'];
-    const listToInsert = [];
-    
-    for (const cls of classNames) {
-      for (const sub of defaultSubjects) {
-        listToInsert.push({ name: sub, class_level: cls });
-      }
-    }
-    
-    await Subject.insertMany(listToInsert);
-    console.log('[Seeder] Default subjects seeded successfully for classes:', classNames);
-  }
-};
-
 // @desc    Get subjects (optionally filtered by class_level)
 // @route   GET /api/subjects
 // @access  Public (so filters can read them)
 router.get('/', async (req, res, next) => {
   try {
-    await seedDefaultSubjects();
     const { class_level } = req.query;
     
     const query = {};
@@ -58,7 +31,7 @@ router.get('/', async (req, res, next) => {
 // @access  Private (Admin & Teacher only)
 router.post('/', protect, authorize('SuperAdmin', 'Teacher'), async (req, res, next) => {
   try {
-    const { name, class_level } = req.body;
+    const { name, class_level, total_chapters } = req.body;
     
     if (!name || !class_level) {
       res.status(400);
@@ -84,10 +57,37 @@ router.post('/', protect, authorize('SuperAdmin', 'Teacher'), async (req, res, n
     
     const newSubject = await Subject.create({
       name: cleanName,
-      class_level: cleanClass
+      class_level: cleanClass,
+      total_chapters: Number(total_chapters) || 4
     });
     
     res.status(201).json({ success: true, data: newSubject });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Update a subject
+// @route   PUT /api/subjects/:id
+// @access  Private (Admin & Teacher only)
+router.put('/:id', protect, authorize('SuperAdmin', 'Teacher'), async (req, res, next) => {
+  try {
+    const { name, total_chapters } = req.body;
+    const subject = await Subject.findById(req.params.id);
+    if (!subject) {
+      res.status(404);
+      throw new Error('Subject not found');
+    }
+
+    if (name) {
+      subject.name = name.trim();
+    }
+    if (total_chapters !== undefined) {
+      subject.total_chapters = Number(total_chapters) || 4;
+    }
+
+    await subject.save();
+    res.json({ success: true, data: subject });
   } catch (error) {
     next(error);
   }

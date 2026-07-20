@@ -233,7 +233,7 @@ const FeeLedgerPanel = () => {
     setSubmitting(true);
     try {
       const payload = {
-        student_id: selectedLedger.student_id._id,
+        student_id: selectedLedger.student_id?._id || selectedLedger.student_id,
         month_name: payingMonth,
         status: manualForm.status,
         amount_paid: manualForm.amount_paid,

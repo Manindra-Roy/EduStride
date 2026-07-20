@@ -7,6 +7,7 @@ import StudyMaterial from '../models/StudyMaterial.js';
 import Student from '../models/Student.js';
 import { protect, authorize } from '../middleware/auth.js';
 import { uploadToCloud, deleteFromCloud } from '../services/cloudStorage.js';
+import { getIO } from '../config/socket.js';
 
 const router = express.Router();
 
@@ -112,6 +113,20 @@ router.post('/upload', protect, authorize('SuperAdmin', 'Teacher'), upload.singl
       file_name: req.file.originalname
     });
 
+    // Notify class students via Socket.IO if published/distributed
+    if (material.status !== 'Drafting') {
+      const io = getIO();
+      if (io) {
+        io.to(class_level).emit('new_study_material', {
+          class_level,
+          subject,
+          chapter_name,
+          file_name: req.file.originalname,
+          material
+        });
+      }
+    }
+
     res.status(201).json({
       success: true,
       data: material
@@ -132,10 +147,27 @@ router.put('/:id', protect, authorize('SuperAdmin', 'Teacher'), async (req, res,
       throw new Error('Study material not found');
     }
 
+    const oldStatus = material.status;
+
     const updated = await StudyMaterial.findByIdAndUpdate(req.params.id, req.body, {
       new: true,
       runValidators: true
     });
+
+    // Notify class students if status is updated to something other than Drafting
+    if (req.body.status && req.body.status !== 'Drafting' && oldStatus !== req.body.status) {
+      const io = getIO();
+      if (io) {
+        io.to(updated.class_level).emit('new_study_material', {
+          class_level: updated.class_level,
+          subject: updated.subject,
+          chapter_name: updated.chapter_name,
+          file_name: updated.file_name,
+          material: updated,
+          isUpdate: true
+        });
+      }
+    }
 
     res.json({ success: true, data: updated });
   } catch (error) {

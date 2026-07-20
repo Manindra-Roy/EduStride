@@ -65,6 +65,30 @@ const CustomPieTooltip = ({ active, payload }) => {
   return null;
 };
 
+const normalizeChapterName = (name) => {
+  if (!name) return 'GENERAL';
+  let str = name.trim();
+
+  // Split by common delimiters like ':', '-', '|' and take the first part
+  const separators = /[:\-\|]/;
+  const parts = str.split(separators);
+  if (parts.length > 1) {
+    str = parts[0].trim();
+  }
+
+  // Standardize "Ch-1", "Ch. 1", "Chap 1", "Chapter 01" to "CHAPTER 1"
+  const chapterRegex = /^(chapter|ch|chap|unit|lesson|module)[.\s\-]*0*(\d+)/i;
+  const match = str.match(chapterRegex);
+  if (match) {
+    const type = match[1].toUpperCase();
+    const num = match[2];
+    const standardType = ['CH', 'CHAP', 'CHAPTER'].includes(type) ? 'CHAPTER' : type;
+    return `${standardType} ${num}`;
+  }
+
+  return str.toUpperCase();
+};
+
 const Dashboard = () => {
   const { user } = useAuth();
   const [loading, setLoading] = useState(true);
@@ -116,40 +140,48 @@ const Dashboard = () => {
           ]);
 
           if (subjectsRes.data.success && materialsRes.data.success) {
-            const subjectsList = subjectsRes.data.data.map(s => s.name);
+            const subjectsData = subjectsRes.data.data || [];
             const materialsList = materialsRes.data.data || [];
-            const counts = {};
+            const formatted = [];
 
-            subjectsList.forEach(sub => {
-              counts[sub] = { total: 4, completed: 0 };
+            subjectsData.forEach(subjectObj => {
+              const subjectName = subjectObj.name;
+              
+              // Filter materials belonging to this subject and class
+              const subjectMaterials = materialsList.filter(m => 
+                m.class_level?.trim().toUpperCase() === studentClass?.trim().toUpperCase() &&
+                m.subject?.trim().toUpperCase() === subjectName.trim().toUpperCase()
+              );
+
+              // Group by chapter name (case-insensitive)
+              const chaptersMap = {};
+              subjectMaterials.forEach(m => {
+                const chapterKey = normalizeChapterName(m.chapter_name);
+                if (!chaptersMap[chapterKey]) {
+                  chaptersMap[chapterKey] = [];
+                }
+                chaptersMap[chapterKey].push(m);
+              });
+
+              // Calculate unique chapters count and completed chapters count
+              const uniqueChaptersUploaded = Object.keys(chaptersMap);
+              const completedCount = uniqueChaptersUploaded.filter(chapKey => {
+                const materials = chaptersMap[chapKey];
+                return materials.some(m => m.status === 'Notes Distributed' || m.status === 'Revised');
+              }).length;
+
+              // The total chapters count is the maximum of the defined total_chapters or the unique chapters uploaded
+              const totalChapters = Math.max(subjectObj.total_chapters || 4, uniqueChaptersUploaded.length);
+              const percentage = totalChapters > 0 ? Math.round((completedCount / totalChapters) * 100) : 0;
+
+              formatted.push({
+                subject: subjectName,
+                completed: completedCount,
+                total: totalChapters,
+                percentage
+              });
             });
 
-            materialsList.forEach(m => {
-              if (m.class_level === studentClass) {
-                if (!counts[m.subject]) {
-                  counts[m.subject] = { total: 4, completed: 0 };
-                }
-                if (m.status === 'Notes Distributed' || m.status === 'Revised') {
-                  counts[m.subject].completed += 1;
-                }
-                const totalCountInDb = materialsList.filter(x => x.class_level === studentClass && x.subject === m.subject).length;
-                if (totalCountInDb > counts[m.subject].total) {
-                  counts[m.subject].total = totalCountInDb;
-                }
-              }
-            });
-
-            const formatted = Object.keys(counts).map(sub => {
-              const pct = counts[sub].total > 0
-                ? Math.round((counts[sub].completed / counts[sub].total) * 100)
-                : 0;
-              return {
-                subject: sub,
-                completed: counts[sub].completed,
-                total: counts[sub].total,
-                percentage: pct
-              };
-            });
             setSyllabusProgress(formatted);
           }
         } else {
@@ -325,7 +357,7 @@ const Dashboard = () => {
           <div className="glass-panel p-4 sm:p-6 rounded-2xl border border-dark-800 flex flex-col justify-between">
             <div>
               <h3 className="text-slate-400 text-sm font-semibold uppercase tracking-wider mb-3">Syllabus Progress</h3>
-              <div className="space-y-3 max-h-36 overflow-y-auto pr-1">
+              <div className="space-y-3 max-h-72 overflow-y-auto pr-1">
                 {syllabusProgress.length > 0 ? (
                   syllabusProgress.map((item, index) => {
                     const barColor = item.percentage >= 75
