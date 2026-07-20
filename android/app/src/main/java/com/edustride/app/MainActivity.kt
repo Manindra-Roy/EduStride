@@ -34,6 +34,7 @@ import android.Manifest
 import android.content.pm.PackageManager
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import android.util.Log
 
 class MainActivity : AppCompatActivity() {
 
@@ -73,6 +74,12 @@ class MainActivity : AppCompatActivity() {
 
         createNotificationChannel()
         checkNotificationPermission()
+
+        val registeredClass = prefs.getString("user_class", "") ?: ""
+        if (registeredClass.isNotEmpty()) {
+            val serviceIntent = Intent(this, BackgroundSocketService::class.java)
+            startService(serviceIntent)
+        }
 
         setupWebView()
         setupSwipeToRefresh()
@@ -297,6 +304,36 @@ class MainActivity : AppCompatActivity() {
                     notify(tag.hashCode(), builder.build())
                 }
             }
+        }
+
+        @JavascriptInterface
+        fun registerUser(email: String, classLevel: String, name: String) {
+            getSharedPreferences("edustride_prefs", Context.MODE_PRIVATE)
+                .edit()
+                .putString("user_email", email)
+                .putString("user_class", classLevel)
+                .putString("user_name", name)
+                .apply()
+
+            // Start background service
+            val serviceIntent = Intent(context, BackgroundSocketService::class.java)
+            context.startService(serviceIntent)
+            Log.d("MainActivity", "User registered: $name, starting background service")
+        }
+
+        @JavascriptInterface
+        fun logoutUser() {
+            getSharedPreferences("edustride_prefs", Context.MODE_PRIVATE)
+                .edit()
+                .putString("user_email", "")
+                .putString("user_class", "")
+                .putString("user_name", "")
+                .apply()
+
+            // Stop background service
+            val serviceIntent = Intent(context, BackgroundSocketService::class.java)
+            context.stopService(serviceIntent)
+            Log.d("MainActivity", "User logged out, stopping background service")
         }
     }
 }

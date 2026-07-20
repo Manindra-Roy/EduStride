@@ -109,7 +109,26 @@ export const CallProvider = ({ children }) => {
       if (socket.connected) {
         socket.disconnect();
       }
+      // Logout background service if Android bridge is available
+      if (window.AndroidNotificationBridge && typeof window.AndroidNotificationBridge.logoutUser === 'function') {
+        try {
+          window.AndroidNotificationBridge.logoutUser();
+        } catch (err) {
+          console.error('Failed to logout native user:', err);
+        }
+      }
       return;
+    }
+
+    // Register user to native background service if Android bridge is available
+    if (window.AndroidNotificationBridge && typeof window.AndroidNotificationBridge.registerUser === 'function') {
+      try {
+        const myName = user.studentProfile?.name || (user.role === 'SuperAdmin' ? 'Admin' : 'Teacher');
+        const myClass = user.studentProfile?.class_level || 'All';
+        window.AndroidNotificationBridge.registerUser(user.email, myClass, myName);
+      } catch (err) {
+        console.error('Failed to register native user:', err);
+      }
     }
 
     // Connect global socket singleton
