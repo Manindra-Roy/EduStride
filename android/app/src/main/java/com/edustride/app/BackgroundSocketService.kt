@@ -39,10 +39,12 @@ class BackgroundSocketService : Service() {
         val email = prefs.getString("user_email", "") ?: ""
         val classLevel = prefs.getString("user_class", "") ?: ""
         val name = prefs.getString("user_name", "") ?: ""
+        val savedSocketUrl = prefs.getString("socket_url", "") ?: ""
         val webUrl = prefs.getString("web_url", "https://edustride.in") ?: "https://edustride.in"
 
         // Deriving socket API URL (if localhost/local IP on 3000, redirect to 5000)
         val socketUrl = when {
+            savedSocketUrl.isNotEmpty() -> savedSocketUrl
             webUrl.contains(":3000") -> webUrl.replace(":3000", ":5000")
             else -> webUrl
         }

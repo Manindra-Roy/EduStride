@@ -307,18 +307,19 @@ class MainActivity : AppCompatActivity() {
         }
 
         @JavascriptInterface
-        fun registerUser(email: String, classLevel: String, name: String) {
+        fun registerUser(email: String, classLevel: String, name: String, socketUrl: String) {
             getSharedPreferences("edustride_prefs", Context.MODE_PRIVATE)
                 .edit()
                 .putString("user_email", email)
                 .putString("user_class", classLevel)
                 .putString("user_name", name)
+                .putString("socket_url", socketUrl)
                 .apply()
 
             // Start background service
             val serviceIntent = Intent(context, BackgroundSocketService::class.java)
             context.startService(serviceIntent)
-            Log.d("MainActivity", "User registered: $name, starting background service")
+            Log.d("MainActivity", "User registered: $name, starting background service to socket: $socketUrl")
         }
 
         @JavascriptInterface

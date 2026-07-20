@@ -125,7 +125,8 @@ export const CallProvider = ({ children }) => {
       try {
         const myName = user.studentProfile?.name || (user.role === 'SuperAdmin' ? 'Admin' : 'Teacher');
         const myClass = user.studentProfile?.class_level || 'All';
-        window.AndroidNotificationBridge.registerUser(user.email, myClass, myName);
+        const socketUrl = import.meta.env.VITE_API_URL || window.location.origin;
+        window.AndroidNotificationBridge.registerUser(user.email, myClass, myName, socketUrl);
       } catch (err) {
         console.error('Failed to register native user:', err);
       }
