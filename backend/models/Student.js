@@ -78,7 +78,11 @@ const studentSchema = new mongoose.Schema({
   monthly_fee: {
     type: Number,
     required: true,
-    default: 1500
+    default: 0
+  },
+  is_free_tier: {
+    type: Boolean,
+    default: false
   },
   attendance_history: [attendanceHistorySchema],
   test_scores: [testScoreSchema],

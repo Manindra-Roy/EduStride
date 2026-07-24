@@ -217,6 +217,9 @@ router.get('/', protect, async (req, res, next) => {
       });
       const studentIds = ledgers.map(l => l.student_id);
       query._id = { $in: studentIds };
+      if (fee_status === 'Unpaid') {
+        query.is_free_tier = { $ne: true };
+      }
     }
 
     const count = await Student.countDocuments(query);
@@ -236,8 +239,9 @@ router.get('/', protect, async (req, res, next) => {
       let ledger = null;
       let currentFeeStatus = 'Hidden';
 
-      // Load ledger only for self or admins/teachers
-      if (!isStudent || isSelf) {
+      if (student.is_free_tier) {
+        currentFeeStatus = 'Exempt';
+      } else if (!isStudent || isSelf) {
         ledger = await FeeLedger.findOne({ student_id: student._id });
         const currentMonthIndex = new Date().getMonth();
         currentFeeStatus = ledger?.months[currentMonthIndex]?.status || 'Unpaid';
@@ -310,10 +314,13 @@ router.get('/:id', protect, async (req, res, next) => {
 // @access  Private (Admin/Teacher)
 router.post('/', protect, authorize('SuperAdmin', 'Teacher'), async (req, res, next) => {
   try {
-    const { name, class_level, parent_name, primary_contact, secondary_contact, status, joining_date, monthly_fee } = req.body;
+    const { name, class_level, parent_name, primary_contact, secondary_contact, status, joining_date, monthly_fee, is_free_tier } = req.body;
 
     // Generate a temporary unique roll number since it will be auto-recalculated
     const uniqueTempRoll = `NEW_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+
+    const freeTier = Boolean(is_free_tier);
+    const feeVal = freeTier ? 0 : (monthly_fee !== undefined ? Number(monthly_fee) : 0);
 
     const student = await Student.create({
       name,
@@ -324,7 +331,8 @@ router.post('/', protect, authorize('SuperAdmin', 'Teacher'), async (req, res, n
       secondary_contact,
       status: status || 'Active',
       joining_date: joining_date || new Date(),
-      monthly_fee: monthly_fee !== undefined ? Number(monthly_fee) : 1500
+      monthly_fee: feeVal,
+      is_free_tier: freeTier
     });
 
     // Auto-create FeeLedger
@@ -368,6 +376,14 @@ router.put('/:id', protect, authorize('SuperAdmin', 'Teacher'), async (req, res,
     // If class level is changing, temporarily set roll number to a unique string to avoid unique key index clashes
     if (class_level && class_level !== oldClassLevel) {
       req.body.roll_number = `TEMP_${Date.now()}_MOVE`;
+    }
+
+    // Handle free tier status and monthly fee logic
+    if (req.body.is_free_tier !== undefined) {
+      req.body.is_free_tier = Boolean(req.body.is_free_tier);
+      if (req.body.is_free_tier) {
+        req.body.monthly_fee = 0;
+      }
     }
 
     const updatedStudent = await Student.findByIdAndUpdate(req.params.id, req.body, {

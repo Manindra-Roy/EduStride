@@ -78,7 +78,7 @@ const FeeLedgerPanel = () => {
   // Forms
   const [manualForm, setManualForm] = useState({
     status: 'Paid',
-    amount_paid: '1500',
+    amount_paid: '0',
     transaction_method: 'Cash Payment',
     receipt_id: ''
   });
@@ -96,7 +96,7 @@ const FeeLedgerPanel = () => {
       else if (m.status === 'Unpaid') unpaid++;
       else if (m.status === 'Partial/Pending') pending++;
     });
-    const monthlyFee = selectedLedger.student_id?.monthly_fee || 1500;
+    const monthlyFee = selectedLedger.student_id?.is_free_tier ? 0 : (selectedLedger.student_id?.monthly_fee || 0);
     return { paid, unpaid, pending, monthlyFee };
   }, [selectedLedger]);
 
@@ -131,7 +131,8 @@ const FeeLedgerPanel = () => {
                 name: s.name,
                 roll_number: s.roll_number,
                 class_level: s.class_level,
-                monthly_fee: s.monthly_fee
+                monthly_fee: s.monthly_fee,
+                is_free_tier: s.is_free_tier
               }
             };
           }
@@ -157,7 +158,7 @@ const FeeLedgerPanel = () => {
             });
           });
 
-          const totalExpected = studentList.reduce((sum, s) => sum + ((s.monthly_fee || 1500) * 12), 0);
+          const totalExpected = studentList.reduce((sum, s) => sum + ((s.is_free_tier ? 0 : (s.monthly_fee || 0)) * 12), 0);
           setStats({
             totalExpectedRevenue: totalExpected,
             actualCollectedRevenue: collected,
@@ -209,7 +210,7 @@ const FeeLedgerPanel = () => {
       const payload = {
         student_id: user.studentProfile._id,
         month_name: payingMonth,
-        amount: user.studentProfile?.monthly_fee || 1500,
+        amount: user.studentProfile?.is_free_tier ? 0 : (user.studentProfile?.monthly_fee || 0),
         payment_method: 'Stripe Gateway Hook',
         receipt_id: `TXN-STripe-${Date.now().toString().substring(5)}`
       };
@@ -484,7 +485,12 @@ const FeeLedgerPanel = () => {
                                     {(ledger.student_id?.name || '?')[0]}
                                   </div>
                                   <div>
-                                    <div className="font-semibold text-white group-hover:text-primary-400 transition">{ledger.student_id?.name || 'Unknown Student'}</div>
+                                    <div className="font-semibold text-white group-hover:text-primary-400 transition flex items-center gap-1.5">
+                                      <span>{ledger.student_id?.name || 'Unknown Student'}</span>
+                                      {ledger.student_id?.is_free_tier && (
+                                        <span className="px-1.5 py-0.2 rounded text-[8px] font-extrabold bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">Free Tier</span>
+                                      )}
+                                    </div>
                                   </div>
                                 </div>
                               </td>
@@ -613,7 +619,12 @@ const FeeLedgerPanel = () => {
                       </div>
                       <div>
                         <h3 className="text-base font-extrabold text-white font-outfit">{selectedLedger.student_id?.name || 'Unknown Student'}</h3>
-                        <p className="text-slate-455 text-[10px] mt-0.5 font-mono">Roll: {selectedLedger.student_id?.roll_number || 'N/A'} • Class {selectedLedger.student_id?.class_level || 'N/A'}</p>
+                        <p className="text-slate-455 text-[10px] mt-0.5 font-mono flex items-center gap-1.5">
+                          <span>Roll: {selectedLedger.student_id?.roll_number || 'N/A'} • Class {selectedLedger.student_id?.class_level || 'N/A'}</span>
+                          {selectedLedger.student_id?.is_free_tier && (
+                            <span className="px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 font-sans font-bold text-[9px]">Free Tier</span>
+                          )}
+                        </p>
                       </div>
                     </div>
                     <button
@@ -627,7 +638,12 @@ const FeeLedgerPanel = () => {
                   </div>
 
                   {/* Student Stats Summary Strip */}
-                  {selectedLedgerStats && (
+                  {selectedLedger.student_id?.is_free_tier ? (
+                    <div className="p-3.5 rounded-xl bg-indigo-500/10 border border-indigo-500/20 text-center select-none font-outfit shrink-0">
+                      <span className="text-[10px] text-indigo-300 block uppercase font-bold tracking-wider">Fee Exemption Status</span>
+                      <span className="text-xs font-extrabold text-indigo-200 mt-0.5 block">Free Tier Student — Exempt from monthly tuition fee</span>
+                    </div>
+                  ) : selectedLedgerStats && (
                     <div className="grid grid-cols-3 gap-2.5 p-3 rounded-xl bg-dark-900/50 border border-dark-800 text-center select-none font-outfit shrink-0">
                       <div className="border-r border-dark-800/80">
                         <span className="text-[10px] text-slate-500 block uppercase font-bold tracking-wider">Paid</span>
@@ -646,50 +662,58 @@ const FeeLedgerPanel = () => {
 
                   {/* Monthly List with status indicator borders */}
                   <div className="space-y-2.5 max-h-80 overflow-y-auto pr-1">
-                    {selectedLedger.months.map((m) => {
-                      const indicatorBorder = m.status === 'Paid'
-                        ? 'border-l-2 border-l-emerald-500/60'
-                        : m.status === 'Partial/Pending'
-                          ? 'border-l-2 border-l-amber-500/60'
-                          : 'border-l-2 border-l-rose-500/60';
-                      return (
-                        <div key={m.month_name} className={`flex justify-between items-center p-3 rounded-xl bg-dark-900/50 border border-dark-900/80 transition hover:border-dark-750 ${indicatorBorder}`}>
-                          <div>
-                            <span className="text-xs text-white font-semibold">{m.month_name}</span>
-                            {m.status === 'Paid' && (
-                              <span className="text-[9px] text-slate-500 block mt-0.5 font-mono">Receipt: {m.receipt_id}</span>
-                            )}
+                    {selectedLedger.student_id?.is_free_tier ? (
+                      <div className="p-6 rounded-2xl bg-dark-900/40 border border-dark-850 text-center text-slate-400 text-xs space-y-1">
+                        <CheckCircle size={24} className="mx-auto text-indigo-400 mb-2" />
+                        <p className="font-semibold text-white">Student in Free Tier</p>
+                        <p className="text-slate-500 text-[11px]">Monthly fee ledger tracking and payment collection are bypassed.</p>
+                      </div>
+                    ) : (
+                      selectedLedger.months.map((m) => {
+                        const indicatorBorder = m.status === 'Paid'
+                          ? 'border-l-2 border-l-emerald-500/60'
+                          : m.status === 'Partial/Pending'
+                            ? 'border-l-2 border-l-amber-500/60'
+                            : 'border-l-2 border-l-rose-500/60';
+                        return (
+                          <div key={m.month_name} className={`flex justify-between items-center p-3 rounded-xl bg-dark-900/50 border border-dark-900/80 transition hover:border-dark-750 ${indicatorBorder}`}>
+                            <div>
+                              <span className="text-xs text-white font-semibold">{m.month_name}</span>
+                              {m.status === 'Paid' && (
+                                <span className="text-[9px] text-slate-500 block mt-0.5 font-mono">Receipt: {m.receipt_id}</span>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-2.5">
+                              <span className={`px-2 py-0.5 rounded text-[9px] font-extrabold tracking-wide uppercase ${
+                                m.status === 'Paid' 
+                                  ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' 
+                                  : m.status === 'Partial/Pending'
+                                    ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
+                                    : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
+                              }`}>
+                                {m.status}
+                              </span>
+                              <button
+                                onClick={() => {
+                                  setPayingMonth(m.month_name);
+                                  setManualForm({
+                                    status: m.status,
+                                    amount_paid: m.amount_paid || (selectedLedger.student_id?.is_free_tier ? 0 : (selectedLedger.student_id?.monthly_fee || 0)),
+                                    transaction_method: m.transaction_method || 'Cash Payment',
+                                    receipt_id: m.receipt_id || `REC-${Date.now().toString().substring(6)}`
+                                  });
+                                  setShowManualModal(true);
+                                }}
+                                className="p-1 rounded bg-dark-900 hover:bg-dark-850 border border-dark-800 text-slate-400 hover:text-white transition"
+                                title="Manual Adjust"
+                              >
+                                <Sliders size={12} />
+                              </button>
+                            </div>
                           </div>
-                          <div className="flex items-center gap-2.5">
-                            <span className={`px-2 py-0.5 rounded text-[9px] font-extrabold tracking-wide uppercase ${
-                              m.status === 'Paid' 
-                                ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' 
-                                : m.status === 'Partial/Pending'
-                                  ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
-                                  : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
-                            }`}>
-                              {m.status}
-                            </span>
-                            <button
-                              onClick={() => {
-                                setPayingMonth(m.month_name);
-                                setManualForm({
-                                  status: m.status,
-                                  amount_paid: m.amount_paid || selectedLedger.student_id?.monthly_fee || '1500',
-                                  transaction_method: m.transaction_method || 'Cash Payment',
-                                  receipt_id: m.receipt_id || `REC-${Date.now().toString().substring(6)}`
-                                });
-                                setShowManualModal(true);
-                              }}
-                              className="p-1 rounded bg-dark-900 hover:bg-dark-850 border border-dark-800 text-slate-400 hover:text-white transition"
-                              title="Manual Adjust"
-                            >
-                              <Sliders size={12} />
-                            </button>
-                          </div>
-                        </div>
-                      );
-                    })}
+                        );
+                      })
+                    )}
                   </div>
                 </div>
               ) : (
@@ -705,7 +729,22 @@ const FeeLedgerPanel = () => {
 
       {/* --- STUDENT PORTAL LAYOUT --- */}
       {user.role === 'Student' && selectedLedger && (
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
+        (selectedLedger.student_id?.is_free_tier || user.studentProfile?.is_free_tier) ? (
+          <div className="glass-panel p-8 sm:p-12 rounded-3xl border border-indigo-500/20 text-center max-w-2xl mx-auto space-y-4 shadow-2xl bg-gradient-to-b from-indigo-950/20 to-dark-950 my-6">
+            <div className="w-14 h-14 rounded-2xl bg-indigo-500/20 border border-indigo-500/30 text-indigo-400 flex items-center justify-center mx-auto text-2xl font-bold">
+              <CheckCircle size={28} className="text-indigo-400" />
+            </div>
+            <h2 className="text-xl font-bold text-white font-outfit">Free Tier Student Account</h2>
+            <p className="text-slate-400 text-xs leading-relaxed max-w-md mx-auto">
+              You are registered under the <span className="text-indigo-400 font-semibold">Free Tier</span>. Payment status tracking and tuition fee payments are disabled for your account.
+            </p>
+            <div className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-300 text-xs font-semibold">
+              <CheckCircle size={16} />
+              <span>Full Tuition Fee Exempted</span>
+            </div>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
           {/* Left Column (12 Month Grid Cards) */}
           <div className="lg:col-span-2 space-y-4">
             <h2 className="text-white text-base font-bold font-outfit mb-2">Rolling Tuition Calendar Ledger</h2>
@@ -736,7 +775,7 @@ const FeeLedgerPanel = () => {
                     </div>
                     
                     <div className="text-right flex flex-col items-end gap-3 select-none">
-                      <span className="text-base font-extrabold text-white font-outfit font-mono">₹{(m.amount_paid || selectedLedger.student_id?.monthly_fee || 1500).toLocaleString()}</span>
+                      <span className="text-base font-extrabold text-white font-outfit font-mono">₹{(m.amount_paid || (selectedLedger.student_id?.is_free_tier ? 0 : (selectedLedger.student_id?.monthly_fee || 0))).toLocaleString()}</span>
                       {m.status !== 'Paid' ? (
                         <button
                           onClick={() => {
@@ -800,7 +839,7 @@ const FeeLedgerPanel = () => {
             </div>
           </div>
         </div>
-      )}
+      ))}
 
       {/* --- MOCK ONLINE PAYMENT OR CASH INSTRUCTIONS MODAL (For Student portal fee payments) --- */}
       {showPayModal && (
@@ -822,7 +861,7 @@ const FeeLedgerPanel = () => {
                   <span className="text-slate-400 text-[10px] block uppercase font-bold tracking-wider">Fee Description</span>
                   <span className="font-bold text-white text-xs mt-0.5 block">{payingMonth} Tuition Fee</span>
                 </div>
-                <span className="text-base font-bold text-white font-outfit font-mono">₹{(selectedLedger.student_id?.monthly_fee || 1500).toLocaleString()}</span>
+                <span className="text-base font-bold text-white font-outfit font-mono">₹{(selectedLedger.student_id?.is_free_tier ? 0 : (selectedLedger.student_id?.monthly_fee || 0)).toLocaleString()}</span>
               </div>
 
               {/* Tab Selector */}

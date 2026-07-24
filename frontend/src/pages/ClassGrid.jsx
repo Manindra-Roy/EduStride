@@ -74,7 +74,8 @@ const ClassGrid = () => {
     primary_contact: '',
     secondary_contact: '',
     status: 'Active',
-    monthly_fee: 1500
+    monthly_fee: 0,
+    is_free_tier: false
   });
   
   const [testForm, setTestForm] = useState({
@@ -229,8 +230,8 @@ const ClassGrid = () => {
 
       const matchesFees = 
         defaulterFilter === 'All' || 
-        (defaulterFilter === 'Paid' && student.fee_status === 'Paid') ||
-        (defaulterFilter === 'Unpaid' && (student.fee_status === 'Unpaid' || student.fee_status === 'Partial/Pending'));
+        (defaulterFilter === 'Paid' && (student.fee_status === 'Paid' || student.is_free_tier)) ||
+        (defaulterFilter === 'Unpaid' && !student.is_free_tier && (student.fee_status === 'Unpaid' || student.fee_status === 'Partial/Pending'));
 
       return matchesSearch && matchesFees;
     });
@@ -238,7 +239,11 @@ const ClassGrid = () => {
 
   // Handle forms
   const handleStudentFormChange = (e) => {
-    setStudentForm({ ...studentForm, [e.target.name]: e.target.value });
+    const { name, value, type, checked } = e.target;
+    setStudentForm(prev => ({
+      ...prev,
+      [name]: type === 'checkbox' ? checked : value
+    }));
   };
 
   const handleTestFormChange = (e) => {
@@ -262,7 +267,8 @@ const ClassGrid = () => {
           primary_contact: '',
           secondary_contact: '',
           status: 'Active',
-          monthly_fee: 1500
+          monthly_fee: 0,
+          is_free_tier: false
         });
         fetchStudents();
       }
@@ -282,7 +288,8 @@ const ClassGrid = () => {
       primary_contact: student.primary_contact,
       secondary_contact: student.secondary_contact,
       status: student.status,
-      monthly_fee: student.monthly_fee !== undefined ? student.monthly_fee : 1500
+      monthly_fee: student.is_free_tier ? 0 : (student.monthly_fee !== undefined ? student.monthly_fee : 0),
+      is_free_tier: Boolean(student.is_free_tier)
     });
     setSelectedStudent(student);
     setShowEditModal(true);
@@ -612,21 +619,31 @@ const ClassGrid = () => {
                         <span className="text-slate-500">Joining Date</span>
                         <span className="text-slate-300">{new Date(selectedStudent.joining_date).toLocaleDateString()}</span>
                       </div>
-                      <div className="flex justify-between">
+                      <div className="flex justify-between items-center">
                         <span className="text-slate-500">Monthly Tuition Fee</span>
-                        <span className="font-mono text-white">₹{(selectedStudent.monthly_fee || 1500).toLocaleString()}</span>
+                        {selectedStudent.is_free_tier ? (
+                          <span className="font-semibold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded text-[11px] border border-emerald-500/20">Free Tier (₹0)</span>
+                        ) : (
+                          <span className="font-mono text-white">₹{(selectedStudent.monthly_fee || 0).toLocaleString()}</span>
+                        )}
                       </div>
-                      <div className="flex justify-between">
+                      <div className="flex justify-between items-center">
                         <span className="text-slate-500">Fee Payment Status</span>
-                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                          selectedStudent.fee_status === 'Paid' 
-                            ? 'bg-emerald-500/15 text-emerald-400' 
-                            : selectedStudent.fee_status === 'Partial/Pending' 
-                              ? 'bg-amber-500/15 text-amber-400' 
-                              : 'bg-rose-500/15 text-rose-400'
-                        }`}>
-                          {selectedStudent.fee_status}
-                        </span>
+                        {selectedStudent.is_free_tier ? (
+                          <span className="px-2 py-0.5 rounded text-[10px] font-extrabold uppercase bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                            Exempt (Free Tier)
+                          </span>
+                        ) : (
+                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                            selectedStudent.fee_status === 'Paid' 
+                              ? 'bg-emerald-500/15 text-emerald-400' 
+                              : selectedStudent.fee_status === 'Partial/Pending' 
+                                ? 'bg-amber-500/15 text-amber-400' 
+                                : 'bg-rose-500/15 text-rose-400'
+                          }`}>
+                            {selectedStudent.fee_status}
+                          </span>
+                        )}
                       </div>
                     </div>
 
@@ -906,7 +923,8 @@ const ClassGrid = () => {
                   primary_contact: '',
                   secondary_contact: '',
                   status: 'Active',
-                  monthly_fee: 1500
+                  monthly_fee: 0,
+                  is_free_tier: false
                 });
                 setSubmitError('');
                 setShowAddModal(true);
@@ -1013,15 +1031,21 @@ const ClassGrid = () => {
                             <span className="text-[10px] text-slate-500 block mt-0.5">{student.parent_name} (Parent)</span>
                           </td>
                           <td className="py-4 px-4">
-                            <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                              student.fee_status === 'Paid' 
-                                ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/20' 
-                                : student.fee_status === 'Partial/Pending' 
-                                  ? 'bg-amber-500/15 text-amber-400 border border-amber-500/20' 
-                                  : 'bg-rose-500/15 text-rose-400 border border-rose-500/20'
-                            }`}>
-                              {student.fee_status}
-                            </span>
+                            {student.is_free_tier ? (
+                              <span className="px-2 py-0.5 rounded text-[10px] font-extrabold uppercase tracking-wide bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                                Free Tier
+                              </span>
+                            ) : (
+                              <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                student.fee_status === 'Paid' 
+                                  ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/20' 
+                                  : student.fee_status === 'Partial/Pending' 
+                                    ? 'bg-amber-500/15 text-amber-400 border border-amber-500/20' 
+                                    : 'bg-rose-500/15 text-rose-400 border border-rose-500/20'
+                              }`}>
+                                {student.fee_status}
+                              </span>
+                            )}
                           </td>
                           <td className="py-4 px-4 text-center hidden sm:table-cell">
                             <span className={`px-2 py-0.5 rounded text-xs font-bold ${attColor}`}>
@@ -1115,9 +1139,13 @@ const ClassGrid = () => {
                   <span className="text-slate-500">Joining Date</span>
                   <span className="text-slate-300">{new Date(selectedStudent.joining_date).toLocaleDateString()}</span>
                 </div>
-                <div className="flex justify-between">
+                <div className="flex justify-between items-center">
                   <span className="text-slate-500">Monthly Tuition Fee</span>
-                  <span className="font-mono text-white">₹{(selectedStudent.monthly_fee || 1500).toLocaleString()}</span>
+                  {selectedStudent.is_free_tier ? (
+                    <span className="font-semibold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded text-[11px] border border-emerald-500/20">Free Tier (₹0)</span>
+                  ) : (
+                    <span className="font-mono text-white">₹{(selectedStudent.monthly_fee || 0).toLocaleString()}</span>
+                  )}
                 </div>
               </div>
 
@@ -1398,17 +1426,34 @@ const ClassGrid = () => {
                 </div>
               </div>
 
-              <div>
-                <label className="block text-xs font-semibold text-slate-400 mb-1.5">Monthly Tuition Fee (INR)</label>
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="block text-xs font-semibold text-slate-400">Monthly Tuition Fee (INR)</label>
+                  <label className="flex items-center gap-1.5 cursor-pointer text-xs text-indigo-400 hover:text-indigo-300 select-none">
+                    <input
+                      type="checkbox"
+                      name="is_free_tier"
+                      checked={studentForm.is_free_tier || false}
+                      onChange={(e) => setStudentForm(prev => ({
+                        ...prev,
+                        is_free_tier: e.target.checked,
+                        monthly_fee: e.target.checked ? 0 : prev.monthly_fee
+                      }))}
+                      className="w-3.5 h-3.5 rounded border-dark-850 bg-dark-900 text-indigo-600 focus:ring-indigo-500"
+                    />
+                    <span className="font-semibold">Free Tier Student</span>
+                  </label>
+                </div>
                 <input
                   type="number"
                   name="monthly_fee"
-                  required
+                  required={!studentForm.is_free_tier}
+                  disabled={studentForm.is_free_tier}
                   min="0"
-                  placeholder="e.g. 1500"
-                  value={studentForm.monthly_fee}
+                  placeholder={studentForm.is_free_tier ? "Free Tier (₹0)" : "e.g. 2000"}
+                  value={studentForm.is_free_tier ? 0 : studentForm.monthly_fee}
                   onChange={handleStudentFormChange}
-                  className="w-full px-3.5 py-2.5 rounded-lg bg-dark-900 border border-dark-850 text-white text-xs outline-none focus:border-primary-500 font-mono"
+                  className="w-full px-3.5 py-2.5 rounded-lg bg-dark-900 border border-dark-850 text-white text-xs outline-none focus:border-primary-500 font-mono disabled:opacity-50 disabled:cursor-not-allowed"
                 />
               </div>
 
@@ -1514,17 +1559,34 @@ const ClassGrid = () => {
                 </div>
               </div>
 
-              <div>
-                <label className="block text-xs font-semibold text-slate-400 mb-1.5">Monthly Tuition Fee (INR)</label>
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="block text-xs font-semibold text-slate-400">Monthly Tuition Fee (INR)</label>
+                  <label className="flex items-center gap-1.5 cursor-pointer text-xs text-indigo-400 hover:text-indigo-300 select-none">
+                    <input
+                      type="checkbox"
+                      name="is_free_tier"
+                      checked={studentForm.is_free_tier || false}
+                      onChange={(e) => setStudentForm(prev => ({
+                        ...prev,
+                        is_free_tier: e.target.checked,
+                        monthly_fee: e.target.checked ? 0 : prev.monthly_fee
+                      }))}
+                      className="w-3.5 h-3.5 rounded border-dark-850 bg-dark-900 text-indigo-600 focus:ring-indigo-500"
+                    />
+                    <span className="font-semibold">Free Tier Student</span>
+                  </label>
+                </div>
                 <input
                   type="number"
                   name="monthly_fee"
-                  required
+                  required={!studentForm.is_free_tier}
+                  disabled={studentForm.is_free_tier}
                   min="0"
-                  placeholder="e.g. 1500"
-                  value={studentForm.monthly_fee}
+                  placeholder={studentForm.is_free_tier ? "Free Tier (₹0)" : "e.g. 2000"}
+                  value={studentForm.is_free_tier ? 0 : studentForm.monthly_fee}
                   onChange={handleStudentFormChange}
-                  className="w-full px-3.5 py-2.5 rounded-lg bg-dark-900 border border-dark-850 text-white text-xs outline-none focus:border-primary-500 font-mono"
+                  className="w-full px-3.5 py-2.5 rounded-lg bg-dark-900 border border-dark-850 text-white text-xs outline-none focus:border-primary-500 font-mono disabled:opacity-50 disabled:cursor-not-allowed"
                 />
               </div>
 

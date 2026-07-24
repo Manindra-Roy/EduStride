@@ -213,7 +213,7 @@ const Dashboard = () => {
             }
           });
 
-          const totalExpected = feeStatsRes?.data?.data?.totalExpectedRevenue || studentsList.reduce((sum, s) => sum + ((s.monthly_fee || 1500) * 12), 0);
+          const totalExpected = feeStatsRes?.data?.data?.totalExpectedRevenue || studentsList.reduce((sum, s) => sum + ((s.is_free_tier ? 0 : (s.monthly_fee || 0)) * 12), 0);
           const totalCollected = feeStatsRes?.data?.data?.actualCollectedRevenue || 0;
           const totalOutstanding = feeStatsRes?.data?.data?.outstandingBalance || Math.max(0, totalExpected - totalCollected);
 

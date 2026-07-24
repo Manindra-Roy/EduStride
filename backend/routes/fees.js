@@ -5,16 +5,11 @@ import { protect, authorize } from '../middleware/auth.js';
 
 const router = express.Router();
 
-const MONTHLY_TUITION_FEE = 1500; // standard monthly tuition fee
-
-// @desc    Get aggregate revenue analytics
-// @route   GET /api/fees/stats
-// @access  Private (SuperAdmin only)
 router.get('/stats', protect, authorize('SuperAdmin'), async (req, res, next) => {
   try {
     const ledgers = await FeeLedger.find().populate('student_id');
     const activeStudents = await Student.find({ status: 'Active' });
-    const totalExpectedRevenue = activeStudents.reduce((sum, s) => sum + ((s.monthly_fee || 1500) * 12), 0);
+    const totalExpectedRevenue = activeStudents.reduce((sum, s) => sum + ((s.is_free_tier ? 0 : (s.monthly_fee || 0)) * 12), 0);
 
     let actualCollectedRevenue = 0;
     let paidMonthsCount = 0;
