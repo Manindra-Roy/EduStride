@@ -98,8 +98,11 @@ class BackgroundSocketService : Service() {
             }
 
             val opts = IO.Options().apply {
-                transports = arrayOf("polling", "websocket")
+                transports = arrayOf("websocket", "polling")
                 reconnection = true
+                reconnectionDelay = 4000L
+                reconnectionDelayMax = 20000L
+                timeout = 15000L
             }
             socket = IO.socket(socketUrl, opts)
 

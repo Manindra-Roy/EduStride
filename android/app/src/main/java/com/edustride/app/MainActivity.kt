@@ -243,6 +243,29 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // Battery Optimization: Pause WebView JS execution and rendering timers when app is minimized
+    override fun onPause() {
+        super.onPause()
+        try {
+            binding.webView.onPause()
+            binding.webView.pauseTimers()
+            Log.d("MainActivity", "WebView JS execution paused for battery saving")
+        } catch (e: Exception) {
+            Log.e("MainActivity", "Error pausing WebView timers", e)
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        try {
+            binding.webView.onResume()
+            binding.webView.resumeTimers()
+            Log.d("MainActivity", "WebView JS execution resumed")
+        } catch (e: Exception) {
+            Log.e("MainActivity", "Error resuming WebView timers", e)
+        }
+    }
+
     private val CHANNEL_ID = "edustride_notifications"
 
     private fun createNotificationChannel() {
