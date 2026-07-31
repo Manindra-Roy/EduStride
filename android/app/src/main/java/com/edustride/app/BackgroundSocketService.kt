@@ -205,6 +205,15 @@ class BackgroundSocketService : Service() {
     }
 
     private fun showNotification(title: String, message: String, tag: String) {
+        val prefs = getSharedPreferences("edustride_prefs", Context.MODE_PRIVATE)
+        val isForeground = prefs.getBoolean("is_foreground", false)
+
+        // If the mobile app is open on screen, suppress status bar notification panel alerts
+        if (isForeground) {
+            Log.d("BackgroundService", "App is currently open on screen. Suppressing notification panel popup for $tag")
+            return
+        }
+
         createNotificationChannel()
         val intent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP

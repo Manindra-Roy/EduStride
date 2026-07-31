@@ -116,7 +116,9 @@ const ClassChat = ({ setAppSidebarOpen }) => {
     handleStartCall,
     handleEndCall,
     toggleMute,
-    formatCallDuration
+    formatCallDuration,
+    allowOnScreenToasts,
+    toggleOnScreenToasts
   } = useCall();
   
   const [currentRoom, setCurrentRoom] = useState(callContextRoom || user.studentProfile?.class_level || '');
@@ -828,8 +830,17 @@ const ClassChat = ({ setAppSidebarOpen }) => {
             </div>
           </div>
           <div className="flex items-center gap-1.5 text-slate-400">
-            <button className="p-1.5 rounded-xl hover:bg-dark-900/60 transition cursor-pointer" title="Notifications Lounge Channel">
+            <button 
+              onClick={toggleOnScreenToasts}
+              className={`p-1.5 rounded-xl transition cursor-pointer relative ${
+                allowOnScreenToasts ? 'hover:bg-dark-900/60 text-amber-400' : 'hover:bg-dark-900/60 text-slate-500 opacity-60'
+              }`}
+              title={allowOnScreenToasts ? "On-Screen Banners Enabled (Click to disable)" : "On-Screen Banners Disabled (Click to enable)"}
+            >
               <Bell size={16} />
+              {!allowOnScreenToasts && (
+                <span className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-rose-500" />
+              )}
             </button>
             <div className="relative inline-block">
               <button 
@@ -843,7 +854,17 @@ const ClassChat = ({ setAppSidebarOpen }) => {
                 <MoreVertical size={16} />
               </button>
               {showSidebarMenu && (
-                <div className="absolute right-0 top-full mt-2 w-48 bg-dark-900/95 border border-dark-800 backdrop-blur-md rounded-2xl shadow-2xl z-50 p-1.5 flex flex-col gap-1 text-xs animate-scaleUp">
+                <div className="absolute right-0 top-full mt-2 w-52 bg-dark-900/95 border border-dark-800 backdrop-blur-md rounded-2xl shadow-2xl z-50 p-1.5 flex flex-col gap-1 text-xs animate-scaleUp">
+                  <button 
+                    onClick={() => {
+                      toggleOnScreenToasts();
+                      setShowSidebarMenu(false);
+                    }}
+                    className="flex items-center gap-2 px-3 py-2 rounded-xl hover:bg-dark-800 text-slate-200 hover:text-white transition cursor-pointer"
+                  >
+                    <Bell size={14} className={allowOnScreenToasts ? "text-amber-400" : "text-slate-500"} />
+                    <span>{allowOnScreenToasts ? "Disable On-Screen Banners" : "Enable On-Screen Banners"}</span>
+                  </button>
                   <button 
                     onClick={() => {
                       setShowMembersPanel(prev => !prev);

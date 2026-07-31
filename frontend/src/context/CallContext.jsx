@@ -79,6 +79,7 @@ export const CallProvider = ({ children }) => {
   }, []);
 
   const addToast = React.useCallback(({ id, title, description, type, link, class_level }) => {
+    if (!allowOnScreenToasts) return;
     playNotificationSound();
     
     setToasts(prev => {
@@ -440,7 +441,9 @@ export const CallProvider = ({ children }) => {
       formatCallDuration,
       addToast,
       removeToast,
-      toasts
+      toasts,
+      allowOnScreenToasts,
+      toggleOnScreenToasts
     }}>
       {children}
       

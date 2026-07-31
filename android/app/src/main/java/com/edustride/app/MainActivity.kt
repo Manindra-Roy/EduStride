@@ -243,13 +243,17 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // Battery Optimization: Pause WebView JS execution and rendering timers when app is minimized
+    // Battery Optimization & Foreground tracking: Pause WebView JS execution and update foreground flag
     override fun onPause() {
         super.onPause()
+        getSharedPreferences("edustride_prefs", Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean("is_foreground", false)
+            .apply()
         try {
             binding.webView.onPause()
             binding.webView.pauseTimers()
-            Log.d("MainActivity", "WebView JS execution paused for battery saving")
+            Log.d("MainActivity", "App minimized (Foreground=false). WebView JS paused.")
         } catch (e: Exception) {
             Log.e("MainActivity", "Error pausing WebView timers", e)
         }
@@ -257,10 +261,14 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        getSharedPreferences("edustride_prefs", Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean("is_foreground", true)
+            .apply()
         try {
             binding.webView.onResume()
             binding.webView.resumeTimers()
-            Log.d("MainActivity", "WebView JS execution resumed")
+            Log.d("MainActivity", "App open on screen (Foreground=true). WebView JS resumed.")
         } catch (e: Exception) {
             Log.e("MainActivity", "Error resuming WebView timers", e)
         }
