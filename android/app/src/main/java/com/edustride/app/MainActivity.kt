@@ -78,7 +78,11 @@ class MainActivity : AppCompatActivity() {
         val registeredClass = prefs.getString("user_class", "") ?: ""
         if (registeredClass.isNotEmpty()) {
             val serviceIntent = Intent(this, BackgroundSocketService::class.java)
-            startService(serviceIntent)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(serviceIntent)
+            } else {
+                startService(serviceIntent)
+            }
         }
 
         setupWebView()
@@ -244,10 +248,11 @@ class MainActivity : AppCompatActivity() {
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val name = "EduStride Notifications"
-            val descriptionText = "Class updates and chat messages"
-            val importance = NotificationManager.IMPORTANCE_DEFAULT
+            val descriptionText = "Class updates, study materials, and chat notifications"
+            val importance = NotificationManager.IMPORTANCE_HIGH
             val channel = NotificationChannel(CHANNEL_ID, name, importance).apply {
                 description = descriptionText
+                enableVibration(true)
             }
             val notificationManager: NotificationManager =
                 getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -291,7 +296,8 @@ class MainActivity : AppCompatActivity() {
                 .setSmallIcon(R.mipmap.ic_launcher)
                 .setContentTitle(title)
                 .setContentText(message)
-                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setDefaults(NotificationCompat.DEFAULT_ALL)
                 .setContentIntent(pendingIntent)
                 .setAutoCancel(true)
 
@@ -316,9 +322,13 @@ class MainActivity : AppCompatActivity() {
                 .putString("socket_url", socketUrl)
                 .apply()
 
-            // Start background service
+            // Start background service as foreground service
             val serviceIntent = Intent(context, BackgroundSocketService::class.java)
-            context.startService(serviceIntent)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(serviceIntent)
+            } else {
+                context.startService(serviceIntent)
+            }
             Log.d("MainActivity", "User registered: $name, starting background service to socket: $socketUrl")
         }
 

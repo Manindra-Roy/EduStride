@@ -527,7 +527,7 @@ const Register = () => {
                 <input
                   type="text"
                   required
-                  placeholder="New Class Name (e.g. XI)"
+                  placeholder="Class Name"
                   value={newClassName}
                   onChange={(e) => setNewClassName(e.target.value)}
                   className="flex-1 px-3.5 py-2.5 rounded-lg bg-dark-950 border border-dark-800 focus:border-primary-500 text-white text-xs outline-none w-full"
@@ -745,7 +745,6 @@ const Register = () => {
                                             value={editStudentEmail}
                                             onChange={(e) => setEditStudentEmail(e.target.value)}
                                             className="px-2 py-1 rounded bg-dark-950 border border-dark-800 text-white text-xs outline-none focus:border-primary-500 w-full sm:w-64"
-                                            placeholder="New login/email address"
                                           />
                                           <div className="flex items-center gap-1.5 shrink-0">
                                             <button
@@ -955,7 +954,6 @@ const Register = () => {
                       <input
                         type="email"
                         required
-                        placeholder="name@institution.com"
                         value={email}
                         onChange={(e) => setEmail(e.target.value)}
                         className="w-full pl-11 pr-4 py-3 rounded-xl bg-dark-900 border border-dark-800 focus:border-primary-500 focus:ring-1 focus:ring-primary-500 text-white placeholder-slate-500 transition duration-150 outline-none text-sm"
@@ -972,7 +970,6 @@ const Register = () => {
                       <input
                         type={showPassword ? "text" : "password"}
                         required
-                        placeholder="••••••••"
                         value={password}
                         onChange={(e) => {
                           setPassword(e.target.value);
@@ -1038,7 +1035,6 @@ const Register = () => {
                           <input
                             type="text"
                             required
-                            placeholder="e.g. 1"
                             value={rollNumber}
                             onChange={(e) => setRollNumber(e.target.value)}
                             className="w-full px-3 py-2.5 rounded-lg bg-dark-900 border border-dark-800 focus:border-primary-500 text-white placeholder-slate-600 text-sm outline-none"

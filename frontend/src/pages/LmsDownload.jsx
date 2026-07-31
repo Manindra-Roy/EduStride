@@ -224,18 +224,30 @@ const LmsDownload = () => {
           </p>
         </div>
 
-        {user.role !== 'Student' && (
-          <button
-            onClick={() => {
-              setError('');
-              setShowUploadModal(true);
-            }}
-            className="relative z-10 flex items-center gap-2 px-4 py-2.5 rounded-xl bg-primary-600 hover:bg-primary-500 active:bg-primary-750 text-white font-bold text-xs uppercase tracking-wide transition duration-150 shadow-lg shadow-primary-500/10 shrink-0 self-start md:self-center"
+        <div className="relative z-10 flex flex-wrap items-center gap-3">
+          <a
+            href="/api/system/download-apk"
+            download="EduStride.apk"
+            className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold text-xs shadow-lg shadow-emerald-600/20 transition active:scale-95 cursor-pointer shrink-0"
+            title="Download latest EduStride Android Application"
           >
-            <Upload size={16} />
-            <span>Publish Handouts</span>
-          </button>
-        )}
+            <FileDown size={16} />
+            <span>Download Android App (.APK)</span>
+          </a>
+
+          {user.role !== 'Student' && (
+            <button
+              onClick={() => {
+                setError('');
+                setShowUploadModal(true);
+              }}
+              className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-primary-600 hover:bg-primary-500 text-white font-bold text-xs shadow-lg shadow-primary-600/20 transition active:scale-95 cursor-pointer shrink-0"
+            >
+              <Upload size={16} />
+              <span>Upload Material</span>
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Filters Strip */}
@@ -410,7 +422,7 @@ const LmsDownload = () => {
                 <input
                   type="text"
                   required
-                  placeholder="e.g. Chapter 4: Quadratic Equations"
+                  placeholder="Chapter Title"
                   value={uploadForm.chapter_name}
                   onChange={(e) => setUploadForm({ ...uploadForm, chapter_name: e.target.value })}
                   className="w-full px-3.5 py-2.5 rounded-lg bg-dark-900 border border-dark-850 text-white text-xs outline-none focus:border-primary-500"

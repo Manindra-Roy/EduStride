@@ -35,7 +35,6 @@ export const CallProvider = ({ children }) => {
 
   useEffect(() => {
     currentRoomRef.current = currentRoom;
-    // Clear any active calls or call alerts if lounge room changes
     if (activeCallRef.current) {
       handleEndCall(false);
     }
@@ -45,24 +44,74 @@ export const CallProvider = ({ children }) => {
 
   const [toasts, setToasts] = useState([]);
 
-  // Auto request notification permission on mount
-  useEffect(() => {
-    if ('Notification' in window && Notification.permission === 'default') {
-      Notification.requestPermission();
+  const playNotificationSound = React.useCallback(() => {
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtx) return;
+      const ctx = new AudioCtx();
+      const osc1 = ctx.createOscillator();
+      const osc2 = ctx.createOscillator();
+      const gain = ctx.createGain();
+
+      // Triad Chime: D5 (587Hz) -> A5 (880Hz)
+      osc1.type = 'sine';
+      osc1.frequency.setValueAtTime(587.33, ctx.currentTime);
+      osc1.frequency.exponentialRampToValueAtTime(880, ctx.currentTime + 0.15);
+
+      osc2.type = 'sine';
+      osc2.frequency.setValueAtTime(739.99, ctx.currentTime + 0.05); // F#5
+      osc2.frequency.exponentialRampToValueAtTime(1174.66, ctx.currentTime + 0.22); // D6
+
+      gain.gain.setValueAtTime(0.14, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.32);
+
+      osc1.connect(gain);
+      osc2.connect(gain);
+      gain.connect(ctx.destination);
+
+      osc1.start();
+      osc2.start(ctx.currentTime + 0.05);
+      osc1.stop(ctx.currentTime + 0.32);
+      osc2.stop(ctx.currentTime + 0.32);
+    } catch (e) {
+      // Audio autoplay policy catch
     }
   }, []);
 
   const addToast = React.useCallback(({ id, title, description, type, link, class_level }) => {
-    const toastId = id || `toast-${Date.now()}`;
+    playNotificationSound();
+    
     setToasts(prev => {
+      // Coalesce chat messages for the same class level into 1 toast card
+      if (type === 'chat' && class_level) {
+        const existingIndex = prev.findIndex(t => t.type === 'chat' && t.class_level === class_level);
+        if (existingIndex > -1) {
+          const existing = prev[existingIndex];
+          const count = (existing.count || 1) + 1;
+          const updated = {
+            ...existing,
+            title: `${count} New Messages in Class ${class_level}`,
+            description,
+            count,
+            createdAt: Date.now()
+          };
+          const copy = [...prev];
+          copy[existingIndex] = updated;
+          return copy;
+        }
+      }
+
+      const toastId = id || `toast-${Date.now()}`;
       const filtered = prev.filter(t => t.id !== toastId);
-      return [...filtered, { id: toastId, title, description, type, link, class_level }].slice(-3);
+      // Cap visible toast stack to MAX 2 items so screen is never cluttered
+      return [...filtered, { id: toastId, title, description, type, link, class_level, count: 1, createdAt: Date.now() }].slice(-2);
     });
 
+    const timeoutId = id || `toast-${Date.now()}`;
     setTimeout(() => {
-      setToasts(prev => prev.filter(t => t.id !== toastId));
-    }, 6000);
-  }, []);
+      setToasts(prev => prev.filter(t => t.id !== timeoutId));
+    }, 4500);
+  }, [playNotificationSound]);
 
   const removeToast = React.useCallback((id) => {
     setToasts(prev => prev.filter(t => t.id !== id));
@@ -74,7 +123,7 @@ export const CallProvider = ({ children }) => {
         const notif = new Notification(title, {
           body,
           tag,
-          icon: icon || '/favicon.ico',
+          icon: icon || '/favicon.jpg',
           renotify: true
         });
         notif.onclick = () => {
@@ -103,13 +152,12 @@ export const CallProvider = ({ children }) => {
     };
   }, []);
 
-  // Global socket calling events listener
+  // Global socket calling & notification events listener
   useEffect(() => {
     if (!user) {
       if (socket.connected) {
         socket.disconnect();
       }
-      // Logout background service if Android bridge is available
       if (window.AndroidNotificationBridge && typeof window.AndroidNotificationBridge.logoutUser === 'function') {
         try {
           window.AndroidNotificationBridge.logoutUser();
@@ -120,7 +168,6 @@ export const CallProvider = ({ children }) => {
       return;
     }
 
-    // Register user to native background service if Android bridge is available
     if (window.AndroidNotificationBridge && typeof window.AndroidNotificationBridge.registerUser === 'function') {
       try {
         const myName = user.studentProfile?.name || (user.role === 'SuperAdmin' ? 'Admin' : 'Teacher');
@@ -132,7 +179,6 @@ export const CallProvider = ({ children }) => {
       }
     }
 
-    // Connect global socket singleton
     if (!socket.connected) {
       socket.connect();
     }
@@ -143,19 +189,23 @@ export const CallProvider = ({ children }) => {
         const classLevel = user.studentProfile?.class_level;
         if (classLevel) {
           socket.emit('join_room', classLevel);
+          socket.emit('join_room', classLevel.trim().toUpperCase());
         }
+        socket.emit('join_room', 'ALL');
       } else {
-        // Teachers and Admins join all active classrooms dynamically to monitor call activations
+        socket.emit('join_room', 'ALL');
         try {
           const res = await axios.get('/api/classes');
           if (res.data.success && Array.isArray(res.data.data)) {
-            res.data.data.forEach(room => socket.emit('join_room', room));
+            res.data.data.forEach(room => {
+              socket.emit('join_room', room);
+              socket.emit('join_room', room.trim().toUpperCase());
+            });
           } else {
             const fallbackRooms = ['VII', 'VIII', 'IX', 'X'];
             fallbackRooms.forEach(room => socket.emit('join_room', room));
           }
         } catch (err) {
-          console.error('Failed to dynamically fetch classrooms for socket joining:', err);
           const fallbackRooms = ['VII', 'VIII', 'IX', 'X'];
           fallbackRooms.forEach(room => socket.emit('join_room', room));
         }
@@ -165,6 +215,7 @@ export const CallProvider = ({ children }) => {
     joinClassrooms();
 
     const handleGlobalIncomingCall = (data) => {
+      playNotificationSound();
       if (location.pathname !== '/chats') {
         setIncomingCall(data);
       }
@@ -172,22 +223,18 @@ export const CallProvider = ({ children }) => {
     };
 
     const handleGlobalCallEnded = (data) => {
-      // Check if ended call matches active room call or incoming call
       setIncomingCall(prev => (prev && prev.class_level === data.class_level ? null : prev));
       setActiveRoomCall(prev => (prev && prev.class_level === data.class_level ? null : prev));
       
-      // If we are currently in this call, terminate it locally
       if (activeCallRef.current && currentRoomRef.current === data.class_level) {
         handleEndCall(false);
       }
     };
 
     const handleNewMessageGlobal = (msg) => {
-      // Don't notify if the message is from the user themselves
       const myName = user.studentProfile?.name || (user.role === 'SuperAdmin' ? 'Admin' : 'Teacher');
       if (msg.sender_name === myName) return;
 
-      // Check if user is looking at this chat room right now and window is active
       const isChatPage = location.pathname === '/chats';
       const isCurrentRoom = msg.class_level === currentRoomRef.current;
       const isTabVisible = !document.hidden;
@@ -218,13 +265,11 @@ export const CallProvider = ({ children }) => {
     };
 
     const handleNewStudyMaterialGlobal = (data) => {
-      // Notify only if it's targeted for user's class level (if user is a Student)
       if (user.role === 'Student') {
         const studentClass = user.studentProfile?.class_level;
-        if (studentClass && studentClass !== data.class_level) return;
+        if (studentClass && studentClass.trim().toUpperCase() !== data.class_level?.trim().toUpperCase()) return;
       }
 
-      // Check if user is looking at the lms page
       const isLmsPage = location.pathname === '/lms';
       const isTabVisible = !document.hidden;
 
@@ -233,7 +278,7 @@ export const CallProvider = ({ children }) => {
 
       if (shouldShowInAppToast) {
         addToast({
-          id: `lms-${data.material._id}-${Date.now()}`,
+          id: `lms-${data.material?._id || Date.now()}`,
           title: `New Study Material for Class ${data.class_level}`,
           description: `Subject: ${data.subject} - Title: ${data.chapter_name}`,
           type: 'lms',
@@ -252,8 +297,26 @@ export const CallProvider = ({ children }) => {
       }
     };
 
+    const handleNewNoticeGlobal = (data) => {
+      addToast({
+        id: `notice-${Date.now()}`,
+        title: `Academic Announcement: ${data.subject}`,
+        description: data.body,
+        type: 'notice',
+        link: user.role === 'SuperAdmin' ? '/automations' : '/'
+      });
+      sendBrowserNotification(
+        `EduStride Notice: ${data.subject}`,
+        data.body,
+        `notice-${Date.now()}`,
+        null,
+        '/'
+      );
+    };
+
     const handleConnect = () => {
       console.log('Global Socket connected successfully:', socket.id);
+      joinClassrooms();
     };
 
     const handleConnectError = (err) => {
@@ -271,6 +334,7 @@ export const CallProvider = ({ children }) => {
     socket.on('call_ended', handleGlobalCallEnded);
     socket.on('new_message', handleNewMessageGlobal);
     socket.on('new_study_material', handleNewStudyMaterialGlobal);
+    socket.on('new_notice', handleNewNoticeGlobal);
 
     return () => {
       socket.off('connect', handleConnect);
@@ -280,8 +344,9 @@ export const CallProvider = ({ children }) => {
       socket.off('call_ended', handleGlobalCallEnded);
       socket.off('new_message', handleNewMessageGlobal);
       socket.off('new_study_material', handleNewStudyMaterialGlobal);
+      socket.off('new_notice', handleNewNoticeGlobal);
     };
-  }, [user, location.pathname, addToast, sendBrowserNotification]);
+  }, [user, user?.studentProfile?.class_level, location.pathname, addToast, sendBrowserNotification, playNotificationSound]);
 
   const handleStartCall = async (isHost = false) => {
     try {
@@ -419,16 +484,30 @@ export const CallProvider = ({ children }) => {
       )}
 
       {/* Toast Notifications Queue */}
-      <div className="fixed top-24 right-5 z-[200] flex flex-col gap-3 max-w-sm w-full pointer-events-none">
+      <div className="fixed top-4 sm:top-5 right-4 sm:right-6 z-[200] flex flex-col gap-2.5 max-w-xs sm:max-w-sm w-[calc(100%-2rem)] sm:w-80 pointer-events-none">
+        {toasts.length > 1 && (
+          <div className="flex justify-end pointer-events-auto">
+            <button
+              onClick={() => setToasts([])}
+              className="text-[9px] font-bold font-mono uppercase tracking-wider px-2 py-0.5 rounded-full bg-dark-900/90 border border-dark-800 text-slate-400 hover:text-white transition cursor-pointer shadow-md backdrop-blur-md"
+            >
+              Clear All ({toasts.length})
+            </button>
+          </div>
+        )}
         {toasts.map((toast) => {
-          const Icon = toast.type === 'chat' ? MessageSquare : BookOpen;
-          const accentColor = toast.type === 'chat' ? 'border-primary-500/30' : 'border-indigo-500/30';
-          const iconBg = toast.type === 'chat' ? 'bg-primary-600/10 text-primary-400 font-bold' : 'bg-indigo-600/10 text-indigo-400 font-bold';
+          const Icon = toast.type === 'chat' ? MessageSquare : toast.type === 'notice' ? Bell : BookOpen;
+          const categoryLabel = toast.type === 'chat' ? 'CHAT' : toast.type === 'notice' ? 'ANNOUNCEMENT' : 'LIBRARY';
+          const iconBg = toast.type === 'chat' 
+            ? 'bg-primary-500/10 text-primary-400 border-primary-500/20' 
+            : toast.type === 'notice' 
+              ? 'bg-amber-500/10 text-amber-400 border-amber-500/20' 
+              : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20';
 
           return (
             <div 
               key={toast.id} 
-              className="pointer-events-auto w-full bg-dark-900/90 backdrop-blur-md border border-dark-800/80 p-3.5 rounded-2xl flex items-center justify-between gap-3 shadow-2xl animate-scaleUp text-slate-100 select-none cursor-pointer hover:border-slate-700/50 transition-all duration-200"
+              className="pointer-events-auto w-full bg-dark-900/95 backdrop-blur-xl border border-dark-800 p-3 rounded-2xl flex flex-col gap-2 shadow-xl shadow-black/70 animate-scaleUp text-slate-100 select-none cursor-pointer hover:border-slate-700/80 transition-all duration-200 relative overflow-hidden group"
               onClick={() => {
                 if (toast.link) {
                   if (toast.type === 'chat' && toast.class_level) {
@@ -439,27 +518,55 @@ export const CallProvider = ({ children }) => {
                 removeToast(toast.id);
               }}
             >
-              <div className="flex items-center gap-3 overflow-hidden animate-fadeIn">
-                <div className={`p-2.5 rounded-xl ${iconBg} border border-dark-800 shrink-0`}>
-                  <Icon size={16} />
+              <div className="flex items-start justify-between gap-2.5">
+                <div className="flex items-start gap-2.5 overflow-hidden">
+                  <div className={`p-2 rounded-xl ${iconBg} border shrink-0 shadow-sm mt-0.5`}>
+                    <Icon size={14} />
+                  </div>
+                  <div className="overflow-hidden">
+                    <div className="flex items-center gap-1.5 mb-0.5">
+                      <span className={`text-[8px] font-mono font-extrabold uppercase px-1.5 py-0.2 rounded border ${iconBg}`}>
+                        {categoryLabel}
+                      </span>
+                      <span className="text-[9px] font-mono text-slate-500">Just now</span>
+                    </div>
+                    <h4 className="text-xs font-bold text-white font-outfit truncate leading-tight group-hover:text-primary-300 transition-colors">
+                      {toast.title}
+                    </h4>
+                    <p className="text-[10px] text-slate-400 mt-0.5 leading-snug line-clamp-1">
+                      {toast.description}
+                    </p>
+                  </div>
                 </div>
-                <div className="overflow-hidden">
-                  <h4 className="text-xs font-bold text-white font-outfit truncate">{toast.title}</h4>
-                  <p className="text-[10px] text-slate-400 mt-0.5 leading-snug truncate">
-                    {toast.description}
-                  </p>
-                </div>
+                
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    removeToast(toast.id);
+                  }}
+                  className="p-1 rounded-lg bg-dark-950/60 border border-dark-850 hover:bg-dark-800 hover:text-white text-slate-400 transition cursor-pointer shrink-0"
+                  title="Dismiss notification"
+                >
+                  <X size={12} />
+                </button>
               </div>
-              
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  removeToast(toast.id);
-                }}
-                className="p-1 rounded-lg bg-dark-955/40 border border-dark-850 hover:bg-dark-800 hover:text-white text-slate-500 transition cursor-pointer shrink-0"
-              >
-                <X size={12} />
-              </button>
+
+              {/* Progress bar countdown indicator line */}
+              <div className="w-full h-0.5 bg-dark-950 rounded-full overflow-hidden relative">
+                <div 
+                  className={`h-full ${
+                    toast.type === 'chat' ? 'bg-primary-500' : toast.type === 'notice' ? 'bg-amber-500' : 'bg-emerald-500'
+                  } rounded-full transition-all duration-[4500ms] ease-linear`}
+                  style={{ width: '0%' }}
+                  ref={(el) => {
+                    if (el) {
+                      requestAnimationFrame(() => {
+                        el.style.width = '100%';
+                      });
+                    }
+                  }}
+                />
+              </div>
             </div>
           );
         })}

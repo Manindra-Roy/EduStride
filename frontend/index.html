@@ -36,12 +36,13 @@
         .initial-preloader-container {
           position: fixed;
           inset: 0;
-          background: #1b1c31;
+          background: #07080a;
           display: flex;
           flex-direction: column;
           align-items: center;
           justify-content: center;
           z-index: 9999;
+          transition: opacity 0.4s ease, transform 0.4s ease;
         }
         .initial-orbit {
           position: relative;
@@ -55,34 +56,34 @@
           position: absolute;
           inset: 0;
           border-radius: 50%;
-          border: 2px solid rgba(99, 102, 241, 0.08);
+          border: 2px solid rgba(99, 102, 241, 0.15);
           border-top-color: #6366f1;
-          animation: initial-spin 1.4s linear infinite;
+          animation: initial-spin 1.2s cubic-bezier(0.5, 0, 0.5, 1) infinite;
         }
         .initial-ring-inner {
           position: absolute;
           inset: 8px;
           border-radius: 50%;
-          border: 2px solid rgba(99, 102, 241, 0.04);
-          border-bottom-color: #4f46e5;
-          animation: initial-spin 2.2s linear infinite reverse;
+          border: 2px solid rgba(99, 102, 241, 0.08);
+          border-bottom-color: #818cf8;
+          animation: initial-spin 1.8s cubic-bezier(0.5, 0, 0.5, 1) infinite reverse;
         }
         .initial-dot {
-          width: 32px;
-          height: 32px;
-          background: linear-gradient(135deg, #a5b4fc 0%, #6366f1 100%);
-          border-radius: 8px;
-          box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
-          animation: initial-pulse 2s ease-in-out infinite;
+          width: 36px;
+          height: 36px;
+          background: linear-gradient(135deg, #818cf8 0%, #4f46e5 100%);
+          border-radius: 10px;
+          box-shadow: 0 0 24px rgba(99, 102, 241, 0.4);
+          animation: initial-pulse 1.8s ease-in-out infinite;
         }
         .initial-brand {
-          margin-top: 28px;
+          margin-top: 24px;
           font-family: 'Outfit', 'Inter', sans-serif;
-          font-size: 26px;
+          font-size: 24px;
           font-weight: 850;
           letter-spacing: -0.02em;
           color: #ffffff;
-          background: linear-gradient(to right, #ffffff, #a5b4fc);
+          background: linear-gradient(135deg, #ffffff 0%, #a5b4fc 100%);
           -webkit-background-clip: text;
           -webkit-text-fill-color: transparent;
         }
@@ -91,8 +92,8 @@
           100% { transform: rotate(360deg); }
         }
         @keyframes initial-pulse {
-          0%, 100% { transform: scale(0.92); opacity: 0.7; }
-          50% { transform: scale(1.08); opacity: 1; }
+          0%, 100% { transform: scale(0.92); opacity: 0.8; }
+          50% { transform: scale(1.06); opacity: 1; }
         }
       </style>
       <div class="initial-preloader-container">

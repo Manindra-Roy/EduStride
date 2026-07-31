@@ -503,7 +503,7 @@ const ClassGrid = () => {
                 </span>
                 <input
                   type="text"
-                  placeholder="Search classmate..."
+                  placeholder="Search..."
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   className="w-full pl-9 pr-4 py-2.5 rounded-lg bg-dark-900 border border-dark-850 text-white placeholder-slate-500 outline-none text-xs focus:border-primary-500"
@@ -950,11 +950,20 @@ const ClassGrid = () => {
               </span>
               <input
                 type="text"
-                placeholder="Search Roll, Name..."
+                placeholder="Search..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full pl-9 pr-4 py-2 rounded-lg bg-dark-900 border border-dark-850 text-white placeholder-slate-500 outline-none text-xs focus:border-primary-500"
+                className="w-full pl-9 pr-8 py-2 rounded-lg bg-dark-900 border border-dark-850 text-white placeholder-slate-500 outline-none text-xs focus:border-primary-500"
               />
+              {searchQuery && (
+                <button 
+                  onClick={() => setSearchQuery('')}
+                  className="absolute inset-y-0 right-0 pr-2.5 flex items-center text-slate-500 hover:text-white transition cursor-pointer"
+                  title="Clear search"
+                >
+                  <X size={14} />
+                </button>
+              )}
             </div>
 
             {/* Filter Buttons */}
@@ -1407,7 +1416,6 @@ const ClassGrid = () => {
                     type="text"
                     name="primary_contact"
                     required
-                    placeholder="e.g. +1 555 1234"
                     value={studentForm.primary_contact}
                     onChange={handleStudentFormChange}
                     className="w-full px-3.5 py-2.5 rounded-lg bg-dark-900 border border-dark-850 text-white text-xs outline-none focus:border-primary-500 font-mono"
@@ -1450,7 +1458,7 @@ const ClassGrid = () => {
                   required={!studentForm.is_free_tier}
                   disabled={studentForm.is_free_tier}
                   min="0"
-                  placeholder={studentForm.is_free_tier ? "Free Tier (₹0)" : "e.g. 2000"}
+                  placeholder={studentForm.is_free_tier ? "Free Tier (₹0)" : ""}
                   value={studentForm.is_free_tier ? 0 : studentForm.monthly_fee}
                   onChange={handleStudentFormChange}
                   className="w-full px-3.5 py-2.5 rounded-lg bg-dark-900 border border-dark-850 text-white text-xs outline-none focus:border-primary-500 font-mono disabled:opacity-50 disabled:cursor-not-allowed"
@@ -1583,7 +1591,7 @@ const ClassGrid = () => {
                   required={!studentForm.is_free_tier}
                   disabled={studentForm.is_free_tier}
                   min="0"
-                  placeholder={studentForm.is_free_tier ? "Free Tier (₹0)" : "e.g. 2000"}
+                  placeholder={studentForm.is_free_tier ? "Free Tier (₹0)" : ""}
                   value={studentForm.is_free_tier ? 0 : studentForm.monthly_fee}
                   onChange={handleStudentFormChange}
                   className="w-full px-3.5 py-2.5 rounded-lg bg-dark-900 border border-dark-850 text-white text-xs outline-none focus:border-primary-500 font-mono disabled:opacity-50 disabled:cursor-not-allowed"
@@ -1660,7 +1668,6 @@ const ClassGrid = () => {
                   type="text"
                   name="test_name"
                   required
-                  placeholder="e.g. Unit Test 1, Final Term"
                   value={testForm.test_name}
                   onChange={handleTestFormChange}
                   className="w-full px-3.5 py-2.5 rounded-lg bg-dark-900 border border-dark-850 text-white text-xs outline-none focus:border-primary-500"
@@ -1851,7 +1858,7 @@ const ClassGrid = () => {
                 <input
                   type="text"
                   required
-                  placeholder="New Subject Name (e.g. Physics)"
+                  placeholder="Subject Name"
                   value={newSubjectName}
                   onChange={(e) => setNewSubjectName(e.target.value)}
                   className="flex-1 px-3 py-2 rounded-xl bg-dark-900 border border-dark-850 focus:border-primary-500 text-white text-xs outline-none"

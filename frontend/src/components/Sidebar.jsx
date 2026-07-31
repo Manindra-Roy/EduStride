@@ -455,14 +455,21 @@ const Sidebar = ({ isOpen, setIsOpen }) => {
                 to={item.path}
                 onClick={() => setIsOpen(false)}
                 className={({ isActive }) => `
-                  flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all duration-200
+                  group relative flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all duration-200
                   ${isActive 
-                    ? 'bg-primary-600/10 text-primary-400 border-l-4 border-primary-500 font-semibold shadow-inner' 
-                    : 'text-slate-400 hover:bg-dark-900/60 hover:text-slate-200 border-l-4 border-transparent'}
+                    ? 'bg-gradient-to-r from-primary-600/15 to-indigo-600/5 text-white font-semibold shadow-md shadow-primary-500/5 border-l-4 border-primary-500' 
+                    : 'text-slate-400 hover:bg-dark-900/70 hover:text-slate-100 border-l-4 border-transparent hover:border-dark-700'}
                 `}
               >
-                <item.icon size={18} />
-                <span>{item.name}</span>
+                {({ isActive }) => (
+                  <>
+                    <item.icon size={18} className={`transition-transform duration-200 group-hover:scale-110 ${isActive ? 'text-primary-400' : 'text-slate-500 group-hover:text-slate-300'}`} />
+                    <span>{item.name}</span>
+                    {isActive && (
+                      <span className="ml-auto w-1.5 h-1.5 rounded-full bg-primary-400 shadow-[0_0_8px_rgba(99,102,241,0.8)]"></span>
+                    )}
+                  </>
+                )}
               </NavLink>
             ))}
           </nav>
@@ -789,7 +796,6 @@ const Sidebar = ({ isOpen, setIsOpen }) => {
                           required
                           value={currentPassword}
                           onChange={(e) => { setCurrentPassword(e.target.value); setPasswordError(''); }}
-                          placeholder="••••••••"
                           className="w-full px-3.5 py-2.5 rounded-lg bg-dark-900 border border-dark-850 text-white outline-none focus:border-primary-500 transition"
                         />
                       </div>
@@ -800,7 +806,6 @@ const Sidebar = ({ isOpen, setIsOpen }) => {
                           required
                           value={newPassword}
                           onChange={(e) => { setNewPassword(e.target.value); setPasswordError(''); }}
-                          placeholder="••••••••"
                           className="w-full px-3.5 py-2.5 rounded-lg bg-dark-900 border border-dark-850 text-white outline-none focus:border-primary-500 transition"
                         />
                       </div>
@@ -811,7 +816,6 @@ const Sidebar = ({ isOpen, setIsOpen }) => {
                           required
                           value={confirmPassword}
                           onChange={(e) => { setConfirmPassword(e.target.value); setPasswordError(''); }}
-                          placeholder="••••••••"
                           className="w-full px-3.5 py-2.5 rounded-lg bg-dark-900 border border-dark-850 text-white outline-none focus:border-primary-500 transition"
                         />
                       </div>

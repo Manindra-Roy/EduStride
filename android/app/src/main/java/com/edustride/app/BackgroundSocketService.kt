@@ -22,16 +22,54 @@ class BackgroundSocketService : Service() {
 
     private var socket: Socket? = null
     private val CHANNEL_ID = "edustride_notifications"
+    private val SYNC_CHANNEL_ID = "edustride_sync_channel"
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Log.d("BackgroundService", "Service started")
+        Log.d("BackgroundService", "Service started as Foreground")
         
-        // Start connection
+        startForegroundServiceNotification()
         connectSocket()
 
         return START_STICKY
+    }
+
+    private fun startForegroundServiceNotification() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val name = "EduStride Sync Service"
+            val descriptionText = "Keeps real-time notifications active in the background"
+            val importance = NotificationManager.IMPORTANCE_LOW
+            val channel = NotificationChannel(SYNC_CHANNEL_ID, name, importance).apply {
+                description = descriptionText
+                setShowBadge(false)
+            }
+            val notificationManager: NotificationManager =
+                getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            notificationManager.createNotificationChannel(channel)
+
+            val intent = Intent(this, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            }
+            val pendingIntent: PendingIntent = PendingIntent.getActivity(
+                this, 
+                0, 
+                intent, 
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            val notification = NotificationCompat.Builder(this, SYNC_CHANNEL_ID)
+                .setSmallIcon(R.mipmap.ic_launcher)
+                .setContentTitle("EduStride Live Sync Active")
+                .setContentText("Listening for live class updates and announcements...")
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .setCategory(NotificationCompat.CATEGORY_SERVICE)
+                .setContentIntent(pendingIntent)
+                .setOngoing(true)
+                .build()
+
+            startForeground(1001, notification)
+        }
     }
 
     private fun connectSocket() {
@@ -67,8 +105,10 @@ class BackgroundSocketService : Service() {
 
             socket?.on(Socket.EVENT_CONNECT) {
                 Log.d("BackgroundService", "Socket connected to $socketUrl")
-                // Join class room
+                // Join class rooms
                 socket?.emit("join_room", classLevel)
+                socket?.emit("join_room", classLevel.uppercase())
+                socket?.emit("join_room", "ALL")
             }
 
             socket?.on("new_message") { args ->
@@ -101,8 +141,8 @@ class BackgroundSocketService : Service() {
                         val subject = data.optString("subject")
                         val chapterName = data.optString("chapter_name")
 
-                        // If student, filter by class
-                        if (classLevel != "All" && classLevel != msgClass) {
+                        // If student, filter by class (case-insensitive)
+                        if (classLevel != "All" && !classLevel.equals(msgClass, ignoreCase = true)) {
                             return@on
                         }
 
@@ -117,13 +157,52 @@ class BackgroundSocketService : Service() {
                 }
             }
 
+            socket?.on("new_notice") { args ->
+                if (args.isNotEmpty()) {
+                    try {
+                        val data = args[0] as JSONObject
+                        val subject = data.optString("subject")
+                        val body = data.optString("body")
+                        val targetClass = data.optString("class_level")
+
+                        if (classLevel != "All" && targetClass != "All" && targetClass != "Personal" && !classLevel.equals(targetClass, ignoreCase = true)) {
+                            return@on
+                        }
+
+                        showNotification(
+                            "EduStride Notice: $subject",
+                            body,
+                            "notice-${System.currentTimeMillis()}"
+                        )
+                    } catch (e: Exception) {
+                        Log.e("BackgroundService", "Error parsing new_notice", e)
+                    }
+                }
+            }
+
             socket?.connect()
         } catch (e: Exception) {
             Log.e("BackgroundService", "Socket setup failed", e)
         }
     }
 
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val name = "EduStride Notifications"
+            val descriptionText = "Class updates, study materials, and chat notifications"
+            val importance = NotificationManager.IMPORTANCE_HIGH
+            val channel = NotificationChannel(CHANNEL_ID, name, importance).apply {
+                description = descriptionText
+                enableVibration(true)
+            }
+            val notificationManager: NotificationManager =
+                getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            notificationManager.createNotificationChannel(channel)
+        }
+    }
+
     private fun showNotification(title: String, message: String, tag: String) {
+        createNotificationChannel()
         val intent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
         }
@@ -139,7 +218,8 @@ class BackgroundSocketService : Service() {
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle(title)
             .setContentText(message)
-            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setDefaults(NotificationCompat.DEFAULT_ALL)
             .setContentIntent(pendingIntent)
             .setAutoCancel(true)
 

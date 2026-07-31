@@ -27,8 +27,10 @@ import {
   GraduationCap,
   PhoneOff,
   MicOff,
-  Menu,
-  CornerUpLeft
+  CornerUpLeft,
+  Eye,
+  EyeOff,
+  Menu
 } from 'lucide-react';
 
 // Custom Voice Message Audio Player Component (EduStride Styling)
@@ -166,6 +168,22 @@ const ClassChat = ({ setAppSidebarOpen }) => {
   
   const socketRef = useRef(socket);
   const messagesContainerRef = useRef(null);
+  const textareaRef = useRef(null);
+
+  const insertFormatting = (prefix, suffix = '') => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    const start = textarea.selectionStart;
+    const end = textarea.selectionEnd;
+    const selectedText = typedMessage.substring(start, end);
+    const replacement = `${prefix}${selectedText || 'text'}${suffix}`;
+    const newText = typedMessage.substring(0, start) + replacement + typedMessage.substring(end);
+    setTypedMessage(newText);
+    setTimeout(() => {
+      textarea.focus();
+      textarea.setSelectionRange(start + prefix.length, start + prefix.length + (selectedText.length || 4));
+    }, 10);
+  };
 
   // suggested features states
   const [unreadCounts, setUnreadCounts] = useState({});
@@ -173,11 +191,40 @@ const ClassChat = ({ setAppSidebarOpen }) => {
   const [roomMembers, setRoomMembers] = useState([]);
   const [showMembersPanel, setShowMembersPanel] = useState(false);
   const [activeEmojiPickerMsgId, setActiveEmojiPickerMsgId] = useState(null);
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const [showSidebarMenu, setShowSidebarMenu] = useState(false);
+  const [showHeaderMenu, setShowHeaderMenu] = useState(false);
+  const [isStealthMode, setIsStealthMode] = useState(() => localStorage.getItem('edustride_chat_stealth') === 'true');
 
-  // Close emoji reactions picker on global click
+  const toggleStealthMode = () => {
+    const nextVal = !isStealthMode;
+    setIsStealthMode(nextVal);
+    localStorage.setItem('edustride_chat_stealth', nextVal.toString());
+
+    if (socketRef.current && currentRoom) {
+      socketRef.current.emit('toggle_incognito', {
+        class_level: currentRoom,
+        sender_name: user.studentProfile?.name || (user.role === 'SuperAdmin' ? 'Admin' : 'Teacher'),
+        sender_role: user.role,
+        is_hidden: nextVal
+      });
+    }
+  };
+
+  const handleChatScroll = () => {
+    if (messagesContainerRef.current) {
+      const { scrollTop, scrollHeight, clientHeight } = messagesContainerRef.current;
+      const isNotAtBottom = scrollHeight - scrollTop - clientHeight > 160;
+      setShowScrollToBottom(isNotAtBottom);
+    }
+  };
+
+  // Close emoji reactions picker and dropdown menus on global click
   useEffect(() => {
     const handleGlobalClick = () => {
       setActiveEmojiPickerMsgId(null);
+      setShowSidebarMenu(false);
+      setShowHeaderMenu(false);
     };
     window.addEventListener('click', handleGlobalClick);
     return () => window.removeEventListener('click', handleGlobalClick);
@@ -288,13 +335,6 @@ const ClassChat = ({ setAppSidebarOpen }) => {
     });
   };
 
-  const roomPreviews = {
-    'VII': { text: 'Class teacher: Remember to submit the math assignment by Monday.', time: '08:02 AM' },
-    'VIII': { text: 'English quiz scores are now visible in your student portals.', time: 'Yesterday' },
-    'IX': { text: 'System: Attendance warning alerts generated for low ratios.', time: '18/06/2026' },
-    'X': { text: 'Admin: Mock board registration forms have been distributed.', time: '15/06/2026' }
-  };
-
   const parseMessage = (text) => {
     if (text && text.startsWith('{"isAttachment":true')) {
       try {
@@ -325,7 +365,7 @@ const ClassChat = ({ setAppSidebarOpen }) => {
       }
       return `${lastMsg.sender_name}: ${msgSummary}`;
     }
-    return roomPreviews[roomName]?.text || 'No messages in this lounge yet.';
+    return 'No messages yet';
   };
 
   const getLastMessageTime = (roomName) => {
@@ -334,7 +374,7 @@ const ClassChat = ({ setAppSidebarOpen }) => {
       const date = new Date(lastMsg.created_at || lastMsg.timestamp || Date.now());
       return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     }
-    return roomPreviews[roomName]?.time || '00:00';
+    return '';
   };
 
   // Fetch rooms on mount
@@ -388,7 +428,8 @@ const ClassChat = ({ setAppSidebarOpen }) => {
     sock.emit('join_room_chat', {
       class_level: currentRoom,
       sender_name: user.studentProfile?.name || (user.role === 'SuperAdmin' ? 'Admin' : 'Teacher'),
-      sender_role: user.role
+      sender_role: user.role,
+      is_hidden: (user.role === 'SuperAdmin' || user.role === 'Teacher') && isStealthMode
     });
 
     // Clear unread counts when entering the active room
@@ -790,9 +831,55 @@ const ClassChat = ({ setAppSidebarOpen }) => {
             <button className="p-1.5 rounded-xl hover:bg-dark-900/60 transition cursor-pointer" title="Notifications Lounge Channel">
               <Bell size={16} />
             </button>
-            <button className="p-1.5 rounded-xl hover:bg-dark-900/60 transition cursor-pointer">
-              <MoreVertical size={16} />
-            </button>
+            <div className="relative inline-block">
+              <button 
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowSidebarMenu(!showSidebarMenu);
+                }}
+                className={`p-1.5 rounded-xl hover:bg-dark-900/60 transition cursor-pointer ${showSidebarMenu ? 'bg-primary-600/10 text-primary-400' : ''}`}
+                title="Sidebar Options"
+              >
+                <MoreVertical size={16} />
+              </button>
+              {showSidebarMenu && (
+                <div className="absolute right-0 top-full mt-2 w-48 bg-dark-900/95 border border-dark-800 backdrop-blur-md rounded-2xl shadow-2xl z-50 p-1.5 flex flex-col gap-1 text-xs animate-scaleUp">
+                  <button 
+                    onClick={() => {
+                      setShowMembersPanel(prev => !prev);
+                      setShowSidebarMenu(false);
+                    }}
+                    className="flex items-center gap-2 px-3 py-2 rounded-xl hover:bg-dark-800 text-slate-200 hover:text-white transition cursor-pointer"
+                  >
+                    <GraduationCap size={14} className="text-primary-400" />
+                    <span>Lounge Roster</span>
+                  </button>
+                  <button 
+                    onClick={() => {
+                      setSearchFilter('');
+                      setShowSidebarMenu(false);
+                    }}
+                    className="flex items-center gap-2 px-3 py-2 rounded-xl hover:bg-dark-800 text-slate-200 hover:text-white transition cursor-pointer"
+                  >
+                    <Search size={14} className="text-slate-400" />
+                    <span>Reset Search Filter</span>
+                  </button>
+                  <button 
+                    onClick={() => {
+                      if (socket.connected) {
+                        socket.disconnect();
+                        socket.connect();
+                      }
+                      setShowSidebarMenu(false);
+                    }}
+                    className="flex items-center gap-2 px-3 py-2 rounded-xl hover:bg-dark-800 text-slate-200 hover:text-white transition cursor-pointer"
+                  >
+                    <Bell size={14} className="text-amber-400" />
+                    <span>Re-sync Chat Socket</span>
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
@@ -802,10 +889,10 @@ const ClassChat = ({ setAppSidebarOpen }) => {
             <Search size={14} className="text-slate-500" />
             <input 
               type="text" 
-              placeholder="Search or start new chat" 
+              placeholder="Search..." 
               value={searchFilter}
               onChange={(e) => setSearchFilter(e.target.value)}
-              className="bg-transparent border-none outline-none w-full text-xs text-slate-200 placeholder-slate-550"
+              className="bg-transparent border-none outline-none w-full text-xs text-slate-200 placeholder-slate-555"
             />
           </div>
         </div>
@@ -882,7 +969,7 @@ const ClassChat = ({ setAppSidebarOpen }) => {
             {/* Chat Header */}
             <div className="p-3.5 bg-dark-900/40 border-b border-dark-800/80 flex justify-between items-center text-slate-100 shrink-0 z-20 backdrop-blur-md">
               <div className="flex items-center gap-3">
-                {/* Mobile Navigation Toggle (Hamburger for Locked Students, Back arrow for Teachers/Admins) */}
+                {/* Mobile Navigation Toggle */}
                 {user.role === 'Student' ? (
                   <button 
                     onClick={() => setAppSidebarOpen && setAppSidebarOpen(true)}
@@ -926,8 +1013,23 @@ const ClassChat = ({ setAppSidebarOpen }) => {
                   </span>
                 </div>
               </div>
-              
-              <div className="flex items-center gap-1.5 text-slate-400">
+
+              <div className="flex items-center gap-2 text-slate-400">
+                {user.role !== 'Student' && (
+                  <button 
+                    onClick={toggleStealthMode}
+                    className={`hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-xs font-semibold border transition cursor-pointer shrink-0 select-none ${
+                      isStealthMode 
+                        ? 'bg-slate-500/10 border-slate-500/20 text-slate-400 hover:bg-slate-500/20' 
+                        : 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400 hover:bg-emerald-500/20'
+                    }`}
+                    title={isStealthMode ? "Stealth mode active: You are hidden from online roster" : "Active mode: You are visible in online roster"}
+                  >
+                    {isStealthMode ? <EyeOff size={13} /> : <Eye size={13} />}
+                    <span>{isStealthMode ? 'Stealth Mode (Hidden)' : 'Active Status'}</span>
+                  </button>
+                )}
+
                 <button 
                   onClick={() => {
                     setShowSearchInChat(!showSearchInChat);
@@ -960,9 +1062,64 @@ const ClassChat = ({ setAppSidebarOpen }) => {
                     <Phone size={16} />
                   </button>
                 )}
-                <button className="p-2 rounded-xl hover:bg-dark-900/60 transition cursor-pointer">
-                  <MoreVertical size={16} />
-                </button>
+                <div className="relative inline-block">
+                  <button 
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowHeaderMenu(!showHeaderMenu);
+                    }}
+                    className={`p-2 rounded-xl hover:bg-dark-900/60 transition cursor-pointer ${showHeaderMenu ? 'bg-primary-600/10 text-primary-400' : ''}`}
+                    title="More Options"
+                  >
+                    <MoreVertical size={16} />
+                  </button>
+                  {showHeaderMenu && (
+                    <div className="absolute right-0 top-full mt-2 w-56 bg-dark-900/95 border border-dark-800 backdrop-blur-md rounded-2xl shadow-2xl z-50 p-1.5 flex flex-col gap-1 text-xs animate-scaleUp">
+                      {user.role !== 'Student' && (
+                        <button 
+                          onClick={() => {
+                            toggleStealthMode();
+                            setShowHeaderMenu(false);
+                          }}
+                          className="flex items-center gap-2 px-3 py-2 rounded-xl hover:bg-dark-800 text-slate-200 hover:text-white transition cursor-pointer"
+                        >
+                          {isStealthMode ? <Eye size={14} className="text-emerald-400" /> : <EyeOff size={14} className="text-slate-400" />}
+                          <span>{isStealthMode ? 'Show Active Status' : 'Hide Active Status (Stealth)'}</span>
+                        </button>
+                      )}
+                      <button 
+                        onClick={() => {
+                          setShowMembersPanel(prev => !prev);
+                          setShowHeaderMenu(false);
+                        }}
+                        className="flex items-center gap-2 px-3 py-2 rounded-xl hover:bg-dark-800 text-slate-200 hover:text-white transition cursor-pointer"
+                      >
+                        <GraduationCap size={14} className="text-primary-400" />
+                        <span>View Online Roster ({roomMembers.length})</span>
+                      </button>
+                      <button 
+                        onClick={() => {
+                          setShowSearchInChat(!showSearchInChat);
+                          setShowHeaderMenu(false);
+                        }}
+                        className="flex items-center gap-2 px-3 py-2 rounded-xl hover:bg-dark-800 text-slate-200 hover:text-white transition cursor-pointer"
+                      >
+                        <Search size={14} className="text-slate-400" />
+                        <span>Search Lounge Messages</span>
+                      </button>
+                      <button 
+                        onClick={() => {
+                          scrollToBottom('smooth');
+                          setShowHeaderMenu(false);
+                        }}
+                        className="flex items-center gap-2 px-3 py-2 rounded-xl hover:bg-dark-800 text-slate-200 hover:text-white transition cursor-pointer"
+                      >
+                        <ArrowLeft size={14} className="-rotate-90 text-indigo-400" />
+                        <span>Jump to Latest Message</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
 
@@ -973,7 +1130,7 @@ const ClassChat = ({ setAppSidebarOpen }) => {
                   <Search size={12} className="text-slate-500" />
                   <input
                     type="text"
-                    placeholder="Search messages in this channel..."
+                    placeholder="Search..."
                     value={chatSearchQuery}
                     onChange={(e) => setChatSearchQuery(e.target.value)}
                     className="bg-transparent border-none outline-none w-full text-xs text-slate-200 placeholder-slate-600 py-1"
@@ -1036,7 +1193,11 @@ const ClassChat = ({ setAppSidebarOpen }) => {
             )}
 
             {/* Message Stream with Wallpaper */}
-            <div ref={messagesContainerRef} className="flex-1 overflow-y-auto p-4 space-y-3.5 edustride-chat-bg flex flex-col">
+            <div 
+              ref={messagesContainerRef} 
+              onScroll={handleChatScroll}
+              className="flex-1 overflow-y-auto p-4 space-y-3.5 edustride-chat-bg flex flex-col relative"
+            >
               <div className="self-center bg-dark-900/80 backdrop-blur border border-dark-800 text-slate-400 text-[10px] font-medium px-3.5 py-1 rounded-full shadow-sm mb-3 select-none flex items-center gap-1.5 font-outfit">
                 <Lock size={10} className="text-primary-400" />
                 <span>End-to-end institutional encrypted</span>
@@ -1303,6 +1464,23 @@ const ClassChat = ({ setAppSidebarOpen }) => {
               {/* End of message list */}
             </div>
 
+            {/* Floating Jump to Latest Button */}
+            {showScrollToBottom && (
+              <div className="absolute bottom-20 right-6 z-30 animate-fadeIn">
+                <button
+                  type="button"
+                  onClick={() => {
+                    scrollToBottom('smooth');
+                    setShowScrollToBottom(false);
+                  }}
+                  className="px-3 py-1.5 rounded-full bg-gradient-to-r from-primary-600 to-indigo-600 hover:from-primary-500 hover:to-indigo-500 text-white font-bold text-[10px] font-outfit shadow-2xl shadow-primary-950/50 border border-primary-400/30 flex items-center gap-1.5 cursor-pointer animate-bounce hover:scale-105 active:scale-95 transition-all select-none"
+                >
+                  <ArrowLeft className="-rotate-90" size={12} />
+                  <span>Latest Messages</span>
+                </button>
+              </div>
+            )}
+
             {/* Input Bar */}
             <div className="relative shrink-0">
               {/* Emoji Tray Overlay */}
@@ -1391,11 +1569,11 @@ const ClassChat = ({ setAppSidebarOpen }) => {
                   ) : (
                     /* Standard Input Bar controls */
                     <>
-                      <div className="flex-1 bg-dark-950/85 border border-dark-850 rounded-xl px-3 py-1 flex items-center gap-2.5 focus-within:border-primary-500/40 transition">
+                      <div className="flex-1 bg-dark-950/85 border border-dark-850 rounded-2xl px-3.5 py-1.5 flex items-center gap-2 focus-within:border-slate-700/80 transition-all duration-200 shadow-inner">
                         <button 
                           type="button" 
                           onClick={() => setShowEmojiTray(!showEmojiTray)}
-                          className={`p-1.5 rounded-lg hover:bg-dark-900/60 transition cursor-pointer ${showEmojiTray ? 'text-primary-400 bg-primary-500/10' : 'text-slate-400 hover:text-slate-200'}`} 
+                          className={`p-1.5 rounded-xl hover:bg-dark-900/60 transition cursor-pointer shrink-0 ${showEmojiTray ? 'text-primary-400 bg-primary-500/10' : 'text-slate-400 hover:text-slate-200'}`} 
                           title="Toggle emoji selector tray"
                         >
                           <Smile size={18} />
@@ -1403,20 +1581,63 @@ const ClassChat = ({ setAppSidebarOpen }) => {
                         <button 
                           type="button" 
                           onClick={handleAttachmentClick}
-                          className="p-1.5 rounded-lg hover:bg-dark-900/60 text-slate-400 hover:text-slate-200 transition cursor-pointer" 
+                          className="p-1.5 rounded-xl hover:bg-dark-900/60 text-slate-400 hover:text-slate-200 transition cursor-pointer shrink-0" 
                           title="Upload file handout or photo"
                         >
                           <Paperclip size={18} />
                         </button>
-                        <input
-                          type="text"
-                          placeholder="Type a secure message..."
+
+                        {/* Formatting Tools */}
+                        <div className="hidden sm:flex items-center gap-1 shrink-0 border-r border-dark-800/80 pr-1.5 mr-1">
+                          <button 
+                            type="button" 
+                            onClick={() => insertFormatting('**', '**')}
+                            className="px-1.5 py-0.5 rounded-md hover:bg-dark-900 text-[10px] font-extrabold text-slate-400 hover:text-white transition cursor-pointer font-outfit"
+                            title="Bold text (**text**)"
+                          >
+                            B
+                          </button>
+                          <button 
+                            type="button" 
+                            onClick={() => insertFormatting('_', '_')}
+                            className="px-1.5 py-0.5 rounded-md hover:bg-dark-900 text-[10px] italic text-slate-400 hover:text-white transition cursor-pointer font-serif"
+                            title="Italic text (_text_)"
+                          >
+                            I
+                          </button>
+                          <button 
+                            type="button" 
+                            onClick={() => insertFormatting('`', '`')}
+                            className="px-1.5 py-0.5 rounded-md hover:bg-dark-900 text-[9px] font-mono text-slate-400 hover:text-indigo-400 transition cursor-pointer"
+                            title="Inline Code (`code`)"
+                          >
+                            &lt;/&gt;
+                          </button>
+                        </div>
+
+                        <textarea
+                          ref={textareaRef}
+                          rows={1}
+                          placeholder="Type a message... (Shift + Enter for line break)"
                           value={typedMessage}
-                          onChange={(e) => setTypedMessage(e.target.value)}
+                          onChange={(e) => {
+                            setTypedMessage(e.target.value);
+                            e.target.style.height = 'auto';
+                            e.target.style.height = `${Math.min(e.target.scrollHeight, 120)}px`;
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' && !e.shiftKey) {
+                              e.preventDefault();
+                              handleSendMessage(e);
+                              if (textareaRef.current) {
+                                textareaRef.current.style.height = 'auto';
+                              }
+                            }
+                          }}
                           onFocus={() => {
                             scrollToBottom('smooth');
                           }}
-                          className="flex-1 bg-transparent border-none outline-none py-2 text-xs text-slate-100 placeholder-slate-555"
+                          className="flex-1 bg-transparent border-none outline-none py-1 text-xs text-slate-100 placeholder-slate-555 resize-none max-h-28 overflow-y-auto leading-relaxed"
                         />
                       </div>
                       
@@ -1578,7 +1799,7 @@ const ClassChat = ({ setAppSidebarOpen }) => {
                 <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1.5 font-outfit">Add a caption (optional)</label>
                 <input 
                   type="text"
-                  placeholder="Type caption message..."
+                  placeholder="Add caption..."
                   value={attachmentCaption}
                   onChange={(e) => setAttachmentCaption(e.target.value)}
                   className="w-full px-3.5 py-2.5 rounded-xl bg-dark-900 border border-dark-850 text-white placeholder-slate-550 outline-none text-xs focus:border-primary-500 transition"

@@ -8,6 +8,7 @@ import User from '../models/User.js';
 import FeeLedger from '../models/FeeLedger.js';
 import Subject from '../models/Subject.js';
 import ClassLevel from '../models/ClassLevel.js';
+import { getIO } from '../config/socket.js';
 
 const router = express.Router();
 
@@ -424,6 +425,23 @@ router.post('/send-custom-email', protect, authorize('SuperAdmin'), async (req, 
         parentName: student.parent_name,
         email: parentEmail
       });
+    }
+
+    // Emit real-time notification socket event
+    const io = getIO();
+    if (io) {
+      const noticePayload = {
+        subject,
+        body,
+        target,
+        class_level: target === 'class' ? class_level : 'Personal',
+        timestamp: new Date()
+      };
+      if (target === 'class' && class_level) {
+        io.to(class_level.trim().toUpperCase()).to(class_level.trim()).emit('new_notice', noticePayload);
+      } else {
+        io.emit('new_notice', noticePayload);
+      }
     }
 
     res.json({

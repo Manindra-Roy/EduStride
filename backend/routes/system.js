@@ -1,8 +1,26 @@
 import express from 'express';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { protect, authorize } from '../middleware/auth.js';
 import SystemSetting from '../models/SystemSetting.js';
 
 const router = express.Router();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// @desc    Download updated EduStride Android App (APK)
+// @route   GET /api/system/download-apk
+// @access  Public
+router.get('/download-apk', (req, res) => {
+  const apkPath = path.resolve(__dirname, '../../android/EduStride.apk');
+  if (fs.existsSync(apkPath)) {
+    res.download(apkPath, 'EduStride.apk');
+  } else {
+    res.status(404).json({ success: false, message: 'APK file not found' });
+  }
+});
 
 // @desc    Get default system theme color
 // @route   GET /api/system/theme

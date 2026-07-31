@@ -419,11 +419,20 @@ const FeeLedgerPanel = () => {
                   </span>
                   <input
                     type="text"
-                    placeholder="Search student ledgers by name or roll number..."
+                    placeholder="Search..."
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    className="w-full pl-11 pr-4 py-3 rounded-xl bg-dark-900/50 border border-dark-800 focus:border-primary-500 focus:ring-1 focus:ring-primary-500 text-xs text-white placeholder-slate-500 outline-none transition duration-150 shadow-inner"
+                    className="w-full pl-11 pr-10 py-3 rounded-xl bg-dark-900/50 border border-dark-800 focus:border-primary-500 focus:ring-1 focus:ring-primary-500 text-xs text-white placeholder-slate-500 outline-none transition duration-150 shadow-inner"
                   />
+                  {searchQuery && (
+                    <button 
+                      onClick={() => setSearchQuery('')}
+                      className="absolute inset-y-0 right-0 pr-3.5 flex items-center text-slate-500 hover:text-white transition cursor-pointer"
+                      title="Clear search"
+                    >
+                      <X size={14} />
+                    </button>
+                  )}
                 </div>
 
                 {/* Class-Wise Student List filter tabs */}

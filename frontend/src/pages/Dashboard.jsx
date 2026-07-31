@@ -12,7 +12,8 @@ import {
   Clock, 
   Calendar,
   ChevronRight,
-  User
+  User,
+  MessageSquare
 } from 'lucide-react';
 import { 
   BarChart, 
@@ -321,22 +322,22 @@ const Dashboard = () => {
         {/* Dashboard Grid */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           {/* Card 1: Attendance Gauge */}
-          <div className="glass-panel p-4 sm:p-6 rounded-2xl border border-dark-800 flex flex-col items-center justify-center text-center">
-            <h3 className="text-slate-400 text-sm font-semibold uppercase tracking-wider mb-4 self-start">Monthly Attendance</h3>
-            <div className={`relative flex items-center justify-center w-28 h-28 rounded-full border-4 ${attendanceColor.split(' ')[1]} mb-4`}>
-              <div className="text-2xl font-extrabold text-white font-outfit">{attendancePercentage}%</div>
+          <div className="glass-card-hover p-4 sm:p-6 rounded-2xl flex flex-col items-center justify-center text-center">
+            <h3 className="text-slate-400 text-sm font-semibold uppercase tracking-wider mb-4 self-start font-outfit">Monthly Attendance</h3>
+            <div className={`relative flex items-center justify-center w-28 h-28 rounded-full border-4 ${attendanceColor.split(' ')[1]} mb-4 shadow-lg`}>
+              <div className="text-2xl font-black text-white font-outfit">{attendancePercentage}%</div>
               <Percent className="absolute top-2 right-2 text-slate-500" size={12} />
             </div>
             <p className="text-sm font-semibold text-white">
               {latestAttendance.attended} of {latestAttendance.total_classes} Classes Attended
             </p>
-            <span className={`mt-3 px-3 py-1 rounded-full text-xs font-medium border ${attendanceColor.split(' ').slice(0,2).join(' ')}`}>
-              {attendancePercentage >= 75 ? 'Compliant status' : attendancePercentage >= 50 ? 'Warning Threshold' : 'Critical Non-compliant'}
+            <span className={`mt-3 px-3 py-1 rounded-full text-xs font-semibold border ${attendanceColor.split(' ').slice(0,2).join(' ')}`}>
+              {attendancePercentage >= 75 ? 'Compliant Status' : attendancePercentage >= 50 ? 'Warning Threshold' : 'Critical Non-compliant'}
             </span>
 
             {/* Recent Daily Logs list */}
             <div className="mt-4 pt-3 border-t border-dark-800/60 w-full">
-              <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider block mb-2 text-left">Recent Daily Logs</span>
+              <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider block mb-2 text-left font-outfit">Recent Daily Logs</span>
               <div className="space-y-1.5 max-h-24 overflow-y-auto">
                 {dailyAttendanceLogs.slice(0, 3).map((log, i) => (
                   <div key={i} className="flex justify-between items-center text-[10px] font-mono">
@@ -354,9 +355,9 @@ const Dashboard = () => {
           </div>
 
           {/* Card 2: Syllabus Status */}
-          <div className="glass-panel p-4 sm:p-6 rounded-2xl border border-dark-800 flex flex-col justify-between">
+          <div className="glass-card-hover p-4 sm:p-6 rounded-2xl flex flex-col justify-between">
             <div>
-              <h3 className="text-slate-400 text-sm font-semibold uppercase tracking-wider mb-3">Syllabus Progress</h3>
+              <h3 className="text-slate-400 text-sm font-semibold uppercase tracking-wider mb-3 font-outfit">Syllabus Progress</h3>
               <div className="space-y-3 max-h-72 overflow-y-auto pr-1">
                 {syllabusProgress.length > 0 ? (
                   syllabusProgress.map((item, index) => {
@@ -929,54 +930,103 @@ const Dashboard = () => {
         </div>
       </div>
 
+      {/* Quick Actions Shortcuts Bar */}
+      <div className="p-3.5 sm:p-4 rounded-2xl glass-panel border border-dark-800/80 space-y-2.5 sm:space-y-0 sm:flex sm:flex-wrap sm:items-center sm:gap-3">
+        <div className="flex items-center justify-between sm:justify-start gap-1.5 shrink-0">
+          <span className="text-[10px] sm:text-[11px] font-extrabold uppercase tracking-widest text-slate-400 font-outfit flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+            Quick Navigation
+          </span>
+        </div>
+
+        <div className="grid grid-cols-2 sm:flex sm:flex-wrap items-center gap-2 sm:gap-2.5 w-full sm:w-auto">
+          <Link to="/classes" className="px-3 py-2.5 sm:px-3.5 sm:py-2 rounded-xl bg-dark-900/90 hover:bg-primary-600/20 hover:border-primary-500/40 border border-dark-800 text-xs font-semibold text-white transition flex items-center justify-center sm:justify-start gap-2 group shadow-sm active:scale-95">
+            <Users size={14} className="text-primary-400 group-hover:scale-110 transition-transform shrink-0" />
+            <span className="truncate">Class Roster</span>
+          </Link>
+          {user?.role === 'SuperAdmin' && (
+            <Link to="/fees" className="px-3 py-2.5 sm:px-3.5 sm:py-2 rounded-xl bg-dark-900/90 hover:bg-emerald-600/20 hover:border-emerald-500/40 border border-dark-800 text-xs font-semibold text-white transition flex items-center justify-center sm:justify-start gap-2 group shadow-sm active:scale-95">
+              <CreditCard size={14} className="text-emerald-400 group-hover:scale-110 transition-transform shrink-0" />
+              <span className="truncate">Fee Ledgers</span>
+            </Link>
+          )}
+          <Link to="/chats" className="px-3 py-2.5 sm:px-3.5 sm:py-2 rounded-xl bg-dark-900/90 hover:bg-indigo-600/20 hover:border-indigo-500/40 border border-dark-800 text-xs font-semibold text-white transition flex items-center justify-center sm:justify-start gap-2 group shadow-sm active:scale-95">
+            <MessageSquare size={14} className="text-indigo-400 group-hover:scale-110 transition-transform shrink-0" />
+            <span className="truncate">Class Chats</span>
+          </Link>
+          <Link to="/lms" className="px-3 py-2.5 sm:px-3.5 sm:py-2 rounded-xl bg-dark-900/90 hover:bg-cyan-600/20 hover:border-cyan-500/40 border border-dark-800 text-xs font-semibold text-white transition flex items-center justify-center sm:justify-start gap-2 group shadow-sm active:scale-95">
+            <BookOpen size={14} className="text-cyan-400 group-hover:scale-110 transition-transform shrink-0" />
+            <span className="truncate">Study Materials</span>
+          </Link>
+          {user?.role === 'SuperAdmin' && (
+            <Link to="/automations" className="col-span-2 sm:col-span-1 px-3 py-2.5 sm:px-3.5 sm:py-2 rounded-xl bg-dark-900/90 hover:bg-amber-600/20 hover:border-amber-500/40 border border-dark-800 text-xs font-semibold text-white transition flex items-center justify-center sm:justify-start gap-2 group shadow-sm active:scale-95">
+              <TrendingUp size={14} className="text-amber-400 group-hover:scale-110 transition-transform shrink-0" />
+              <span className="truncate">Automations</span>
+            </Link>
+          )}
+        </div>
+      </div>
+
       {/* Analytics Cards Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         {/* Total Students */}
-        <div className="glass-panel p-4 sm:p-6 rounded-2xl border border-dark-800 relative">
+        <div className="glass-card-hover p-4 sm:p-6 rounded-2xl relative overflow-hidden group">
           <div className="flex justify-between items-center mb-4">
-            <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Active Students</span>
-            <div className="p-2 rounded-lg bg-primary-600/10 text-primary-400">
+            <span className="text-xs font-bold uppercase tracking-wider text-slate-400 font-outfit">Active Students</span>
+            <div className="p-2.5 rounded-xl bg-primary-600/10 border border-primary-500/20 text-primary-400 group-hover:scale-110 transition-transform shadow-inner">
               <Users size={18} />
             </div>
           </div>
-          <p className="text-3xl font-extrabold text-white font-outfit">{stats.totalStudents}</p>
-          <span className="text-[10px] font-semibold text-emerald-400 block mt-1">Cross-batch operations enabled</span>
+          <p className="text-3xl font-black text-white font-outfit tracking-tight">{stats.totalStudents}</p>
+          <span className="text-[10px] font-semibold text-emerald-400 block mt-1.5 flex items-center gap-1">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+            Cross-batch operations active
+          </span>
         </div>
 
         {/* Total Collected Revenue */}
-        <div className="glass-panel p-4 sm:p-6 rounded-2xl border border-dark-800 relative">
+        <div className="glass-card-hover p-4 sm:p-6 rounded-2xl relative overflow-hidden group">
           <div className="flex justify-between items-center mb-4">
-            <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Collected Revenue</span>
-            <div className="p-2 rounded-lg bg-emerald-600/10 text-emerald-400">
+            <span className="text-xs font-bold uppercase tracking-wider text-slate-400 font-outfit">Collected Revenue</span>
+            <div className="p-2.5 rounded-xl bg-emerald-600/10 border border-emerald-500/20 text-emerald-400 group-hover:scale-110 transition-transform shadow-inner">
               <CreditCard size={18} />
             </div>
           </div>
-          <p className="text-3xl font-extrabold text-white font-outfit">₹{stats.collectedRevenue.toLocaleString()}</p>
-          <span className="text-[10px] font-semibold text-slate-400 block mt-1">Updated via gateway webhook</span>
+          <p className="text-3xl font-black text-white font-outfit tracking-tight">₹{stats.collectedRevenue.toLocaleString()}</p>
+          <span className="text-[10px] font-semibold text-slate-400 block mt-1.5 flex items-center gap-1">
+            <span className="w-1.5 h-1.5 rounded-full bg-slate-400"></span>
+            Updated real-time via ledger
+          </span>
         </div>
 
         {/* Outstanding Balance */}
-        <div className="glass-panel p-4 sm:p-6 rounded-2xl border border-dark-800 relative">
+        <div className="glass-card-hover p-4 sm:p-6 rounded-2xl relative overflow-hidden group">
           <div className="flex justify-between items-center mb-4">
-            <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Outstanding Balance</span>
-            <div className="p-2 rounded-lg bg-rose-600/10 text-rose-400">
+            <span className="text-xs font-bold uppercase tracking-wider text-slate-400 font-outfit">Outstanding Balance</span>
+            <div className="p-2.5 rounded-xl bg-rose-600/10 border border-rose-500/20 text-rose-400 group-hover:scale-110 transition-transform shadow-inner">
               <AlertTriangle size={18} />
             </div>
           </div>
-          <p className="text-3xl font-extrabold text-white font-outfit">₹{stats.outstandingRevenue.toLocaleString()}</p>
-          <span className="text-[10px] font-semibold text-rose-400 block mt-1">Pending payments nag targets</span>
+          <p className="text-3xl font-black text-white font-outfit tracking-tight">₹{stats.outstandingRevenue.toLocaleString()}</p>
+          <span className="text-[10px] font-semibold text-rose-400 block mt-1.5 flex items-center gap-1">
+            <span className="w-1.5 h-1.5 rounded-full bg-rose-400 animate-pulse"></span>
+            Pending payment collection
+          </span>
         </div>
 
         {/* Defaulter / Attendance Warnings */}
-        <div className="glass-panel p-4 sm:p-6 rounded-2xl border border-dark-800 relative">
+        <div className="glass-card-hover p-4 sm:p-6 rounded-2xl relative overflow-hidden group">
           <div className="flex justify-between items-center mb-4">
-            <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Low Attendance Alerts</span>
-            <div className="p-2 rounded-lg bg-amber-600/10 text-amber-400">
+            <span className="text-xs font-bold uppercase tracking-wider text-slate-400 font-outfit">Low Attendance Alerts</span>
+            <div className="p-2.5 rounded-xl bg-amber-600/10 border border-amber-500/20 text-amber-400 group-hover:scale-110 transition-transform shadow-inner">
               <Percent size={18} />
             </div>
           </div>
-          <p className="text-3xl font-extrabold text-white font-outfit">{stats.lowAttendanceCount}</p>
-          <span className="text-[10px] font-semibold text-amber-400 block mt-1">Students below 75% target</span>
+          <p className="text-3xl font-black text-white font-outfit tracking-tight">{stats.lowAttendanceCount}</p>
+          <span className="text-[10px] font-semibold text-amber-400 block mt-1.5 flex items-center gap-1">
+            <span className="w-1.5 h-1.5 rounded-full bg-amber-400"></span>
+            Students below 75% target
+          </span>
         </div>
       </div>
 

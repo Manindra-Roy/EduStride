@@ -663,7 +663,6 @@ const AutomationsPanel = () => {
               <input
                 type="text"
                 required
-                placeholder="e.g. XI, XII, V"
                 value={newClassName}
                 onChange={(e) => setNewClassName(e.target.value)}
                 className="flex-1 px-3.5 py-2.5 rounded-xl bg-dark-900 border border-dark-850 focus:border-primary-500 text-white text-xs outline-none transition"
@@ -785,7 +784,6 @@ const AutomationsPanel = () => {
                 <input
                   type="text"
                   required
-                  placeholder="Enter notice / mail subject"
                   value={emailSubject}
                   onChange={(e) => setEmailSubject(e.target.value)}
                   className="w-full px-3.5 py-2.5 rounded-xl bg-dark-900 border border-dark-850 focus:border-primary-500 text-white text-xs outline-none transition"
@@ -798,7 +796,6 @@ const AutomationsPanel = () => {
                 <textarea
                   required
                   rows={5}
-                  placeholder="Write message details here..."
                   value={emailBody}
                   onChange={(e) => setEmailBody(e.target.value)}
                   className="w-full px-3.5 py-2.5 rounded-xl bg-dark-900 border border-dark-850 focus:border-primary-500 text-white text-xs outline-none transition font-sans resize-y"
@@ -1363,7 +1360,6 @@ const AutomationsPanel = () => {
                             required
                             value={slot.time}
                             onChange={(e) => handleTempSlotChange(index, 'time', e.target.value)}
-                            placeholder="e.g. 09:00 AM"
                             className="w-full px-2.5 py-1.5 rounded-lg bg-dark-950 border border-dark-800 text-white text-xs outline-none focus:border-primary-500"
                           />
                         </div>
@@ -1374,7 +1370,6 @@ const AutomationsPanel = () => {
                             required
                             value={slot.subject}
                             onChange={(e) => handleTempSlotChange(index, 'subject', e.target.value)}
-                            placeholder="e.g. Mathematics"
                             className="w-full px-2.5 py-1.5 rounded-lg bg-dark-950 border border-dark-800 text-white text-xs outline-none focus:border-primary-500"
                           />
                         </div>
@@ -1385,7 +1380,6 @@ const AutomationsPanel = () => {
                             required
                             value={slot.teacher}
                             onChange={(e) => handleTempSlotChange(index, 'teacher', e.target.value)}
-                            placeholder="e.g. Dr. Carter"
                             className="w-full px-2.5 py-1.5 rounded-lg bg-dark-950 border border-dark-800 text-white text-xs outline-none focus:border-primary-500"
                           />
                         </div>

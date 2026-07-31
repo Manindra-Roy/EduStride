@@ -45,35 +45,63 @@ export const initSocket = (server) => {
 
     // Listen for join_room
     socket.on('join_room', (class_level) => {
-      socket.join(class_level);
-      console.log(`User ${socket.id} joined class room: ${class_level}`);
+      if (!class_level) return;
+      const cleanLevel = class_level.toString().trim();
+      const upperLevel = cleanLevel.toUpperCase();
+      socket.join(cleanLevel);
+      socket.join(upperLevel);
+      socket.join('ALL');
+      console.log(`User ${socket.id} joined class rooms: ${cleanLevel}, ${upperLevel}, ALL`);
 
       // Immediately notify the user if there is an active call in this room
-      if (activeCalls.has(class_level)) {
-        socket.emit('incoming_call', activeCalls.get(class_level));
+      if (activeCalls.has(upperLevel) || activeCalls.has(cleanLevel)) {
+        const callInfo = activeCalls.get(upperLevel) || activeCalls.get(cleanLevel);
+        socket.emit('incoming_call', callInfo);
       }
     });
 
     // Listen for chat presence room joining
     socket.on('join_room_chat', (data) => {
-      const { class_level, sender_name, sender_role } = data;
+      const { class_level, sender_name, sender_role, is_hidden } = data;
       socket.join(class_level);
       
       // Remove from any other rooms first
       removeUserFromRooms(socket.id);
       
-      if (!roomMembers.has(class_level)) {
-        roomMembers.set(class_level, new Map());
+      if (!is_hidden) {
+        if (!roomMembers.has(class_level)) {
+          roomMembers.set(class_level, new Map());
+        }
+        roomMembers.get(class_level).set(socket.id, { sender_name, sender_role });
+        console.log(`User ${sender_name} (${sender_role}) joined chat presence for room: ${class_level}`);
+      } else {
+        console.log(`User ${sender_name} (${sender_role}) joined in STEALTH (HIDDEN) mode for room: ${class_level}`);
       }
-      roomMembers.get(class_level).set(socket.id, { sender_name, sender_role });
       
-      console.log(`User ${sender_name} (${sender_role}) joined chat presence for room: ${class_level}`);
       sendMembersList(class_level);
 
       // Immediately notify active call
       if (activeCalls.has(class_level)) {
         socket.emit('incoming_call', activeCalls.get(class_level));
       }
+    });
+
+    // Listen for toggle_incognito status changes
+    socket.on('toggle_incognito', (data) => {
+      const { class_level, sender_name, sender_role, is_hidden } = data;
+      removeUserFromRooms(socket.id);
+
+      if (!is_hidden) {
+        if (!roomMembers.has(class_level)) {
+          roomMembers.set(class_level, new Map());
+        }
+        roomMembers.get(class_level).set(socket.id, { sender_name, sender_role });
+        console.log(`User ${sender_name} toggled active status to VISIBLE in room: ${class_level}`);
+      } else {
+        console.log(`User ${sender_name} toggled active status to HIDDEN in room: ${class_level}`);
+      }
+
+      sendMembersList(class_level);
     });
 
     // Listen for leaving chat room presence
