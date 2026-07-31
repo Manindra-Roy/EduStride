@@ -43,6 +43,15 @@ export const CallProvider = ({ children }) => {
   }, [currentRoom]);
 
   const [toasts, setToasts] = useState([]);
+  const [allowOnScreenToasts, setAllowOnScreenToasts] = useState(() => localStorage.getItem('edustride_onscreen_toasts') !== 'false');
+
+  const toggleOnScreenToasts = React.useCallback(() => {
+    setAllowOnScreenToasts(prev => {
+      const nextVal = !prev;
+      localStorage.setItem('edustride_onscreen_toasts', nextVal.toString());
+      return nextVal;
+    });
+  }, []);
 
   const playNotificationSound = React.useCallback(() => {
     try {
