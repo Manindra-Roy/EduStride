@@ -3,10 +3,12 @@ import Student from '../models/Student.js';
 import FeeLedger from '../models/FeeLedger.js';
 import User from '../models/User.js';
 import Attendance from '../models/Attendance.js';
+import Timetable from '../models/Timetable.js';
 import { protect, authorize } from '../middleware/auth.js';
 import { deleteFromCloud } from '../services/cloudStorage.js';
 
 const router = express.Router();
+const DAYS_OF_WEEK_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
 // Helper to recalculate roll numbers based on student progress
 const recalculateRollNumbers = async (class_level) => {
@@ -81,10 +83,12 @@ const recalculateRollNumbers = async (class_level) => {
       if (b.attendancePercentage !== a.attendancePercentage) {
         return b.attendancePercentage - a.attendancePercentage;
       }
-      const timeA = new Date(a.joining_date).getTime();
-      const timeB = new Date(b.joining_date).getTime();
-      if (timeA !== timeB) {
-        return timeA - timeB;
+      const timeA = a.joining_date ? new Date(a.joining_date).getTime() : 0;
+      const timeB = b.joining_date ? new Date(b.joining_date).getTime() : 0;
+      const validA = isNaN(timeA) ? 0 : timeA;
+      const validB = isNaN(timeB) ? 0 : timeB;
+      if (validA !== validB) {
+        return validA - validB;
       }
       return a.name.localeCompare(b.name);
     });
@@ -453,25 +457,102 @@ router.delete('/:id', protect, authorize('SuperAdmin', 'Teacher'), async (req, r
   }
 });
 
-// @desc    Get bulk attendance for a class on a specific date
+// @desc    Get bulk attendance for a class on a specific date and session, integrated with schedule
 // @route   GET /api/students/attendance/bulk
 // @access  Private (Admin/Teacher)
 router.get('/attendance/bulk', protect, authorize('SuperAdmin', 'Teacher'), async (req, res, next) => {
   try {
-    const { class_level, date } = req.query;
+    const { class_level, date, session_name } = req.query;
     if (!class_level || !date) {
       res.status(400);
       throw new Error('Please provide class_level and date');
     }
 
-    const normalizedDate = new Date(date + 'T00:00:00.000Z');
-    const attendanceSheet = await Attendance.findOne({
+    const cleanDateStr = date ? String(date).split('T')[0] : new Date().toISOString().split('T')[0];
+    const normalizedDate = new Date(`${cleanDateStr}T00:00:00.000Z`);
+    const dayOfWeekName = DAYS_OF_WEEK_NAMES[normalizedDate.getUTCDay()];
+
+    // Fetch timetable schedule to discover scheduled periods for this class & day
+    let scheduledSessions = [];
+    try {
+      const timetableDoc = await Timetable.findOne();
+      if (timetableDoc && Array.isArray(timetableDoc.data)) {
+        const dayData = timetableDoc.data.find(d => d.day.toLowerCase() === dayOfWeekName.toLowerCase());
+        if (dayData && Array.isArray(dayData.slots)) {
+          const classSlots = dayData.slots.filter(s => s.grade?.trim().toUpperCase() === class_level.trim().toUpperCase());
+          scheduledSessions = classSlots.map(slot => ({
+            session_name: `${slot.time} - ${slot.subject}`,
+            time: slot.time,
+            subject: slot.subject,
+            teacher: slot.teacher
+          }));
+        }
+      }
+    } catch (e) {
+      console.error('[Timetable Schedule Fetch Error]:', e);
+    }
+
+    // Find all attendance sheets logged for this class and date
+    const allSheets = await Attendance.find({
       class_level,
       date: normalizedDate
+    }).sort({ createdAt: 1 });
+
+    const loggedMap = {};
+    allSheets.forEach(s => {
+      loggedMap[(s.session_name || 'Session 1').toLowerCase()] = s;
     });
 
+    const sessionsList = [];
+    const addedSet = new Set();
+
+    // 1. Add scheduled sessions
+    scheduledSessions.forEach(sch => {
+      const lower = sch.session_name.toLowerCase();
+      addedSet.add(lower);
+      sessionsList.push({
+        session_name: sch.session_name,
+        subject: sch.subject,
+        time: sch.time,
+        teacher: sch.teacher,
+        is_scheduled: true,
+        is_logged: !!loggedMap[lower]
+      });
+    });
+
+    // 2. Add any additional logged sessions (or fallback default)
+    allSheets.forEach(s => {
+      const sName = s.session_name || 'Session 1';
+      const lower = sName.toLowerCase();
+      if (!addedSet.has(lower)) {
+        addedSet.add(lower);
+        sessionsList.push({
+          session_name: sName,
+          is_scheduled: false,
+          is_logged: true
+        });
+      }
+    });
+
+    if (sessionsList.length === 0) {
+      sessionsList.push({
+        session_name: 'Session 1',
+        is_scheduled: false,
+        is_logged: false
+      });
+    }
+
+    const targetSession = session_name || sessionsList[0].session_name;
+    const attendanceSheet = allSheets.find(s => (s.session_name || 'Session 1').toLowerCase() === targetSession.toLowerCase());
+
     if (!attendanceSheet) {
-      return res.json({ success: true, exists: false, records: [] });
+      return res.json({
+        success: true,
+        exists: false,
+        session_name: targetSession,
+        available_sessions: sessionsList,
+        records: []
+      });
     }
 
     const records = attendanceSheet.records.map(r => ({
@@ -483,6 +564,8 @@ router.get('/attendance/bulk', protect, authorize('SuperAdmin', 'Teacher'), asyn
     res.json({
       success: true,
       exists: true,
+      session_name: attendanceSheet.session_name || targetSession,
+      available_sessions: sessionsList,
       records
     });
   } catch (error) {
@@ -490,19 +573,21 @@ router.get('/attendance/bulk', protect, authorize('SuperAdmin', 'Teacher'), asyn
   }
 });
 
-// @desc    Bulk log daily attendance for a class
+// @desc    Bulk log daily attendance for a class & session
 // @route   POST /api/students/attendance/bulk
 // @access  Private (Admin/Teacher)
 router.post('/attendance/bulk', protect, authorize('SuperAdmin', 'Teacher'), async (req, res, next) => {
   try {
-    const { class_level, date, attendance_list } = req.body; // attendance_list: [{ student_id, attended: boolean }]
+    const { class_level, date, session_name, attendance_list } = req.body;
     if (!class_level || !attendance_list || !Array.isArray(attendance_list) || !date) {
       res.status(400);
       throw new Error('Invalid attendance data or date missing');
     }
 
-    const normalizedDate = new Date(date + 'T00:00:00.000Z');
-    const trackingMonth = date.substring(0, 7); // format: YYYY-MM
+    const cleanDateStr = date ? String(date).split('T')[0] : new Date().toISOString().split('T')[0];
+    const normalizedDate = new Date(`${cleanDateStr}T00:00:00.000Z`);
+    const trackingMonth = cleanDateStr.substring(0, 7); // format: YYYY-MM
+    const cleanSession = session_name?.trim() || 'Session 1';
 
     // Prepare records for the Attendance model
     const records = attendance_list.map(record => ({
@@ -511,19 +596,17 @@ router.post('/attendance/bulk', protect, authorize('SuperAdmin', 'Teacher'), asy
       remarks: ''
     }));
 
-    // Find and update or create the attendance sheet for the class and normalizedDate
+    // Upsert attendance sheet for this specific session
     await Attendance.findOneAndUpdate(
-      { class_level, date: normalizedDate },
-      { class_level, date: normalizedDate, records },
+      { class_level, date: normalizedDate, session_name: cleanSession },
+      { class_level, date: normalizedDate, session_name: cleanSession, records },
       { upsert: true, new: true }
     );
 
-    // Now, recalculate monthly attendance for all active students in the class
+    // Recalculate monthly attendance for all active students in the class
     const studentsInClass = await Student.find({ class_level, status: 'Active' });
 
-    // Fetch all attendance sheets for this class and this month
     const startOfMonth = new Date(`${trackingMonth}-01T00:00:00.000Z`);
-    // Determine the next month
     const year = parseInt(trackingMonth.split('-')[0]);
     const month = parseInt(trackingMonth.split('-')[1]);
     const nextMonthYear = month === 12 ? year + 1 : year;
@@ -553,7 +636,6 @@ router.post('/attendance/bulk', protect, authorize('SuperAdmin', 'Teacher'), asy
         }
       });
 
-      // Update student's attendance_history for this month
       return Student.findOneAndUpdate(
         {
           _id: student._id,
@@ -567,7 +649,6 @@ router.post('/attendance/bulk', protect, authorize('SuperAdmin', 'Teacher'), asy
         }
       ).then(async (result) => {
         if (!result) {
-          // If the month entry doesn't exist in array, push it
           return Student.findByIdAndUpdate(
             student._id,
             {
@@ -586,13 +667,11 @@ router.post('/attendance/bulk', protect, authorize('SuperAdmin', 'Teacher'), asy
     });
 
     await Promise.all(updatePromises);
-
-    // Recalculate roll numbers for the class since attendance updated
     await recalculateRollNumbers(class_level);
 
     res.json({
       success: true,
-      message: `Attendance logged successfully for class ${class_level}`
+      message: `Attendance logged for ${cleanSession} (${class_level})`
     });
   } catch (error) {
     next(error);
@@ -606,7 +685,6 @@ router.get('/:id/attendance', protect, async (req, res, next) => {
   try {
     const studentId = req.params.id;
 
-    // Verify access: student role can only view their own
     if (req.user.role === 'Student' && req.user.studentProfile?.toString() !== studentId) {
       res.status(403);
       throw new Error('Not authorized to access other student attendance records');
@@ -614,12 +692,13 @@ router.get('/:id/attendance', protect, async (req, res, next) => {
 
     const attendanceSheets = await Attendance.find({
       'records.student': studentId
-    }).sort({ date: -1 }); // Latest dates first
+    }).sort({ date: -1, createdAt: -1 });
 
     const history = attendanceSheets.map(sheet => {
       const record = sheet.records.find(r => r.student.toString() === studentId);
       return {
         date: sheet.date,
+        session_name: sheet.session_name || 'Session 1',
         status: record ? record.status : 'Absent'
       };
     });

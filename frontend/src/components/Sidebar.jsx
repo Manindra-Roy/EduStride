@@ -14,7 +14,8 @@ import {
   X,
   GraduationCap,
   UserPlus,
-  Palette
+  Palette,
+  Calendar
 } from 'lucide-react';
 
 import Logo from './Logo';
@@ -387,6 +388,12 @@ const Sidebar = ({ isOpen, setIsOpen }) => {
 
     // Add the rest
     items.push(
+      {
+        name: 'Class Timetable',
+        path: '/timetable',
+        icon: Calendar,
+        roles: ['SuperAdmin', 'Teacher']
+      },
       {
         name: 'Tuition Fees',
         path: '/fees',

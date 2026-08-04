@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import axios from 'axios';
 import { useAuth } from '../context/AuthContext';
+import ClassTimetable from '../components/ClassTimetable';
 import { 
   Users, 
   BookOpen, 
@@ -112,6 +113,12 @@ const Dashboard = () => {
   useEffect(() => {
     const fetchData = async () => {
       try {
+        // Fetch timetable for all roles
+        const timetableRes = await axios.get('/api/timetable');
+        if (timetableRes.data.success) {
+          setTimetable(timetableRes.data.data);
+        }
+
         if (user.role === 'Student') {
           let studentClass = user.studentProfile?.class_level || '';
           // Fetch specific student details
@@ -121,11 +128,6 @@ const Dashboard = () => {
               setStudentDetails(res.data.data);
               studentClass = res.data.data.class_level;
             }
-          }
-          // Fetch timetable
-          const timetableRes = await axios.get('/api/timetable');
-          if (timetableRes.data.success) {
-            setTimetable(timetableRes.data.data);
           }
           // Fetch daily attendance logs
           if (user.studentProfile?._id) {
@@ -339,10 +341,15 @@ const Dashboard = () => {
             <div className="mt-4 pt-3 border-t border-dark-800/60 w-full">
               <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider block mb-2 text-left font-outfit">Recent Daily Logs</span>
               <div className="space-y-1.5 max-h-24 overflow-y-auto">
-                {dailyAttendanceLogs.slice(0, 3).map((log, i) => (
+                {dailyAttendanceLogs.slice(0, 4).map((log, i) => (
                   <div key={i} className="flex justify-between items-center text-[10px] font-mono">
-                    <span className="text-slate-400">
-                      {new Date(log.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
+                    <span className="text-slate-400 flex items-center gap-1.5">
+                      {new Date(log.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
+                      {log.session_name && (
+                        <span className="text-[9px] font-bold text-primary-400 bg-primary-950/80 border border-primary-900 px-1 py-0.2 rounded font-mono">
+                          {log.session_name}
+                        </span>
+                      )}
                     </span>
                     <span className={`font-bold ${log.status === 'Present' ? 'text-emerald-400' : 'text-rose-400'}`}>{log.status}</span>
                   </div>
@@ -394,64 +401,14 @@ const Dashboard = () => {
           </div>
         </div>
 
-        {/* Weekly Timetable */}
-        <div className="glass-panel p-4 sm:p-6 rounded-2xl border border-dark-800 space-y-4">
-          <div className="border-b border-dark-800 pb-3 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
-            <div>
-              <h3 className="text-white text-base font-bold font-outfit flex items-center gap-2">
-                <Calendar className="text-primary-500" size={18} />
-                <span>Class Timetable (Class {studentDetails?.class_level || 'N/A'})</span>
-              </h3>
-              <p className="text-xs text-slate-450 mt-0.5">Your daily class schedule and educators</p>
-            </div>
-            <span className="text-slate-450 text-[10px] font-bold px-2 py-1 rounded bg-dark-900 border border-dark-850 font-mono">
-              7-Day Schedule
-            </span>
-          </div>
-
-          {(() => {
-            const studentGrade = studentDetails?.class_level || '';
-            const filteredDays = timetable.map(t => ({
-              day: t.day,
-              slots: t.slots.filter(slot => slot.grade?.trim().toUpperCase() === studentGrade.trim().toUpperCase())
-            })).filter(t => t.slots.length > 0);
-
-            if (filteredDays.length === 0) {
-              return (
-                <div className="text-center py-8 text-slate-500 text-xs border border-dashed border-dark-850 rounded-xl">
-                  No classes scheduled for Class {studentGrade || 'your grade'} at this time.
-                </div>
-              );
-            }
-
-            return (
-              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
-                {filteredDays.map((t, index) => (
-                  <div key={index} className="p-4 rounded-xl bg-dark-900/30 border border-dark-850/60 space-y-3 hover:border-dark-750 transition flex flex-col justify-between">
-                    <h4 className="text-xs font-bold text-primary-400 font-mono border-l-2 border-l-primary-500 pl-2 bg-primary-950/20 py-1">{t.day}</h4>
-                    <div className="space-y-2.5">
-                      {t.slots.map((slot, idx) => (
-                        <div key={idx} className="p-3 rounded-lg bg-dark-900/60 border border-dark-850 space-y-1.5 hover:border-dark-800 transition">
-                          <div className="flex justify-between items-start gap-1">
-                            <span className="text-xs font-bold text-white leading-tight">{slot.subject}</span>
-                          </div>
-                          <div className="flex items-center gap-1.5 text-[10px] text-slate-400">
-                            <Clock size={12} className="text-slate-500" />
-                            <span className="font-mono">{slot.time}</span>
-                          </div>
-                          <div className="flex items-center gap-1.5 text-[10px] text-slate-400">
-                            <User size={12} className="text-slate-500" />
-                            <span>{slot.teacher}</span>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            );
-          })()}
-        </div>
+        {/* Student Class Timetable Card */}
+        <ClassTimetable
+          timetable={timetable}
+          studentGrade={studentDetails?.class_level || ''}
+          userRole={user?.role}
+          availableClasses={classes}
+          loading={loading}
+        />
 
         {/* Charts & Marks */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">

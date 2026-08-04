@@ -36,73 +36,157 @@
         .initial-preloader-container {
           position: fixed;
           inset: 0;
-          background: #07080a;
+          background: #050507;
           display: flex;
           flex-direction: column;
           align-items: center;
           justify-content: center;
           z-index: 9999;
-          transition: opacity 0.4s ease, transform 0.4s ease;
+          overflow: hidden;
+          font-family: 'Outfit', 'Inter', -apple-system, sans-serif;
+          color: #f1f5f9;
+          user-select: none;
         }
-        .initial-orbit {
+        .initial-aura {
+          position: absolute;
+          top: 50%;
+          left: 50%;
+          transform: translate(-50%, -50%);
+          width: 500px;
+          height: 500px;
+          border-radius: 50%;
+          background: rgba(99, 102, 241, 0.12);
+          filter: blur(160px);
+          pointer-events: none;
+        }
+        .initial-unit {
           position: relative;
-          width: 96px;
-          height: 96px;
+          z-index: 10;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          max-width: 384px;
+          width: 100%;
+          padding: 0 24px;
+          box-sizing: border-box;
+          text-align: center;
+        }
+        .initial-logo-wrapper {
+          position: relative;
+          margin-bottom: 20px;
           display: flex;
           align-items: center;
           justify-content: center;
         }
-        .initial-ring {
+        .initial-logo-glow {
           position: absolute;
           inset: 0;
-          border-radius: 50%;
-          border: 2px solid rgba(99, 102, 241, 0.15);
-          border-top-color: #6366f1;
-          animation: initial-spin 1.2s cubic-bezier(0.5, 0, 0.5, 1) infinite;
+          border-radius: 16px;
+          background: rgba(99, 102, 241, 0.25);
+          filter: blur(20px);
         }
-        .initial-ring-inner {
-          position: absolute;
-          inset: 8px;
-          border-radius: 50%;
-          border: 2px solid rgba(99, 102, 241, 0.08);
-          border-bottom-color: #818cf8;
-          animation: initial-spin 1.8s cubic-bezier(0.5, 0, 0.5, 1) infinite reverse;
+        .initial-logo-box {
+          position: relative;
+          z-index: 10;
+          width: 64px;
+          height: 64px;
+          padding: 4px;
+          border-radius: 16px;
+          background: rgba(11, 13, 19, 0.9);
+          border: 1px solid rgba(255, 255, 255, 0.1);
+          box-shadow: 0 20px 40px rgba(0,0,0,0.5);
+          backdrop-filter: blur(16px);
+          box-sizing: border-box;
+          overflow: hidden;
         }
-        .initial-dot {
-          width: 36px;
-          height: 36px;
-          background: linear-gradient(135deg, #818cf8 0%, #4f46e5 100%);
-          border-radius: 10px;
-          box-shadow: 0 0 24px rgba(99, 102, 241, 0.4);
-          animation: initial-pulse 1.8s ease-in-out infinite;
+        .initial-logo-box img {
+          width: 100%;
+          height: 100%;
+          border-radius: 12px;
+          object-fit: cover;
         }
-        .initial-brand {
-          margin-top: 24px;
-          font-family: 'Outfit', 'Inter', sans-serif;
+        .initial-title {
           font-size: 24px;
-          font-weight: 850;
+          font-weight: 900;
           letter-spacing: -0.02em;
           color: #ffffff;
-          background: linear-gradient(135deg, #ffffff 0%, #a5b4fc 100%);
-          -webkit-background-clip: text;
-          -webkit-text-fill-color: transparent;
+          margin: 0 0 4px 0;
         }
-        @keyframes initial-spin {
-          0% { transform: rotate(0deg); }
-          100% { transform: rotate(360deg); }
+        .initial-subtitle {
+          font-size: 12px;
+          font-weight: 500;
+          color: #94a3b8;
+          letter-spacing: 0.02em;
+          margin-bottom: 32px;
         }
-        @keyframes initial-pulse {
-          0%, 100% { transform: scale(0.92); opacity: 0.8; }
-          50% { transform: scale(1.06); opacity: 1; }
+        .initial-bar-track {
+          width: 208px;
+          height: 2px;
+          background: rgba(30, 41, 59, 0.6);
+          border-radius: 999px;
+          overflow: hidden;
+          position: relative;
+          margin-bottom: 16px;
+        }
+        .initial-bar-fill {
+          height: 100%;
+          width: 25%;
+          background: linear-gradient(90deg, #6366f1, #a855f7, #10b981);
+          border-radius: 999px;
+          box-shadow: 0 0 12px rgba(99, 102, 241, 0.6);
+          animation: initial-bar-anim 1.5s ease-in-out infinite alternate;
+        }
+        .initial-status-text {
+          font-size: 12px;
+          font-weight: 400;
+          color: #94a3b8;
+          letter-spacing: 0.02em;
+          height: 20px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+        .initial-footer {
+          position: absolute;
+          bottom: 28px;
+          font-size: 10px;
+          font-family: monospace;
+          color: #475569;
+          letter-spacing: 0.15em;
+          text-transform: uppercase;
+          z-index: 10;
+          display: flex;
+          align-items: center;
+          gap: 12px;
+        }
+        @keyframes initial-bar-anim {
+          0% { width: 15%; }
+          100% { width: 45%; }
         }
       </style>
       <div class="initial-preloader-container">
-        <div class="initial-orbit">
-          <div class="initial-ring"></div>
-          <div class="initial-ring-inner"></div>
-          <div class="initial-dot"></div>
+        <div class="initial-aura"></div>
+        <div class="initial-unit">
+          <div class="initial-logo-wrapper">
+            <div class="initial-logo-glow"></div>
+            <div class="initial-logo-box">
+              <img src="/favicon.jpg" alt="EduStride Logo" />
+            </div>
+          </div>
+          <h1 class="initial-title">EduStride</h1>
+          <div class="initial-subtitle">Enterprise ERP & LMS Portal</div>
+          <div class="initial-bar-track">
+            <div class="initial-bar-fill"></div>
+          </div>
+          <div class="initial-status-text">
+            <span>Connecting secure gateway...</span>
+          </div>
         </div>
-        <div class="initial-brand">EduStride</div>
+        <div class="initial-footer">
+          <span>EduStride Core</span>
+          <span>•</span>
+          <span>SSL Encrypted</span>
+        </div>
       </div>
     </div>
     <script type="module" src="/src/main.jsx"></script>

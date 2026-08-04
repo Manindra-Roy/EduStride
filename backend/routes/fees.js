@@ -97,6 +97,9 @@ router.put('/manual', protect, authorize('SuperAdmin', 'Teacher'), async (req, r
     monthObj.amount_paid = Number(amount_paid) || 0;
     if (status === 'Paid') {
       monthObj.payment_date = new Date();
+    } else if (status === 'Unpaid' || status === 'Pending') {
+      monthObj.payment_date = null;
+      monthObj.amount_paid = 0;
     }
     monthObj.receipt_id = receipt_id || monthObj.receipt_id || `REC-${Date.now().toString().substring(6)}`;
     monthObj.transaction_method = transaction_method || monthObj.transaction_method || 'Manual Cash/Bank';

@@ -14,6 +14,8 @@ const PageTitleUpdater = () => {
       const parts = path.split('/');
       const classLevel = parts[parts.length - 1];
       title = `Class ${classLevel || ''} Classroom | EduStride`;
+    } else if (path === '/timetable') {
+      title = 'Class Timetable & Master Schedule | EduStride';
     } else if (path === '/fees') {
       title = 'Tuition Fee Ledger | EduStride';
     } else if (path === '/lms') {

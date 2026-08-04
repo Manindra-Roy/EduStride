@@ -497,4 +497,50 @@ router.put('/students/:id/email', protect, authorize('SuperAdmin', 'Teacher'), a
   }
 });
 
+// @desc    Reset password of any user by Admin (without needing old password)
+// @route   PUT /api/auth/users/:id/reset-password
+// @access  Private (SuperAdmin & Teacher)
+const handleAdminResetPassword = async (req, res, next) => {
+  try {
+    const { newPassword } = req.body;
+
+    if (!newPassword || newPassword.trim().length < 6) {
+      res.status(400);
+      throw new Error('New password must be at least 6 characters long');
+    }
+
+    const targetUser = await User.findById(req.params.id);
+    if (!targetUser) {
+      res.status(404);
+      throw new Error('Target user account not found');
+    }
+
+    // Role-based authorization check:
+    // SuperAdmin can reset password for any user.
+    // Teacher can only reset password for Student users.
+    if (req.user.role !== 'SuperAdmin') {
+      if (targetUser.role !== 'Student') {
+        res.status(403);
+        throw new Error('Teachers are only permitted to reset passwords for Student accounts');
+      }
+    }
+
+    // Hash the new password
+    const salt = await bcrypt.genSalt(10);
+    targetUser.password = await bcrypt.hash(newPassword.trim(), salt);
+    await targetUser.save();
+
+    res.json({
+      success: true,
+      message: `Password for ${targetUser.email} reset successfully`
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+router.put('/users/:id/reset-password', protect, authorize('SuperAdmin', 'Teacher'), handleAdminResetPassword);
+router.put('/reset-password/:id', protect, authorize('SuperAdmin', 'Teacher'), handleAdminResetPassword);
+
 export default router;
+

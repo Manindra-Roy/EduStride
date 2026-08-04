@@ -20,6 +20,7 @@ import FeeLedgerPanel from './pages/FeeLedgerPanel';
 import LmsDownload from './pages/LmsDownload';
 import ClassChat from './pages/ClassChat';
 import AutomationsPanel from './pages/AutomationsPanel';
+import TimetablePage from './pages/TimetablePage';
 
 const ProtectedRoute = ({ children, allowedRoles }) => {
   const { user, token, loading } = useAuth();
@@ -121,6 +122,11 @@ const Layout = () => {
           }`}>
             <Routes>
               <Route path="/" element={<Dashboard />} />
+              <Route path="/timetable" element={
+                <ProtectedRoute allowedRoles={['SuperAdmin', 'Teacher']}>
+                  <TimetablePage />
+                </ProtectedRoute>
+              } />
               <Route path="/class/:class_level" element={<ClassGrid />} />
               <Route path="/fees" element={<FeeLedgerPanel />} />
               <Route path="/lms" element={<LmsDownload />} />

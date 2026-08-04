@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { Mail, Lock, UserCheck, ArrowRight, GraduationCap, ShieldAlert, CheckCircle2, Trash2, Users, UserPlus, Edit, BookOpen, ArrowUp, ArrowDown, ChevronDown, ChevronUp, Eye, EyeOff, Database, Server, Check } from 'lucide-react';
+import { Mail, Lock, UserCheck, ArrowRight, GraduationCap, ShieldAlert, CheckCircle2, Trash2, Users, UserPlus, Edit, BookOpen, ArrowUp, ArrowDown, ChevronDown, ChevronUp, Eye, EyeOff, Database, Server, Check, KeyRound, Search } from 'lucide-react';
 import Logo from '../components/Logo';
 import Footer from '../components/Footer';
 import axios from 'axios';
@@ -47,6 +47,16 @@ const Register = () => {
   const [selectedClassFilter, setSelectedClassFilter] = useState('All');
   const [showPassword, setShowPassword] = useState(false);
   const [passwordStrength, setPasswordStrength] = useState({ score: 0, label: '', color: 'bg-dark-800' });
+
+  // Admin Password Reset state
+  const [resetTargetUser, setResetTargetUser] = useState(null);
+  const [adminNewPassword, setAdminNewPassword] = useState('');
+  const [resettingPassword, setResettingPassword] = useState(false);
+  const [showAdminPassword, setShowAdminPassword] = useState(false);
+
+  // Search queries
+  const [searchTeacherQuery, setSearchTeacherQuery] = useState('');
+  const [searchStudentQuery, setSearchStudentQuery] = useState('');
 
   const checkPasswordStrength = (pass) => {
     if (!pass) {
@@ -400,7 +410,50 @@ const Register = () => {
     );
   }
 
+  const handleAdminResetPassword = async (e) => {
+    e.preventDefault();
+    if (!adminNewPassword || adminNewPassword.length < 6) {
+      setError('New password must be at least 6 characters long.');
+      return;
+    }
+    setResettingPassword(true);
+    setError('');
+    setSuccess('');
+    try {
+      const res = await axios.put(`/api/auth/users/${resetTargetUser.id}/reset-password`, {
+        newPassword: adminNewPassword
+      });
+      if (res.data.success) {
+        setSuccess(`Password for ${resetTargetUser.email} has been reset successfully!`);
+        setResetTargetUser(null);
+        setAdminNewPassword('');
+      }
+    } catch (err) {
+      setError(err.response?.data?.message || 'Failed to reset user password');
+    } finally {
+      setResettingPassword(false);
+    }
+  };
+
+  const generateRandomPassword = () => {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$';
+    let rand = '';
+    for (let i = 0; i < 10; i++) {
+      rand += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    setAdminNewPassword(rand);
+    setShowAdminPassword(true);
+  };
+
+  const filteredTeachers = teachers.filter(t =>
+    t.email.toLowerCase().includes(searchTeacherQuery.toLowerCase())
+  );
+
   const filteredStudents = students.filter(student => {
+    const matchesSearch = student.email.toLowerCase().includes(searchStudentQuery.toLowerCase()) ||
+      (student.studentProfile?.name && student.studentProfile.name.toLowerCase().includes(searchStudentQuery.toLowerCase()));
+
+    if (!matchesSearch) return false;
     if (selectedClassFilter === 'All') return true;
     if (selectedClassFilter === 'Unassigned') {
       const cl = student.studentProfile?.class_level;
@@ -656,57 +709,70 @@ const Register = () => {
                 </div>
               ) : (
                 <>
-                  {/* Class Filter Tabs */}
-                  <div className="flex flex-wrap items-center gap-2 mb-4 border-b border-dark-800/60 pb-4">
-                    <span className="text-slate-400 text-xs font-semibold mr-2 font-outfit">Filter by Class:</span>
-                    <button
-                      type="button"
-                      onClick={() => setSelectedClassFilter('All')}
-                      className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all duration-200 ${
-                        selectedClassFilter === 'All'
-                          ? 'bg-primary-600 text-white shadow-lg shadow-primary-500/20'
-                          : 'bg-dark-900/30 hover:bg-dark-900/60 text-slate-400 border border-dark-800 hover:text-white'
-                      }`}
-                    >
-                      All ({students.length})
-                    </button>
-                    {classes.map(c => {
-                      const count = students.filter(s => s.studentProfile?.class_level === c).length;
-                      return (
-                        <button
-                          key={c}
-                          type="button"
-                          onClick={() => setSelectedClassFilter(c)}
-                          className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all duration-200 ${
-                            selectedClassFilter === c
-                              ? 'bg-primary-600 text-white shadow-lg shadow-primary-500/20'
-                              : 'bg-dark-900/30 hover:bg-dark-900/60 text-slate-400 border border-dark-800 hover:text-white'
-                          }`}
-                        >
-                          Class {c} ({count})
-                        </button>
-                      );
-                    })}
-                    {students.filter(s => !s.studentProfile?.class_level || !classes.includes(s.studentProfile.class_level)).length > 0 && (
+                  {/* Class Filter & Search */}
+                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 mb-4 border-b border-dark-800/60 pb-4">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-slate-400 text-xs font-semibold mr-1 font-outfit">Filter:</span>
                       <button
                         type="button"
-                        onClick={() => setSelectedClassFilter('Unassigned')}
+                        onClick={() => setSelectedClassFilter('All')}
                         className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all duration-200 ${
-                          selectedClassFilter === 'Unassigned'
+                          selectedClassFilter === 'All'
                             ? 'bg-primary-600 text-white shadow-lg shadow-primary-500/20'
                             : 'bg-dark-900/30 hover:bg-dark-900/60 text-slate-400 border border-dark-800 hover:text-white'
                         }`}
                       >
-                        Unassigned ({students.filter(s => !s.studentProfile?.class_level || !classes.includes(s.studentProfile.class_level)).length})
+                        All ({students.length})
                       </button>
-                    )}
+                      {classes.map(c => {
+                        const count = students.filter(s => s.studentProfile?.class_level === c).length;
+                        return (
+                          <button
+                            key={c}
+                            type="button"
+                            onClick={() => setSelectedClassFilter(c)}
+                            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all duration-200 ${
+                              selectedClassFilter === c
+                                ? 'bg-primary-600 text-white shadow-lg shadow-primary-500/20'
+                                : 'bg-dark-900/30 hover:bg-dark-900/60 text-slate-400 border border-dark-800 hover:text-white'
+                            }`}
+                          >
+                            Class {c} ({count})
+                          </button>
+                        );
+                      })}
+                      {students.filter(s => !s.studentProfile?.class_level || !classes.includes(s.studentProfile.class_level)).length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setSelectedClassFilter('Unassigned')}
+                          className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all duration-200 ${
+                            selectedClassFilter === 'Unassigned'
+                              ? 'bg-primary-600 text-white shadow-lg shadow-primary-500/20'
+                              : 'bg-dark-900/30 hover:bg-dark-900/60 text-slate-400 border border-dark-800 hover:text-white'
+                          }`}
+                        >
+                          Unassigned ({students.filter(s => !s.studentProfile?.class_level || !classes.includes(s.studentProfile.class_level)).length})
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="relative w-full sm:w-64">
+                      <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" />
+                      <input
+                        type="text"
+                        placeholder="Search student email or name..."
+                        value={searchStudentQuery}
+                        onChange={(e) => setSearchStudentQuery(e.target.value)}
+                        className="w-full pl-9 pr-3 py-1.5 rounded-xl bg-dark-950 border border-dark-800 focus:border-primary-500 text-white text-xs outline-none"
+                      />
+                    </div>
                   </div>
 
                   {/* Filtered Student Table */}
                   <div className="overflow-x-auto rounded-xl border border-dark-800/80 bg-dark-900/20">
                     {filteredStudents.length === 0 ? (
                       <div className="py-12 text-center text-slate-400 italic">
-                        No students found matching this class filter.
+                        No students found matching this search / filter.
                       </div>
                     ) : (
                       <table className="w-full text-left border-collapse text-xs">
@@ -793,6 +859,20 @@ const Register = () => {
                                     <div className="flex justify-end gap-2">
                                       <button
                                         type="button"
+                                        onClick={() => {
+                                          setResetTargetUser({ id: studentAccount._id, email: studentAccount.email, role: studentAccount.role });
+                                          setAdminNewPassword('');
+                                          setShowAdminPassword(false);
+                                          setError('');
+                                          setSuccess('');
+                                        }}
+                                        className="p-2 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 hover:text-amber-300 transition-colors border border-amber-950/20"
+                                        title="Reset Password (No Old Password Required)"
+                                      >
+                                        <KeyRound size={14} />
+                                      </button>
+                                      <button
+                                        type="button"
                                         onClick={() => { setEditingStudentId(studentAccount._id); setEditStudentEmail(studentAccount.email); }}
                                         className="p-2 rounded-lg bg-sky-500/10 hover:bg-sky-500/20 text-sky-400 hover:text-sky-400 transition-colors border border-sky-950/20"
                                         title="Edit Student Login ID/Email"
@@ -839,66 +919,104 @@ const Register = () => {
                   <p className="text-xs text-slate-400 mt-1">No academic educators are currently provisioned.</p>
                 </div>
               ) : (
-                <div className="overflow-x-auto rounded-xl border border-dark-800/80 bg-dark-900/20">
-                  <table className="w-full text-left border-collapse text-xs">
-                    <thead>
-                      <tr className="border-b border-dark-800 bg-dark-950/60 text-slate-400 uppercase tracking-wider font-bold font-mono">
-                        <th className="py-3.5 px-4">Educator</th>
-                        <th className="py-3.5 px-4 hidden sm:table-cell">Created At</th>
-                        <th className="py-3.5 px-4 text-right">Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-dark-800/60">
-                      {teachers.map((teacher) => (
-                        <tr key={teacher._id} className="hover:bg-dark-900/30 transition-colors">
-                          <td className="py-3.5 px-4">
-                            <div className="flex items-center gap-3">
-                              {teacher.profile_pic ? (
-                                <img
-                                  src={teacher.profile_pic}
-                                  alt="Avatar"
-                                  className="w-8 h-8 rounded-lg object-cover border border-primary-500/20"
-                                />
-                              ) : (
-                                <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-primary-600 to-indigo-400 flex items-center justify-center font-bold text-white text-xs">
-                                  {teacher.email[0].toUpperCase()}
+                <>
+                  <div className="flex items-center justify-between gap-3 mb-4 border-b border-dark-800/60 pb-4">
+                    <span className="text-xs font-semibold text-slate-400 font-outfit">Active Faculty ({filteredTeachers.length})</span>
+                    <div className="relative w-full sm:w-64">
+                      <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" />
+                      <input
+                        type="text"
+                        placeholder="Search teachers by email..."
+                        value={searchTeacherQuery}
+                        onChange={(e) => setSearchTeacherQuery(e.target.value)}
+                        className="w-full pl-9 pr-3 py-1.5 rounded-xl bg-dark-950 border border-dark-800 focus:border-primary-500 text-white text-xs outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="overflow-x-auto rounded-xl border border-dark-800/80 bg-dark-900/20">
+                    {filteredTeachers.length === 0 ? (
+                      <div className="py-12 text-center text-slate-400 italic">
+                        No teachers found matching your search.
+                      </div>
+                    ) : (
+                      <table className="w-full text-left border-collapse text-xs">
+                        <thead>
+                          <tr className="border-b border-dark-800 bg-dark-950/60 text-slate-400 uppercase tracking-wider font-bold font-mono">
+                            <th className="py-3.5 px-4">Educator</th>
+                            <th className="py-3.5 px-4 hidden sm:table-cell">Created At</th>
+                            <th className="py-3.5 px-4 text-right">Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-dark-800/60">
+                          {filteredTeachers.map((teacher) => (
+                            <tr key={teacher._id} className="hover:bg-dark-900/30 transition-colors">
+                              <td className="py-3.5 px-4">
+                                <div className="flex items-center gap-3">
+                                  {teacher.profile_pic ? (
+                                    <img
+                                      src={teacher.profile_pic}
+                                      alt="Avatar"
+                                      className="w-8 h-8 rounded-lg object-cover border border-primary-500/20"
+                                    />
+                                  ) : (
+                                    <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-primary-600 to-indigo-400 flex items-center justify-center font-bold text-white text-xs">
+                                      {teacher.email[0].toUpperCase()}
+                                    </div>
+                                  )}
+                                  <div>
+                                    <span className="text-white font-semibold block">{teacher.email}</span>
+                                    <span className="text-[10px] text-primary-400 bg-primary-950/40 px-1.5 py-0.5 rounded border border-primary-800/25 mt-0.5 inline-block">
+                                      {teacher.role}
+                                    </span>
+                                  </div>
                                 </div>
-                              )}
-                              <div>
-                                <span className="text-white font-semibold block">{teacher.email}</span>
-                                <span className="text-[10px] text-primary-400 bg-primary-950/40 px-1.5 py-0.5 rounded border border-primary-800/25 mt-0.5 inline-block">
-                                  {teacher.role}
-                                </span>
-                              </div>
-                            </div>
-                          </td>
-                          <td className="py-3.5 px-4 text-slate-450 font-mono hidden sm:table-cell">
-                            {new Date(teacher.createdAt).toLocaleDateString(undefined, {
-                              year: 'numeric',
-                              month: 'short',
-                              day: 'numeric'
-                            })}
-                          </td>
-                          <td className="py-3.5 px-4 text-right">
-                            <button
-                              type="button"
-                              disabled={deletingTeacherId === teacher._id}
-                              onClick={() => handleDeleteTeacher(teacher._id, teacher.email)}
-                              className="p-2 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 hover:text-rose-400 transition-colors border border-rose-950/20 disabled:opacity-40"
-                              title="Delete Teacher"
-                            >
-                              {deletingTeacherId === teacher._id ? (
-                                <div className="w-4 h-4 border-2 border-rose-500/30 border-t-rose-500 rounded-full animate-spin" />
-                              ) : (
-                                <Trash2 size={15} />
-                              )}
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                              </td>
+                              <td className="py-3.5 px-4 text-slate-450 font-mono hidden sm:table-cell">
+                                {new Date(teacher.createdAt).toLocaleDateString(undefined, {
+                                  year: 'numeric',
+                                  month: 'short',
+                                  day: 'numeric'
+                                })}
+                              </td>
+                              <td className="py-3.5 px-4 text-right">
+                                <div className="flex justify-end gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setResetTargetUser({ id: teacher._id, email: teacher.email, role: teacher.role });
+                                      setAdminNewPassword('');
+                                      setShowAdminPassword(false);
+                                      setError('');
+                                      setSuccess('');
+                                    }}
+                                    className="p-2 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 hover:text-amber-300 transition-colors border border-amber-950/20"
+                                    title="Reset Teacher Password (No Old Password Required)"
+                                  >
+                                    <KeyRound size={14} />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={deletingTeacherId === teacher._id}
+                                    onClick={() => handleDeleteTeacher(teacher._id, teacher.email)}
+                                    className="p-2 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 hover:text-rose-400 transition-colors border border-rose-950/20 disabled:opacity-40"
+                                    title="Delete Teacher"
+                                  >
+                                    {deletingTeacherId === teacher._id ? (
+                                      <div className="w-4 h-4 border-2 border-rose-500/30 border-t-rose-500 rounded-full animate-spin" />
+                                    ) : (
+                                      <Trash2 size={15} />
+                                    )}
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
+                  </div>
+                </>
               )}
             </div>
           ) : (
@@ -1144,6 +1262,102 @@ const Register = () => {
 
         {!user && <Footer className="border-t-0 mt-8 pt-4 justify-center sm:flex-col sm:gap-2 opacity-75" />}
       </div>
+
+      {/* Admin Reset Password Modal */}
+      {resetTargetUser && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-fadeIn">
+          <div className="bg-dark-900 border border-dark-700 w-full max-w-md rounded-2xl p-6 shadow-2xl space-y-5 relative">
+            <div className="flex items-center justify-between border-b border-dark-800 pb-4">
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-400">
+                  <KeyRound size={20} />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white font-outfit">Reset User Password</h3>
+                  <p className="text-xs text-slate-400">Admin override — no old password required</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setResetTargetUser(null)}
+                className="text-slate-400 hover:text-white transition text-sm font-bold p-1"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="bg-dark-950/60 p-3.5 rounded-xl border border-dark-800 space-y-1.5 text-xs">
+              <div className="flex justify-between">
+                <span className="text-slate-400 font-medium">Target User:</span>
+                <span className="text-white font-semibold">{resetTargetUser.email}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-400 font-medium">Role:</span>
+                <span className="text-amber-400 font-bold uppercase">{resetTargetUser.role}</span>
+              </div>
+            </div>
+
+            <form onSubmit={handleAdminResetPassword} className="space-y-4">
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400">
+                    New Password
+                  </label>
+                  <button
+                    type="button"
+                    onClick={generateRandomPassword}
+                    className="text-[11px] font-bold text-primary-400 hover:text-primary-300 transition hover:underline"
+                  >
+                    ⚡ Auto-Generate
+                  </button>
+                </div>
+                <div className="relative">
+                  <input
+                    type={showAdminPassword ? "text" : "password"}
+                    required
+                    minLength={6}
+                    placeholder="Enter new password"
+                    value={adminNewPassword}
+                    onChange={(e) => setAdminNewPassword(e.target.value)}
+                    className="w-full pl-4 pr-10 py-2.5 rounded-xl bg-dark-950 border border-dark-800 focus:border-amber-500 text-white text-xs outline-none font-mono"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowAdminPassword(!showAdminPassword)}
+                    className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-500 hover:text-white transition"
+                  >
+                    {showAdminPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-dark-800">
+                <button
+                  type="button"
+                  onClick={() => setResetTargetUser(null)}
+                  className="px-4 py-2 rounded-xl bg-dark-800 hover:bg-dark-750 text-slate-300 font-semibold text-xs transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={resettingPassword}
+                  className="px-5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-dark-950 font-bold text-xs transition flex items-center gap-1.5 shadow-lg shadow-amber-500/10 disabled:opacity-50"
+                >
+                  {resettingPassword ? (
+                    <div className="w-4 h-4 border-2 border-dark-950/30 border-t-dark-950 rounded-full animate-spin" />
+                  ) : (
+                    <>
+                      <KeyRound size={14} />
+                      <span>Reset Password</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

@@ -165,6 +165,9 @@ const Login = () => {
               Create Account
             </Link>
           </p>
+          <p className="text-[11px] text-slate-500">
+            Forgot your password? Ask your SuperAdmin / Teacher to reset it for you.
+          </p>
           <div className="text-[10px] text-slate-500 font-bold tracking-wider uppercase select-none">
             Platform Architected by{' '}
             <a 

@@ -17,7 +17,8 @@ import {
   UserPlus,
   BookOpen,
   History,
-  Users
+  Users,
+  Calendar
 } from 'lucide-react';
 import { 
   LineChart, 
@@ -168,6 +169,8 @@ const ClassGrid = () => {
 
   const [bulkAttendanceList, setBulkAttendanceList] = useState([]);
   const [masterAttendanceChecked, setMasterAttendanceChecked] = useState(true);
+  const [attendanceSession, setAttendanceSession] = useState('Session 1');
+  const [availableSessions, setAvailableSessions] = useState(['Session 1']);
 
   const [submitError, setSubmitError] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -366,12 +369,18 @@ const ClassGrid = () => {
     }
   };
 
-  // Fetch Saved Attendance for a Date
-  const fetchAttendanceForDate = async (targetDate) => {
+  // Fetch Saved Attendance for a Date & Session (Integrated with Timetable Schedule)
+  const fetchAttendanceForDate = async (targetDate, targetSession = attendanceSession) => {
     try {
-      const res = await axios.get(`/api/students/attendance/bulk?class_level=${class_level}&date=${targetDate}`);
+      const sessNameParam = typeof targetSession === 'string' ? targetSession : (targetSession?.session_name || 'Session 1');
+      const res = await axios.get(`/api/students/attendance/bulk?class_level=${class_level}&date=${targetDate}&session_name=${encodeURIComponent(sessNameParam)}`);
       const activeStudents = students.filter(s => s.status === 'Active');
       if (res.data.success) {
+        const returnedSessions = res.data.available_sessions || [];
+        setAvailableSessions(returnedSessions);
+        const resolvedSessionName = res.data.session_name || sessNameParam || 'Session 1';
+        setAttendanceSession(resolvedSessionName);
+
         if (res.data.exists) {
           const savedRecordsMap = {};
           res.data.records.forEach(r => {
@@ -405,14 +414,15 @@ const ClassGrid = () => {
 
   const handleAttendanceDateChange = (newDate) => {
     setAttendanceDate(newDate);
-    fetchAttendanceForDate(newDate);
+    fetchAttendanceForDate(newDate, attendanceSession);
   };
 
   // Open Bulk Attendance Sheet
   const openAttendanceModal = () => {
     const todayStr = new Date().toISOString().split('T')[0];
     setAttendanceDate(todayStr);
-    fetchAttendanceForDate(todayStr);
+    setAttendanceSession('Session 1');
+    fetchAttendanceForDate(todayStr, 'Session 1');
     setShowAttendanceModal(true);
   };
 
@@ -441,6 +451,7 @@ const ClassGrid = () => {
       const payload = {
         class_level,
         date: attendanceDate,
+        session_name: attendanceSession,
         attendance_list: bulkAttendanceList.map(item => ({
           student_id: item.student_id,
           attended: item.attended
@@ -450,6 +461,12 @@ const ClassGrid = () => {
       if (res.data.success) {
         setShowAttendanceModal(false);
         fetchStudents();
+        if (selectedStudent) {
+          const detailsRes = await axios.get(`/api/students/${selectedStudent._id}`);
+          if (detailsRes.data.success) {
+            setSelectedStudent(detailsRes.data.data);
+          }
+        }
       }
     } catch (err) {
       alert(err.response?.data?.message || 'Failed to log daily attendance');
@@ -1264,9 +1281,16 @@ const ClassGrid = () => {
                     {detailedAttendance.length > 0 ? (
                       detailedAttendance.map((log, i) => (
                         <div key={i} className="flex justify-between items-center p-2 rounded-lg bg-dark-905 border border-dark-900 font-mono">
-                          <span className="text-xs text-slate-350 font-bold">
-                            {new Date(log.date).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}
-                          </span>
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs text-slate-350 font-bold">
+                              {new Date(log.date).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}
+                            </span>
+                            {log.session_name && (
+                              <span className="text-[9px] font-bold text-primary-400 bg-primary-950/80 border border-primary-900 px-1.5 py-0.2 rounded">
+                                {log.session_name}
+                              </span>
+                            )}
+                          </div>
                           <span className={`text-[10px] font-extrabold px-2 py-0.5 rounded ${
                             log.status === 'Present'
                               ? 'bg-emerald-500/10 text-emerald-450 border border-emerald-500/20'
@@ -1772,6 +1796,69 @@ const ClassGrid = () => {
                     />
                     <div className="w-11 h-6 bg-dark-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-slate-300 after:border-slate-350 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary-600"></div>
                   </label>
+                </div>
+              </div>
+
+              {/* Schedule-Integrated Multi-Session Selection Bar */}
+              <div className="flex flex-col gap-2 p-3 rounded-xl bg-dark-900 border border-dark-850">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-bold text-slate-350 font-outfit flex items-center gap-1.5">
+                    <Calendar size={13} className="text-primary-400" />
+                    <span>Scheduled Class Sessions:</span>
+                  </span>
+                  <span className="text-[10px] font-mono text-slate-500">
+                    {availableSessions.length} session{availableSessions.length > 1 ? 's' : ''} available
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1">
+                  {availableSessions.map((sessItem, index) => {
+                    const sessName = typeof sessItem === 'string' ? sessItem : sessItem.session_name;
+                    const isSelected = attendanceSession.toLowerCase() === sessName.toLowerCase();
+                    const isScheduled = typeof sessItem === 'object' && sessItem.is_scheduled;
+                    const isLogged = typeof sessItem === 'object' && sessItem.is_logged;
+
+                    return (
+                      <button
+                        key={index}
+                        type="button"
+                        onClick={() => {
+                          setAttendanceSession(sessName);
+                          fetchAttendanceForDate(attendanceDate, sessName);
+                        }}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-bold transition shrink-0 flex items-center gap-1.5 ${
+                          isSelected
+                            ? 'bg-primary-600 text-white shadow-md'
+                            : isLogged
+                            ? 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/20'
+                            : 'bg-dark-950 border border-dark-800 text-slate-400 hover:text-white'
+                        }`}
+                      >
+                        <span>{sessName}</span>
+                        {isLogged && (
+                          <span className={`text-[9px] font-mono font-extrabold px-1 rounded ${
+                            isSelected ? 'bg-white/20 text-white' : 'bg-emerald-500/20 text-emerald-300'
+                          }`}>
+                            ✓ Logged
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const nextNum = availableSessions.length + 1;
+                      const newSessName = `Extra Session ${nextNum}`;
+                      setAttendanceSession(newSessName);
+                      fetchAttendanceForDate(attendanceDate, newSessName);
+                    }}
+                    className="px-2.5 py-1.5 rounded-lg bg-dark-950 border border-dashed border-primary-500/40 text-primary-400 hover:text-white text-xs font-bold transition shrink-0 flex items-center gap-1"
+                  >
+                    <Plus size={12} />
+                    <span>Add Extra Class</span>
+                  </button>
                 </div>
               </div>
 
