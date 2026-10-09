@@ -711,12 +711,12 @@ const Register = () => {
                 <>
                   {/* Class Filter & Search */}
                   <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 mb-4 border-b border-dark-800/60 pb-4">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="text-slate-400 text-xs font-semibold mr-1 font-outfit">Filter:</span>
+                    <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar touch-pan-x py-1">
+                      <span className="text-slate-400 text-xs font-semibold mr-1 font-outfit shrink-0">Filter:</span>
                       <button
                         type="button"
                         onClick={() => setSelectedClassFilter('All')}
-                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all duration-200 ${
+                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all duration-200 shrink-0 ${
                           selectedClassFilter === 'All'
                             ? 'bg-primary-600 text-white shadow-lg shadow-primary-500/20'
                             : 'bg-dark-900/30 hover:bg-dark-900/60 text-slate-400 border border-dark-800 hover:text-white'
@@ -835,6 +835,11 @@ const Register = () => {
                                           <span className="text-[10px] text-slate-400 block mt-0.5 font-medium">
                                             Profile: {studentAccount.studentProfile?.name || 'Unlinked/Generic'}
                                           </span>
+                                          {studentAccount.studentProfile && (
+                                            <span className="sm:hidden text-[9px] font-mono text-primary-400 block mt-0.5">
+                                              Class {studentAccount.studentProfile.class_level} • Roll {studentAccount.studentProfile.roll_number}
+                                            </span>
+                                          )}
                                         </>
                                       )}
                                     </div>
@@ -1266,8 +1271,8 @@ const Register = () => {
       {/* Admin Reset Password Modal */}
       {resetTargetUser && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-fadeIn">
-          <div className="bg-dark-900 border border-dark-700 w-full max-w-md rounded-2xl p-6 shadow-2xl space-y-5 relative">
-            <div className="flex items-center justify-between border-b border-dark-800 pb-4">
+          <div className="bg-dark-900 border border-dark-700 w-full max-w-md max-h-[85dvh] flex flex-col rounded-2xl shadow-2xl relative overflow-hidden">
+            <div className="flex items-center justify-between border-b border-dark-800 p-5 shrink-0">
               <div className="flex items-center gap-3">
                 <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-400">
                   <KeyRound size={20} />
@@ -1286,75 +1291,77 @@ const Register = () => {
               </button>
             </div>
 
-            <div className="bg-dark-950/60 p-3.5 rounded-xl border border-dark-800 space-y-1.5 text-xs">
-              <div className="flex justify-between">
-                <span className="text-slate-400 font-medium">Target User:</span>
-                <span className="text-white font-semibold">{resetTargetUser.email}</span>
+            <div className="p-5 overflow-y-auto flex-1 overscroll-contain space-y-4">
+              <div className="bg-dark-950/60 p-3.5 rounded-xl border border-dark-800 space-y-1.5 text-xs">
+                <div className="flex justify-between">
+                  <span className="text-slate-400 font-medium">Target User:</span>
+                  <span className="text-white font-semibold truncate ml-2">{resetTargetUser.email}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400 font-medium">Role:</span>
+                  <span className="text-amber-400 font-bold uppercase">{resetTargetUser.role}</span>
+                </div>
               </div>
-              <div className="flex justify-between">
-                <span className="text-slate-400 font-medium">Role:</span>
-                <span className="text-amber-400 font-bold uppercase">{resetTargetUser.role}</span>
-              </div>
+
+              <form onSubmit={handleAdminResetPassword} className="space-y-4">
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400">
+                      New Password
+                    </label>
+                    <button
+                      type="button"
+                      onClick={generateRandomPassword}
+                      className="text-[11px] font-bold text-primary-400 hover:text-primary-300 transition hover:underline"
+                    >
+                      ⚡ Auto-Generate
+                    </button>
+                  </div>
+                  <div className="relative">
+                    <input
+                      type={showAdminPassword ? "text" : "password"}
+                      required
+                      minLength={6}
+                      placeholder="Enter new password"
+                      value={adminNewPassword}
+                      onChange={(e) => setAdminNewPassword(e.target.value)}
+                      className="w-full pl-4 pr-10 py-2.5 rounded-xl bg-dark-950 border border-dark-800 focus:border-amber-500 text-white text-xs outline-none font-mono"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowAdminPassword(!showAdminPassword)}
+                      className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-500 hover:text-white transition"
+                    >
+                      {showAdminPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-end gap-2 pt-3 border-t border-dark-800">
+                  <button
+                    type="button"
+                    onClick={() => setResetTargetUser(null)}
+                    className="px-4 py-2 rounded-xl bg-dark-800 hover:bg-dark-750 text-slate-300 font-semibold text-xs transition"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={resettingPassword}
+                    className="px-5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-dark-950 font-bold text-xs transition flex items-center gap-1.5 shadow-lg shadow-amber-500/10 disabled:opacity-50"
+                  >
+                    {resettingPassword ? (
+                      <div className="w-4 h-4 border-2 border-dark-950/30 border-t-dark-950 rounded-full animate-spin" />
+                    ) : (
+                      <>
+                        <KeyRound size={14} />
+                        <span>Reset Password</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </form>
             </div>
-
-            <form onSubmit={handleAdminResetPassword} className="space-y-4">
-              <div>
-                <div className="flex items-center justify-between mb-1.5">
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400">
-                    New Password
-                  </label>
-                  <button
-                    type="button"
-                    onClick={generateRandomPassword}
-                    className="text-[11px] font-bold text-primary-400 hover:text-primary-300 transition hover:underline"
-                  >
-                    ⚡ Auto-Generate
-                  </button>
-                </div>
-                <div className="relative">
-                  <input
-                    type={showAdminPassword ? "text" : "password"}
-                    required
-                    minLength={6}
-                    placeholder="Enter new password"
-                    value={adminNewPassword}
-                    onChange={(e) => setAdminNewPassword(e.target.value)}
-                    className="w-full pl-4 pr-10 py-2.5 rounded-xl bg-dark-950 border border-dark-800 focus:border-amber-500 text-white text-xs outline-none font-mono"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowAdminPassword(!showAdminPassword)}
-                    className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-500 hover:text-white transition"
-                  >
-                    {showAdminPassword ? <EyeOff size={16} /> : <Eye size={16} />}
-                  </button>
-                </div>
-              </div>
-
-              <div className="flex items-center justify-end gap-2 pt-2 border-t border-dark-800">
-                <button
-                  type="button"
-                  onClick={() => setResetTargetUser(null)}
-                  className="px-4 py-2 rounded-xl bg-dark-800 hover:bg-dark-750 text-slate-300 font-semibold text-xs transition"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={resettingPassword}
-                  className="px-5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-dark-950 font-bold text-xs transition flex items-center gap-1.5 shadow-lg shadow-amber-500/10 disabled:opacity-50"
-                >
-                  {resettingPassword ? (
-                    <div className="w-4 h-4 border-2 border-dark-950/30 border-t-dark-950 rounded-full animate-spin" />
-                  ) : (
-                    <>
-                      <KeyRound size={14} />
-                      <span>Reset Password</span>
-                    </>
-                  )}
-                </button>
-              </div>
-            </form>
           </div>
         </div>
       )}

@@ -1016,102 +1016,198 @@ const ClassGrid = () => {
                   No students found matching filters.
                 </div>
               ) : (
-                <table className="w-full text-left border-collapse text-xs select-none">
-                  <thead>
-                    <tr className="border-b border-dark-800 bg-dark-950/60 text-slate-450 uppercase tracking-wider font-bold font-mono">
-                      <th className="py-3.5 px-4 rounded-tl-xl text-center w-24">Rank (Roll)</th>
-                      <th className="py-3.5 px-4">Student Name</th>
-                      <th className="py-3.5 px-4">Fee Status</th>
-                      <th className="py-3.5 px-4 text-center hidden sm:table-cell">Attendance Rate</th>
-                      <th className="py-3.5 px-4 hidden md:table-cell">Primary Phone</th>
-                      {user.role !== 'Student' && <th className="py-3.5 px-4 text-right rounded-tr-xl">Actions</th>}
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-dark-800/50">
+                <>
+                  {/* Desktop / Tablet Table View (sm and above) */}
+                  <table className="hidden sm:table w-full text-left border-collapse text-xs select-none">
+                    <thead>
+                      <tr className="border-b border-dark-800 bg-dark-950/60 text-slate-455 uppercase tracking-wider font-bold font-mono">
+                        <th className="py-3.5 px-4 rounded-tl-xl text-center w-24">Rank (Roll)</th>
+                        <th className="py-3.5 px-4">Student Name</th>
+                        <th className="py-3.5 px-4">Fee Status</th>
+                        <th className="py-3.5 px-4 text-center">Attendance Rate</th>
+                        <th className="py-3.5 px-4 hidden md:table-cell">Primary Phone</th>
+                        {user.role !== 'Student' && <th className="py-3.5 px-4 text-right rounded-tr-xl">Actions</th>}
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-dark-800/50">
+                      {filteredStudents.map((student) => {
+                        const attRate = getAttendanceRate(student);
+                        const attColor = attRate >= 75 
+                          ? 'text-emerald-400 bg-emerald-500/10' 
+                          : attRate >= 50 
+                            ? 'text-amber-400 bg-amber-500/10' 
+                            : 'text-rose-400 bg-rose-500/10';
+
+                        return (
+                          <tr 
+                            key={student._id}
+                            onClick={() => setSelectedStudent(student)}
+                            className={`group cursor-pointer transition-all duration-150 hover:bg-dark-900/40 ${selectedStudent?._id === student._id ? 'bg-primary-600/5 border-l-2 border-l-primary-500' : ''}`}
+                          >
+                            <td className="py-4 px-4 font-mono font-bold text-slate-350 text-center group-hover:text-white transition">
+                              <div className="flex items-center justify-center gap-1.5">
+                                <span className="w-6 text-right">{student.roll_number}</span>
+                                {student.roll_number === '01' ? (
+                                  <span className="text-amber-400 text-sm select-none" title="Top Ranked Progress">👑</span>
+                                ) : (
+                                  <span className="w-5" />
+                                )}
+                              </div>
+                            </td>
+                            <td className="py-4 px-4">
+                              <div className="font-semibold text-white group-hover:text-primary-400 transition">{student.name}</div>
+                              <span className="text-[10px] text-slate-500 block mt-0.5">{student.parent_name} (Parent)</span>
+                            </td>
+                            <td className="py-4 px-4">
+                              {student.is_free_tier ? (
+                                <span className="px-2 py-0.5 rounded text-[10px] font-extrabold uppercase tracking-wide bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                                  Free Tier
+                                </span>
+                              ) : (
+                                <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                  student.fee_status === 'Paid' 
+                                    ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/20' 
+                                    : student.fee_status === 'Partial/Pending' 
+                                      ? 'bg-amber-500/15 text-amber-400 border border-amber-500/20' 
+                                      : 'bg-rose-500/15 text-rose-400 border border-rose-500/20'
+                                }`}>
+                                  {student.fee_status}
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-4 px-4 text-center">
+                              <span className={`px-2 py-0.5 rounded text-xs font-bold ${attColor}`}>
+                                {attRate}%
+                              </span>
+                            </td>
+                            <td className="py-4 px-4 text-slate-300 font-mono text-xs hidden md:table-cell">{student.primary_contact}</td>
+                            
+                            {user.role !== 'Student' && (
+                              <td className="py-4 px-4 text-right" onClick={(e) => e.stopPropagation()}>
+                                <div className="flex justify-end gap-1.5">
+                                  <button 
+                                    onClick={() => openTestModal(student)}
+                                    title="Log exam marks"
+                                    className="p-1.5 rounded-lg bg-dark-900 border border-dark-850 text-indigo-400 hover:bg-indigo-600/10 hover:text-white transition"
+                                  >
+                                    <Award size={14} />
+                                  </button>
+                                  <button 
+                                    onClick={() => openEditModal(student)}
+                                    title="Edit profile"
+                                    className="p-1.5 rounded-lg bg-dark-900 border border-dark-850 text-sky-400 hover:bg-sky-600/10 hover:text-white transition"
+                                  >
+                                    <Edit size={14} />
+                                  </button>
+                                  <button 
+                                    onClick={() => handleDeleteStudent(student._id)}
+                                    title="Delete student"
+                                    className="p-1.5 rounded-lg bg-dark-900 border border-dark-850 text-rose-400 hover:bg-rose-600/10 hover:text-white transition"
+                                  >
+                                    <Trash2 size={14} />
+                                  </button>
+                                </div>
+                              </td>
+                            )}
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+
+                  {/* Mobile Roster Cards View for Small Screens (< sm) */}
+                  <div className="block sm:hidden space-y-3 p-3">
                     {filteredStudents.map((student) => {
                       const attRate = getAttendanceRate(student);
                       const attColor = attRate >= 75 
-                        ? 'text-emerald-400 bg-emerald-500/10' 
+                        ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20' 
                         : attRate >= 50 
-                          ? 'text-amber-400 bg-amber-500/10' 
-                          : 'text-rose-400 bg-rose-500/10';
+                          ? 'text-amber-400 bg-amber-500/10 border-amber-500/20' 
+                          : 'text-rose-400 bg-rose-500/10 border-rose-500/20';
+                      const isSelected = selectedStudent?._id === student._id;
 
                       return (
-                        <tr 
+                        <div
                           key={student._id}
                           onClick={() => setSelectedStudent(student)}
-                          className={`group cursor-pointer transition-all duration-150 hover:bg-dark-900/40 ${selectedStudent?._id === student._id ? 'bg-primary-600/5 border-l-2 border-l-primary-500' : ''}`}
+                          className={`p-3.5 rounded-xl border transition-all duration-150 cursor-pointer ${
+                            isSelected 
+                              ? 'bg-primary-600/10 border-primary-500/60 shadow-lg shadow-primary-500/5' 
+                              : 'bg-dark-900/60 border-dark-850 hover:bg-dark-900/90'
+                          }`}
                         >
-                          <td className="py-4 px-4 font-mono font-bold text-slate-350 text-center group-hover:text-white transition">
-                            <div className="flex items-center justify-center gap-1.5">
-                              <span className="w-6 text-right">{student.roll_number}</span>
-                              {student.roll_number === '01' ? (
-                                <span className="text-amber-400 text-sm select-none" title="Top Ranked Progress">👑</span>
-                              ) : (
-                                <span className="w-5" />
-                              )}
+                          <div className="flex justify-between items-start gap-2">
+                            <div className="flex items-center gap-2.5">
+                              <span className="w-8 h-8 rounded-lg bg-dark-950 border border-dark-800 font-mono font-bold text-xs flex items-center justify-center text-primary-400 shrink-0">
+                                {student.roll_number}
+                              </span>
+                              <div>
+                                <div className="font-semibold text-white text-xs flex items-center gap-1.5">
+                                  <span>{student.name}</span>
+                                  {student.roll_number === '01' && <span className="text-amber-400 text-xs">👑</span>}
+                                </div>
+                                <span className="text-[10px] text-slate-400 block mt-0.5">{student.parent_name} (Parent)</span>
+                              </div>
                             </div>
-                          </td>
-                          <td className="py-4 px-4">
-                            <div className="font-semibold text-white group-hover:text-primary-400 transition">{student.name}</div>
-                            <span className="text-[10px] text-slate-500 block mt-0.5">{student.parent_name} (Parent)</span>
-                          </td>
-                          <td className="py-4 px-4">
-                            {student.is_free_tier ? (
-                              <span className="px-2 py-0.5 rounded text-[10px] font-extrabold uppercase tracking-wide bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
-                                Free Tier
+                            
+                            <div className="flex flex-col items-end gap-1 shrink-0">
+                              {student.is_free_tier ? (
+                                <span className="px-2 py-0.5 rounded text-[9px] font-extrabold uppercase bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                                  Free Tier
+                                </span>
+                              ) : (
+                                <span className={`px-2 py-0.5 rounded text-[9px] font-bold border ${
+                                  student.fee_status === 'Paid' 
+                                    ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/20' 
+                                    : student.fee_status === 'Partial/Pending' 
+                                      ? 'bg-amber-500/15 text-amber-400 border-amber-500/20' 
+                                      : 'bg-rose-500/15 text-rose-400 border-rose-500/20'
+                                }`}>
+                                  {student.fee_status}
+                                </span>
+                              )}
+                              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded border ${attColor}`}>
+                                {attRate}% Att.
                               </span>
-                            ) : (
-                              <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                                student.fee_status === 'Paid' 
-                                  ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/20' 
-                                  : student.fee_status === 'Partial/Pending' 
-                                    ? 'bg-amber-500/15 text-amber-400 border border-amber-500/20' 
-                                    : 'bg-rose-500/15 text-rose-400 border border-rose-500/20'
-                              }`}>
-                                {student.fee_status}
-                              </span>
-                            )}
-                          </td>
-                          <td className="py-4 px-4 text-center hidden sm:table-cell">
-                            <span className={`px-2 py-0.5 rounded text-xs font-bold ${attColor}`}>
-                              {attRate}%
+                            </div>
+                          </div>
+
+                          {/* Contact info and actions bar */}
+                          <div className="flex items-center justify-between pt-2.5 mt-2.5 border-t border-dark-800/60 text-[11px]">
+                            <span className="font-mono text-slate-400 text-[10px]">
+                              {student.primary_contact || 'No phone'}
                             </span>
-                          </td>
-                          <td className="py-4 px-4 text-slate-300 font-mono text-xs hidden md:table-cell">{student.primary_contact}</td>
-                          
-                          {user.role !== 'Student' && (
-                            <td className="py-4 px-4 text-right" onClick={(e) => e.stopPropagation()}>
-                              <div className="flex justify-end gap-1.5">
+                            {user.role !== 'Student' && (
+                              <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
                                 <button 
                                   onClick={() => openTestModal(student)}
                                   title="Log exam marks"
-                                  className="p-1.5 rounded-lg bg-dark-900 border border-dark-850 text-indigo-400 hover:bg-indigo-600/10 hover:text-white transition"
+                                  className="p-1.5 rounded-lg bg-dark-950 border border-dark-800 text-indigo-400 hover:bg-indigo-600/10 transition"
                                 >
                                   <Award size={14} />
                                 </button>
                                 <button 
                                   onClick={() => openEditModal(student)}
                                   title="Edit profile"
-                                  className="p-1.5 rounded-lg bg-dark-900 border border-dark-850 text-sky-400 hover:bg-sky-600/10 hover:text-white transition"
+                                  className="p-1.5 rounded-lg bg-dark-950 border border-dark-800 text-sky-400 hover:bg-sky-600/10 transition"
                                 >
                                   <Edit size={14} />
                                 </button>
                                 <button 
                                   onClick={() => handleDeleteStudent(student._id)}
                                   title="Delete student"
-                                  className="p-1.5 rounded-lg bg-dark-900 border border-dark-850 text-rose-400 hover:bg-rose-600/10 hover:text-white transition"
+                                  className="p-1.5 rounded-lg bg-dark-950 border border-dark-800 text-rose-400 hover:bg-rose-600/10 transition"
                                 >
                                   <Trash2 size={14} />
                                 </button>
                               </div>
-                            </td>
-                          )}
-                        </tr>
+                            )}
+                          </div>
+                        </div>
                       );
                     })}
-                  </tbody>
-                </table>
+                  </div>
+                </>
               )}
             </div>
           </div>
@@ -1378,8 +1474,8 @@ const ClassGrid = () => {
       {/* --- ADD STUDENT MODAL --- */}
       {showAddModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
-          <div className="glass-panel w-full max-w-lg rounded-2xl border border-dark-800 overflow-hidden shadow-2xl relative animate-scaleUp">
-            <div className="p-6 border-b border-dark-800 flex justify-between items-center">
+          <div className="glass-panel w-full max-w-lg max-h-[85dvh] flex flex-col rounded-2xl border border-dark-800 overflow-hidden shadow-2xl relative animate-scaleUp">
+            <div className="p-4 sm:p-6 border-b border-dark-800 flex justify-between items-center shrink-0">
               <h3 className="text-base font-bold text-white font-outfit flex items-center gap-2">
                 <UserPlus size={18} className="text-primary-500" />
                 <span>Add Student to Class {class_level}</span>
@@ -1390,12 +1486,12 @@ const ClassGrid = () => {
             </div>
             
             {submitError && (
-              <div className="mx-6 mt-4 p-3 rounded-lg bg-rose-500/10 border border-rose-500/20 text-rose-400 text-xs">
+              <div className="mx-4 sm:mx-6 mt-4 p-3 rounded-lg bg-rose-500/10 border border-rose-500/20 text-rose-400 text-xs">
                 {submitError}
               </div>
             )}
 
-            <form onSubmit={handleAddStudent} className="p-6 space-y-4">
+            <form onSubmit={handleAddStudent} className="p-4 sm:p-6 space-y-4 overflow-y-auto flex-1 overscroll-contain">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-xs font-semibold text-slate-400 mb-1.5">Full Name</label>
@@ -1513,8 +1609,8 @@ const ClassGrid = () => {
       {/* --- EDIT STUDENT MODAL --- */}
       {showEditModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
-          <div className="glass-panel w-full max-w-lg rounded-2xl border border-dark-800 overflow-hidden shadow-2xl relative animate-scaleUp">
-            <div className="p-6 border-b border-dark-800 flex justify-between items-center">
+          <div className="glass-panel w-full max-w-lg max-h-[85dvh] flex flex-col rounded-2xl border border-dark-800 overflow-hidden shadow-2xl relative animate-scaleUp">
+            <div className="p-4 sm:p-6 border-b border-dark-800 flex justify-between items-center shrink-0">
               <h3 className="text-base font-bold text-white font-outfit">Edit Student Profile</h3>
               <button onClick={() => setShowEditModal(false)} className="text-slate-500 hover:text-white transition">
                 <X size={20} />
@@ -1522,12 +1618,12 @@ const ClassGrid = () => {
             </div>
 
             {submitError && (
-              <div className="mx-6 mt-4 p-3 rounded-lg bg-rose-500/10 border border-rose-500/20 text-rose-400 text-xs">
+              <div className="mx-4 sm:mx-6 mt-4 p-3 rounded-lg bg-rose-500/10 border border-rose-500/20 text-rose-400 text-xs">
                 {submitError}
               </div>
             )}
 
-            <form onSubmit={handleEditStudent} className="p-6 space-y-4">
+            <form onSubmit={handleEditStudent} className="p-4 sm:p-6 space-y-4 overflow-y-auto flex-1 overscroll-contain">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-xs font-semibold text-slate-400 mb-1.5">Full Name</label>
@@ -1646,8 +1742,8 @@ const ClassGrid = () => {
       {/* --- ADD TEST MARKS MODAL --- */}
       {showTestModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
-          <div className="glass-panel w-full max-w-md rounded-2xl border border-dark-800 overflow-hidden shadow-2xl relative animate-scaleUp">
-            <div className="p-6 border-b border-dark-800 flex justify-between items-center">
+          <div className="glass-panel w-full max-w-md max-h-[85dvh] flex flex-col rounded-2xl border border-dark-800 overflow-hidden shadow-2xl relative animate-scaleUp">
+            <div className="p-4 sm:p-6 border-b border-dark-800 flex justify-between items-center shrink-0">
               <h3 className="text-base font-bold text-white font-outfit">Log Exam Marks - {selectedStudent?.name}</h3>
               <button onClick={() => setShowTestModal(false)} className="text-slate-500 hover:text-white transition">
                 <X size={20} />
@@ -1655,12 +1751,12 @@ const ClassGrid = () => {
             </div>
 
             {submitError && (
-              <div className="mx-6 mt-4 p-3 rounded-lg bg-rose-500/10 border border-rose-500/20 text-rose-400 text-xs">
+              <div className="mx-4 sm:mx-6 mt-4 p-3 rounded-lg bg-rose-500/10 border border-rose-500/20 text-rose-400 text-xs">
                 {submitError}
               </div>
             )}
 
-            <form onSubmit={handleAddTestScore} className="p-6 space-y-4">
+            <form onSubmit={handleAddTestScore} className="p-4 sm:p-6 space-y-4 overflow-y-auto flex-1 overscroll-contain">
               <div>
                 <label className="block text-xs font-semibold text-slate-400 mb-1.5">Score Category</label>
                 <select
@@ -1917,8 +2013,8 @@ const ClassGrid = () => {
       {/* --- MANAGE SUBJECTS MODAL --- */}
       {showSubjectModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
-          <div className="glass-panel w-full max-w-md rounded-2xl border border-dark-800 overflow-hidden shadow-2xl relative animate-scaleUp">
-            <div className="p-6 border-b border-dark-800 flex justify-between items-center">
+          <div className="glass-panel w-full max-w-md max-h-[85dvh] flex flex-col rounded-2xl border border-dark-800 overflow-hidden shadow-2xl relative animate-scaleUp">
+            <div className="p-4 sm:p-6 border-b border-dark-800 flex justify-between items-center shrink-0">
               <h3 className="text-base font-bold text-white font-outfit flex items-center gap-2">
                 <BookOpen size={18} className="text-primary-500" />
                 <span>Manage Subjects - Class {class_level}</span>
@@ -1928,7 +2024,7 @@ const ClassGrid = () => {
               </button>
             </div>
 
-            <div className="p-6 space-y-4">
+            <div className="p-4 sm:p-6 space-y-4 overflow-y-auto flex-1 overscroll-contain">
               {subjectError && (
                 <div className="p-3 rounded-lg bg-rose-500/10 border border-rose-500/20 text-rose-400 text-xs">
                   {subjectError}

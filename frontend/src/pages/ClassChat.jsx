@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
+import { useLocation } from 'react-router-dom';
 import axios from 'axios';
 import { useAuth } from '../context/AuthContext';
 import { socket } from '../config/socket';
@@ -30,7 +31,8 @@ import {
   CornerUpLeft,
   Eye,
   EyeOff,
-  Menu
+  Menu,
+  Zap
 } from 'lucide-react';
 
 // Custom Voice Message Audio Player Component (EduStride Styling)
@@ -120,8 +122,10 @@ const ClassChat = ({ setAppSidebarOpen }) => {
     allowOnScreenToasts,
     toggleOnScreenToasts
   } = useCall();
-  
-  const [currentRoom, setCurrentRoom] = useState(callContextRoom || user.studentProfile?.class_level || '');
+  const location = useLocation();
+  const targetRoomState = location.state?.targetRoom;
+  const [currentRoom, setCurrentRoom] = useState(targetRoomState || callContextRoom || user.studentProfile?.class_level || '');
+  const [roomMetadataMap, setRoomMetadataMap] = useState({});
 
   // Sync current room level with global CallContext
   useEffect(() => {
@@ -134,6 +138,13 @@ const ClassChat = ({ setAppSidebarOpen }) => {
       setCurrentRoom(callContextRoom);
     }
   }, [callContextRoom]);
+
+  useEffect(() => {
+    if (targetRoomState) {
+      setCurrentRoom(targetRoomState);
+      setShowSidebarOnMobile(false);
+    }
+  }, [targetRoomState]);
   const [messages, setMessages] = useState([]);
   const [typedMessage, setTypedMessage] = useState('');
   const [rooms, setRooms] = useState([]);
@@ -379,19 +390,49 @@ const ClassChat = ({ setAppSidebarOpen }) => {
     return '';
   };
 
-  // Fetch rooms on mount
+  // Fetch rooms on mount (Classes + Special Batches)
   useEffect(() => {
     const fetchRooms = async () => {
       try {
-        const res = await axios.get('/api/classes');
-        if (res.data.success && Array.isArray(res.data.data)) {
-          setRooms(res.data.data);
+        const [classesRes, batchesRes] = await Promise.all([
+          axios.get('/api/classes'),
+          axios.get('/api/special-batches')
+        ]);
+
+        const classRooms = classesRes.data.success && Array.isArray(classesRes.data.data) ? classesRes.data.data : [];
+        const batchList = batchesRes.data.success && Array.isArray(batchesRes.data.data) ? batchesRes.data.data : [];
+
+        const metaMap = {};
+        classRooms.forEach(c => {
+          metaMap[c] = { name: `Class ${c} Lounge`, isBatch: false };
+        });
+
+        const batchRooms = [];
+        batchList.forEach(b => {
+          const roomId = `BATCH_${b._id}`;
+          batchRooms.push(roomId);
+          metaMap[roomId] = { 
+            name: `⚡ ${b.name}`, 
+            subject: b.subject, 
+            isBatch: true, 
+            enrolled: b.students?.some(s => s && (s._id || s).toString() === user.studentProfile?._id?.toString()) 
+          };
+        });
+
+        setRoomMetadataMap(metaMap);
+        const combined = [...classRooms, ...batchRooms];
+        setRooms(combined);
+
+        if (targetRoomState) {
+          setCurrentRoom(targetRoomState);
+          setShowSidebarOnMobile(false);
+        } else {
           const studentClass = user.role === 'Student' ? user.studentProfile?.class_level : null;
-          if (studentClass && res.data.data.includes(studentClass)) {
+          if (studentClass && combined.includes(studentClass)) {
             setCurrentRoom(studentClass);
             setShowSidebarOnMobile(false);
-          } else if (res.data.data.length > 0 && !currentRoom) {
-            setCurrentRoom(res.data.data[0]);
+          } else if (combined.length > 0 && !currentRoom) {
+            setCurrentRoom(combined[0]);
           }
         }
       } catch (err) {
@@ -808,7 +849,7 @@ const ClassChat = ({ setAppSidebarOpen }) => {
           <div className="flex items-center gap-2">
             <button 
               onClick={() => setAppSidebarOpen && setAppSidebarOpen(true)}
-              className="p-1.5 rounded-lg bg-dark-900 border border-dark-800 text-slate-350 hover:text-white md:hidden cursor-pointer shrink-0"
+              className="p-1.5 rounded-lg bg-dark-900 border border-dark-800 text-slate-350 hover:text-white lg:hidden cursor-pointer shrink-0"
               title="Open Navigation"
             >
               <Menu size={16} />
@@ -921,8 +962,11 @@ const ClassChat = ({ setAppSidebarOpen }) => {
         {/* Rooms List */}
         <div className="flex-1 overflow-y-auto p-3 space-y-1.5">
           {filteredRooms.map((room) => {
-            const isDisabled = user.role === 'Student' && user.studentProfile?.class_level !== room;
+            const isBatch = room.startsWith('BATCH_');
+            const meta = roomMetadataMap[room];
+            const isDisabled = user.role === 'Student' && (isBatch ? !meta?.enrolled : user.studentProfile?.class_level !== room);
             const isSelected = currentRoom === room;
+            const roomDisplayName = meta?.name || (isBatch ? 'Special Batch Room' : `Class ${room} Lounge`);
             
             return (
               <div
@@ -942,14 +986,16 @@ const ClassChat = ({ setAppSidebarOpen }) => {
                 `}
               >
                 {/* Avatar */}
-                <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-primary-600 to-indigo-500 flex items-center justify-center text-white shrink-0 shadow-md shadow-primary-500/10">
-                  <GraduationCap size={18} />
+                <div className={`w-10 h-10 rounded-xl flex items-center justify-center text-white shrink-0 shadow-md ${
+                  isBatch ? 'bg-gradient-to-tr from-amber-500 to-primary-600 shadow-amber-500/10' : 'bg-gradient-to-tr from-primary-600 to-indigo-500 shadow-primary-500/10'
+                }`}>
+                  {isBatch ? <Zap size={18} /> : <GraduationCap size={18} />}
                 </div>
 
                 {/* Details */}
                 <div className="flex-1 overflow-hidden">
                   <div className="flex justify-between items-baseline">
-                    <h4 className="text-xs font-bold text-white truncate font-outfit">Class {room} Lounge</h4>
+                    <h4 className="text-xs font-bold text-white truncate font-outfit">{roomDisplayName}</h4>
                     <div className="flex flex-col items-end gap-1 shrink-0">
                       <span className="text-[9px] text-slate-500 font-mono">{getLastMessageTime(room)}</span>
                       {unreadCounts[room] > 0 && (
@@ -994,7 +1040,7 @@ const ClassChat = ({ setAppSidebarOpen }) => {
                 {user.role === 'Student' ? (
                   <button 
                     onClick={() => setAppSidebarOpen && setAppSidebarOpen(true)}
-                    className="p-1.5 rounded-xl hover:bg-dark-900/60 text-slate-400 transition md:hidden mr-1 cursor-pointer"
+                    className="p-1.5 rounded-xl hover:bg-dark-900/60 text-slate-400 transition lg:hidden mr-1 cursor-pointer"
                     title="Open Navigation"
                   >
                     <Menu size={18} />
@@ -1010,8 +1056,10 @@ const ClassChat = ({ setAppSidebarOpen }) => {
                 )}
                 
                 {/* Active chat avatar */}
-                <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-primary-600 to-indigo-500 flex items-center justify-center text-white shrink-0 shadow-md shadow-primary-500/10">
-                  <GraduationCap size={18} />
+                <div className={`w-10 h-10 rounded-xl flex items-center justify-center text-white shrink-0 shadow-md ${
+                  currentRoom.startsWith('BATCH_') ? 'bg-gradient-to-tr from-amber-500 to-primary-600 shadow-amber-500/10' : 'bg-gradient-to-tr from-primary-600 to-indigo-500 shadow-primary-500/10'
+                }`}>
+                  {currentRoom.startsWith('BATCH_') ? <Zap size={18} /> : <GraduationCap size={18} />}
                 </div>
                 
                 <div 
@@ -1020,7 +1068,7 @@ const ClassChat = ({ setAppSidebarOpen }) => {
                   title="Click to view online lounge roster"
                 >
                   <h3 className="text-xs font-bold text-white font-outfit flex items-center gap-2">
-                    Class {currentRoom} Lounge
+                    {roomMetadataMap[currentRoom]?.name || (currentRoom.startsWith('BATCH_') ? 'Special Batch Lounge' : `Class ${currentRoom} Lounge`)}
                     <span className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 text-[8px] font-extrabold px-1.5 py-0.5 rounded-full font-mono flex items-center gap-1.5 shrink-0 shadow-sm shadow-emerald-500/5 select-none">
                       <span className="relative flex h-1.5 w-1.5">
                         <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
@@ -1217,7 +1265,7 @@ const ClassChat = ({ setAppSidebarOpen }) => {
             <div 
               ref={messagesContainerRef} 
               onScroll={handleChatScroll}
-              className="flex-1 overflow-y-auto p-4 space-y-3.5 edustride-chat-bg flex flex-col relative"
+              className="flex-1 overflow-y-auto p-3 sm:p-4 space-y-3.5 edustride-chat-bg flex flex-col relative overscroll-contain"
             >
               <div className="self-center bg-dark-900/80 backdrop-blur border border-dark-800 text-slate-400 text-[10px] font-medium px-3.5 py-1 rounded-full shadow-sm mb-3 select-none flex items-center gap-1.5 font-outfit">
                 <Lock size={10} className="text-primary-400" />
@@ -1639,7 +1687,7 @@ const ClassChat = ({ setAppSidebarOpen }) => {
                         <textarea
                           ref={textareaRef}
                           rows={1}
-                          placeholder="Type a message... (Shift + Enter for line break)"
+                          placeholder="Type a message..."
                           value={typedMessage}
                           onChange={(e) => {
                             setTypedMessage(e.target.value);
@@ -1734,7 +1782,7 @@ const ClassChat = ({ setAppSidebarOpen }) => {
             onClick={() => setShowMembersPanel(false)}
             className="fixed inset-0 bg-black/45 backdrop-blur-[1px] md:hidden z-25"
           />
-          <div className="w-64 bg-dark-950 border-l border-dark-800/80 flex flex-col shrink-0 z-30 absolute right-0 top-0 bottom-0 md:relative h-full animate-fadeIn shadow-2xl">
+          <div className="w-64 max-w-[85vw] bg-dark-950 border-l border-dark-800/80 flex flex-col shrink-0 z-30 absolute right-0 top-0 bottom-0 md:relative h-full animate-fadeIn shadow-2xl">
             <div className="p-4 bg-dark-900/40 border-b border-dark-800/80 flex justify-between items-center text-slate-100 shrink-0">
               <div className="flex items-center gap-2">
                 <span className="text-xs font-bold font-outfit uppercase tracking-wider text-slate-300">Lounge Roster</span>

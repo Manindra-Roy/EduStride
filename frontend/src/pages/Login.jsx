@@ -31,7 +31,7 @@ const Login = () => {
   };
 
   return (
-    <div className="min-h-screen flex flex-col justify-center items-center bg-[#07080a] text-slate-100 relative px-4 overflow-hidden bg-grid-pattern">
+    <div className="min-h-[100dvh] py-8 flex flex-col justify-center items-center bg-[#07080a] text-slate-100 relative px-4 overflow-x-hidden bg-grid-pattern">
       {/* Background Ambient Glow Nodes */}
       <div className="absolute -top-48 -left-48 w-[500px] h-[500px] rounded-full bg-primary-600/10 blur-[150px] pointer-events-none z-0 animate-pulse-slow" />
       <div className="absolute -bottom-48 -right-48 w-[500px] h-[500px] rounded-full bg-indigo-600/10 blur-[150px] pointer-events-none z-0 animate-pulse-slow" />

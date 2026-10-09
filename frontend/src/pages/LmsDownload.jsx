@@ -379,8 +379,8 @@ const LmsDownload = () => {
       {/* --- HANDOUT UPLOAD MODAL --- */}
       {showUploadModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
-          <div className="glass-panel w-full max-w-md rounded-2xl border border-dark-800 overflow-hidden shadow-2xl relative animate-scaleUp">
-            <div className="p-6 border-b border-dark-800 flex justify-between items-center">
+          <div className="glass-panel w-full max-w-md max-h-[85dvh] flex flex-col rounded-2xl border border-dark-800 overflow-hidden shadow-2xl relative animate-scaleUp">
+            <div className="p-4 sm:p-6 border-b border-dark-800 flex justify-between items-center shrink-0">
               <h3 className="text-base font-bold text-white font-outfit">Publish Learning Material</h3>
               <button onClick={() => setShowUploadModal(false)} className="text-slate-500 hover:text-white transition">
                 <X size={20} />
@@ -388,12 +388,12 @@ const LmsDownload = () => {
             </div>
 
             {error && (
-              <div className="mx-6 mt-4 p-3 rounded-lg bg-rose-500/10 border border-rose-500/20 text-rose-400 text-xs">
+              <div className="mx-4 sm:mx-6 mt-4 p-3 rounded-lg bg-rose-500/10 border border-rose-500/20 text-rose-400 text-xs">
                 {error}
               </div>
             )}
 
-            <form onSubmit={handleUploadSubmit} className="p-6 space-y-4">
+            <form onSubmit={handleUploadSubmit} className="p-4 sm:p-6 space-y-4 overflow-y-auto flex-1 overscroll-contain">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-xs font-semibold text-slate-400 mb-1.5">Class Target</label>

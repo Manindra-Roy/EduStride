@@ -457,19 +457,20 @@ export const CallProvider = ({ children }) => {
       {children}
       
       {/* Global Call Notification Toast */}
+      {/* Incoming Call Notification Banner */}
       {incomingCall && location.pathname !== '/chats' && !activeCall && (
-        <div className="fixed top-5 right-5 z-[200] max-w-sm w-full bg-dark-900/90 backdrop-blur-md border border-emerald-500/30 p-4 rounded-2xl flex items-center justify-between gap-4 shadow-2xl animate-scaleUp text-slate-100 select-none">
-          <div className="flex items-center gap-3">
-            <div className="p-3.5 rounded-xl bg-emerald-600/10 text-emerald-400 border border-emerald-500/10 relative shrink-0">
+        <div className="fixed top-4 sm:top-5 right-4 sm:right-5 z-[200] max-w-sm w-[calc(100vw-2rem)] sm:w-full bg-dark-900/90 backdrop-blur-md border border-emerald-500/30 p-3.5 sm:p-4 rounded-2xl flex items-center justify-between gap-3 sm:gap-4 shadow-2xl animate-scaleUp text-slate-100 select-none">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="p-3 sm:p-3.5 rounded-xl bg-emerald-600/10 text-emerald-400 border border-emerald-500/10 relative shrink-0">
               <span className="absolute -top-0.5 -right-0.5 flex h-2 w-2">
                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-450 opacity-75"></span>
                 <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
               </span>
               <Phone size={18} />
             </div>
-            <div>
-              <h4 className="text-xs font-bold text-white font-outfit">Active Voice Call</h4>
-              <p className="text-[10px] text-slate-400 mt-1 leading-snug">
+            <div className="min-w-0">
+              <h4 className="text-xs font-bold text-white font-outfit truncate">Active Voice Call</h4>
+              <p className="text-[10px] text-slate-400 mt-0.5 leading-snug line-clamp-2">
                 {incomingCall.caller_name} is broadcasting in Class {incomingCall.class_level} Lounge.
               </p>
             </div>
@@ -481,13 +482,13 @@ export const CallProvider = ({ children }) => {
                 navigate('/chats');
                 setIncomingCall(null);
               }}
-              className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-555 text-[10px] font-bold text-white transition cursor-pointer text-center"
+              className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-555 text-[10px] font-bold text-white transition cursor-pointer text-center active:scale-95"
             >
               Join Call
             </button>
             <button
               onClick={() => setIncomingCall(null)}
-              className="px-3 py-1.5 rounded-lg bg-dark-955/60 border border-dark-800 hover:bg-dark-800 text-[10px] font-semibold text-slate-400 hover:text-white transition cursor-pointer text-center"
+              className="px-3 py-1.5 rounded-lg bg-dark-955/60 border border-dark-800 hover:bg-dark-800 text-[10px] font-semibold text-slate-400 hover:text-white transition cursor-pointer text-center active:scale-95"
             >
               Dismiss
             </button>
@@ -586,26 +587,27 @@ export const CallProvider = ({ children }) => {
 
       {/* Floating Call Control Widget (When active call and not on chat page) */}
       {activeCall && location.pathname !== '/chats' && (
-        <div className="fixed bottom-5 right-5 z-[200] bg-dark-900/90 backdrop-blur-md border border-emerald-500/30 p-3.5 rounded-2xl flex items-center gap-4 shadow-2xl animate-scaleUp text-slate-100 select-none max-w-sm">
-          <div className="flex items-center gap-2.5">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-emerald-600 to-teal-500 flex items-center justify-center text-white relative shrink-0 shadow-lg shadow-emerald-950/20">
+        <div className="fixed bottom-4 sm:bottom-5 right-4 sm:right-5 z-[200] bg-dark-900/90 backdrop-blur-md border border-emerald-500/30 p-3 sm:p-3.5 rounded-2xl flex items-center justify-between sm:justify-start gap-3 sm:gap-4 shadow-2xl animate-scaleUp text-slate-100 select-none max-w-[calc(100vw-2rem)] sm:max-w-sm">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl bg-gradient-to-tr from-emerald-600 to-teal-500 flex items-center justify-center text-white relative shrink-0 shadow-lg shadow-emerald-950/20">
               <span className="absolute -top-0.5 -right-0.5 flex h-2.5 w-2.5">
                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
                 <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
               </span>
-              <Radio size={18} className="animate-pulse" />
+              <Radio size={16} className="animate-pulse sm:hidden" />
+              <Radio size={18} className="animate-pulse hidden sm:block" />
             </div>
-            <div>
-              <h4 className="text-xs font-bold text-white font-outfit">Lounge Call Active</h4>
-              <p className="text-[10px] text-slate-400 font-medium font-mono mt-0.5">
+            <div className="min-w-0">
+              <h4 className="text-xs font-bold text-white font-outfit truncate">Lounge Call Active</h4>
+              <p className="text-[10px] text-slate-400 font-medium font-mono mt-0.5 truncate">
                 ⏱ {formatCallDuration(callDuration)} • Class {currentRoom}
               </p>
             </div>
           </div>
           
-          <div className="h-6 w-[1px] bg-dark-800 shrink-0" />
+          <div className="h-6 w-[1px] bg-dark-800 shrink-0 hidden sm:block" />
           
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
             <button
               onClick={toggleMute}
               className={`p-2 rounded-lg border transition active:scale-95 cursor-pointer ${

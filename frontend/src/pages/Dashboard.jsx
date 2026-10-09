@@ -14,7 +14,12 @@ import {
   Calendar,
   ChevronRight,
   User,
-  MessageSquare
+  MessageSquare,
+  Zap,
+  Award,
+  FileText,
+  ExternalLink,
+  ShieldCheck
 } from 'lucide-react';
 import { 
   BarChart, 
@@ -110,6 +115,8 @@ const Dashboard = () => {
   const [rightPanelTab, setRightPanelTab] = useState('scores'); // 'scores' or 'attendance'
   const [syllabusProgress, setSyllabusProgress] = useState([]);
 
+  const [mySpecialBatches, setMySpecialBatches] = useState([]);
+
   useEffect(() => {
     const fetchData = async () => {
       try {
@@ -128,6 +135,15 @@ const Dashboard = () => {
               setStudentDetails(res.data.data);
               studentClass = res.data.data.class_level;
             }
+          }
+          // Fetch special batches for student
+          try {
+            const spRes = await axios.get('/api/special-batches');
+            if (spRes.data.success) {
+              setMySpecialBatches(spRes.data.data || []);
+            }
+          } catch (spErr) {
+            console.error('Failed to load special batches for student dashboard:', spErr);
           }
           // Fetch daily attendance logs
           if (user.studentProfile?._id) {
@@ -399,6 +415,137 @@ const Dashboard = () => {
               </a>
             </div>
           </div>
+        </div>
+
+        {/* --- MERGED SPECIAL BATCHES SECTION FOR STUDENT --- */}
+        <div className="glass-panel p-4 sm:p-6 rounded-2xl border border-dark-800/80 space-y-4 shadow-xl">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-dark-800/60 pb-3 gap-3">
+            <div className="flex items-center gap-2.5">
+              <span className="p-2 rounded-xl bg-primary-500/10 text-primary-400 border border-primary-500/20 shrink-0">
+                <Zap size={18} className="animate-pulse" />
+              </span>
+              <div>
+                <h3 className="text-base font-extrabold text-white font-outfit">
+                  Enrolled Special Batches & Coaching Cohorts
+                </h3>
+                <p className="text-xs text-slate-400">
+                  Your specialized Foundation, Olympiad, and Remedial batch enrollments
+                </p>
+              </div>
+            </div>
+            <span className="text-xs font-bold font-mono px-3 py-1 rounded-xl bg-primary-500/10 text-primary-400 border border-primary-500/20 self-start sm:self-auto shrink-0">
+              {mySpecialBatches.length} Enrolled
+            </span>
+          </div>
+
+          {mySpecialBatches.length === 0 ? (
+            <div className="p-6 text-center text-xs text-slate-500 bg-dark-950/40 rounded-xl border border-dark-850">
+              You are currently not enrolled in any extra special coaching batches.
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {mySpecialBatches.map(batch => {
+                const currentStudentId = user?.studentProfile?._id || studentDetails?._id;
+                const myRecord = batch.students?.find(s => s && s._id && (
+                  (currentStudentId && s._id.toString() === currentStudentId.toString()) ||
+                  (studentDetails?.name && s.name?.toLowerCase() === studentDetails.name.toLowerCase()) ||
+                  (user?.email && s.name?.toLowerCase() === user.email.split('@')[0].toLowerCase())
+                )) || batch.students?.[0];
+
+                const meritRank = myRecord?.batch_merit_rank || 1;
+                const attendancePct = myRecord?.batch_attendance_pct !== undefined ? myRecord.batch_attendance_pct : 100;
+                const testAvgPct = myRecord?.batch_test_avg_pct || 0;
+                const meritScore = myRecord?.merit_score || 0;
+
+                return (
+                  <div key={batch._id} className="bg-dark-900/60 p-4 rounded-2xl border border-dark-800/80 hover:border-primary-500/40 transition-all duration-200 space-y-3 relative overflow-hidden group">
+                    <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-2.5">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <h4 className="text-sm font-extrabold text-white font-outfit group-hover:text-primary-300 transition truncate">
+                            {batch.name}
+                          </h4>
+                          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-primary-500/10 text-primary-400 border border-primary-500/20 shrink-0">
+                            {batch.subject}
+                          </span>
+                        </div>
+                        {batch.description && (
+                          <p className="text-xs text-slate-400 line-clamp-1 mt-1">{batch.description}</p>
+                        )}
+                      </div>
+
+                      <a
+                        href="/chats"
+                        className="px-3 py-1.5 rounded-xl bg-primary-600 hover:bg-primary-500 text-white font-bold text-xs transition flex items-center justify-center gap-1.5 self-start sm:self-auto shrink-0 shadow-md shadow-primary-500/20"
+                        title="Open Live Chat Room & Lounge"
+                      >
+                        <MessageSquare size={13} />
+                        <span>Chat & Lounge</span>
+                      </a>
+                    </div>
+
+                    {/* Student Performance Metrics Bar */}
+                    <div className="grid grid-cols-3 gap-2 bg-dark-950/60 p-2.5 rounded-xl border border-dark-850 text-center text-xs font-mono">
+                      <div>
+                        <span className="text-[9px] text-slate-500 uppercase font-normal block">Merit Rank</span>
+                        <span className="text-amber-400 font-bold">#{meritRank}</span>
+                      </div>
+                      <div className="border-l border-dark-800">
+                        <span className="text-[9px] text-slate-500 uppercase font-normal block">Attendance</span>
+                        <span className={attendancePct >= 75 ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
+                          {attendancePct}%
+                        </span>
+                      </div>
+                      <div className="border-l border-dark-800">
+                        <span className="text-[9px] text-slate-500 uppercase font-normal block">Exam Avg</span>
+                        <span className="text-indigo-400 font-bold">{testAvgPct}%</span>
+                      </div>
+                    </div>
+
+                    {/* Schedule Slots Preview */}
+                    {batch.schedule && batch.schedule.length > 0 && (
+                      <div className="space-y-1 text-[11px]">
+                        <span className="text-[10px] uppercase font-bold text-slate-500 block font-mono">Weekly Timetable Slots:</span>
+                        <div className="flex flex-wrap gap-1.5">
+                          {batch.schedule.map((slot, sIdx) => (
+                            <span key={sIdx} className="px-2 py-0.5 rounded-lg bg-dark-950 border border-dark-800 text-slate-300 font-mono text-[10px] flex items-center gap-1">
+                              <Clock size={10} className="text-amber-400" />
+                              {slot.day}: {slot.start_time}-{slot.end_time} ({slot.room || 'Extra Room'})
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Extra LMS Handouts Preview */}
+                    {batch.extra_lessons && batch.extra_lessons.length > 0 && (
+                      <div className="pt-2 border-t border-dark-800/40 text-[11px] space-y-1">
+                        <span className="text-[10px] uppercase font-bold text-slate-500 block font-mono">LMS Handouts ({batch.extra_lessons.length}):</span>
+                        <div className="space-y-1">
+                          {batch.extra_lessons.slice(0, 2).map(les => (
+                            <div key={les._id} className="flex items-center justify-between bg-dark-950/40 p-2 rounded-lg border border-dark-850">
+                              <span className="text-slate-300 truncate font-medium">{les.title}</span>
+                              {les.file_url && (
+                                <a
+                                  href={les.file_url}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-primary-400 hover:text-white font-bold text-[10px] flex items-center gap-1 shrink-0 ml-2"
+                                >
+                                  <ExternalLink size={11} />
+                                  <span>Download</span>
+                                </a>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
 
         {/* Student Class Timetable Card */}

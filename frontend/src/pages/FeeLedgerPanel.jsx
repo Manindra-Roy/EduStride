@@ -853,8 +853,8 @@ const FeeLedgerPanel = () => {
       {/* --- MOCK ONLINE PAYMENT OR CASH INSTRUCTIONS MODAL (For Student portal fee payments) --- */}
       {showPayModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
-          <div className="glass-panel w-full max-w-md rounded-2xl border border-dark-800 overflow-hidden shadow-2xl relative animate-scaleUp">
-            <div className="p-5 border-b border-dark-800 flex justify-between items-center">
+          <div className="glass-panel w-full max-w-md max-h-[85dvh] flex flex-col rounded-2xl border border-dark-800 overflow-hidden shadow-2xl relative animate-scaleUp">
+            <div className="p-4 sm:p-5 border-b border-dark-800 flex justify-between items-center shrink-0">
               <h3 className="text-base font-bold text-white font-outfit flex items-center gap-2">
                 <CreditCard className="text-primary-500" size={18} />
                 <span>Settle Tuition Fee - {payingMonth}</span>
@@ -864,7 +864,7 @@ const FeeLedgerPanel = () => {
               </button>
             </div>
             
-            <div className="p-5 space-y-4">
+            <div className="p-4 sm:p-5 space-y-4 overflow-y-auto flex-1 overscroll-contain">
               <div className="flex justify-between items-center p-3.5 rounded-xl bg-dark-900 border border-dark-850">
                 <div>
                   <span className="text-slate-400 text-[10px] block uppercase font-bold tracking-wider">Fee Description</span>
@@ -1020,15 +1020,15 @@ const FeeLedgerPanel = () => {
       {/* --- MANUAL PAYMENT EDIT DIALOG (For SuperAdmin / Teacher overrides) --- */}
       {showManualModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
-          <div className="glass-panel w-full max-w-md rounded-2xl border border-dark-800 overflow-hidden shadow-2xl relative animate-scaleUp">
-            <div className="p-6 border-b border-dark-800 flex justify-between items-center">
+          <div className="glass-panel w-full max-w-md max-h-[85dvh] flex flex-col rounded-2xl border border-dark-800 overflow-hidden shadow-2xl relative animate-scaleUp">
+            <div className="p-4 sm:p-6 border-b border-dark-800 flex justify-between items-center shrink-0">
               <h3 className="text-base font-bold text-white font-outfit">Adjust Month Standing - {payingMonth}</h3>
               <button onClick={() => setShowManualModal(false)} className="text-slate-500 hover:text-white transition">
                 <X size={20} />
               </button>
             </div>
 
-            <form onSubmit={handleManualOverride} className="p-6 space-y-4">
+            <form onSubmit={handleManualOverride} className="p-4 sm:p-6 space-y-4 overflow-y-auto flex-1 overscroll-contain">
               <div>
                 <label className="block text-xs font-semibold text-slate-400 mb-1.5">Accounting Flag</label>
                 <select

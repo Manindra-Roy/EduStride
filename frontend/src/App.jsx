@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { CallProvider } from './context/CallContext';
@@ -21,6 +21,7 @@ import LmsDownload from './pages/LmsDownload';
 import ClassChat from './pages/ClassChat';
 import AutomationsPanel from './pages/AutomationsPanel';
 import TimetablePage from './pages/TimetablePage';
+import SpecialBatchesPanel from './pages/SpecialBatchesPanel';
 
 const ProtectedRoute = ({ children, allowedRoles }) => {
   const { user, token, loading } = useAuth();
@@ -43,39 +44,44 @@ const ProtectedRoute = ({ children, allowedRoles }) => {
 const Layout = () => {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const location = useLocation();
-  const [viewportHeight, setViewportHeight] = useState('100vh');
+  const [viewportHeight, setViewportHeight] = useState('100dvh');
+  const mainRef = useRef(null);
 
   const isChatPage = location.pathname === '/chats';
+
+  // Scroll to top on route change (except when staying on chat)
+  useEffect(() => {
+    if (!isChatPage) {
+      window.scrollTo(0, 0);
+      document.body.scrollTop = 0;
+      document.documentElement.scrollTop = 0;
+      if (mainRef.current) {
+        mainRef.current.scrollTop = 0;
+      }
+    }
+  }, [location.pathname, isChatPage]);
 
   useEffect(() => {
     if (!window.visualViewport) return;
 
     const handleResize = () => {
       setViewportHeight(`${window.visualViewport.height}px`);
-      // Reset scroll layout offset with delay to override browser's async auto-scroll
-      setTimeout(() => {
-        window.scrollTo(0, 0);
-        document.body.scrollTop = 0;
-        document.documentElement.scrollTop = 0;
-      }, 30);
     };
 
     window.visualViewport.addEventListener('resize', handleResize);
-    window.visualViewport.addEventListener('scroll', handleResize);
-    
-    // Initial calculation
     handleResize();
 
     return () => {
       window.visualViewport.removeEventListener('resize', handleResize);
-      window.visualViewport.removeEventListener('scroll', handleResize);
     };
   }, []);
 
   return (
     <div 
-      style={{ height: viewportHeight }}
-      className="w-full flex flex-col lg:flex-row bg-[#07080a] text-slate-100 overflow-hidden relative bg-grid-pattern"
+      style={{ height: isChatPage ? viewportHeight : undefined }}
+      className={`w-full flex flex-col lg:flex-row bg-[#07080a] text-slate-100 relative bg-grid-pattern ${
+        isChatPage ? 'h-[100dvh] overflow-hidden' : 'min-h-[100dvh] lg:h-[100dvh] lg:overflow-hidden'
+      }`}
     >
       {/* Background Glow Design Elements */}
       <div className="fixed inset-0 pointer-events-none glow-bg z-0" />
@@ -87,11 +93,13 @@ const Layout = () => {
       
       {/* Main Panel Content Container */}
       <div 
-        className="flex-1 flex flex-col overflow-hidden z-10 relative h-full"
+        className={`flex-1 flex flex-col z-10 relative ${
+          isChatPage ? 'h-full overflow-hidden' : 'min-h-full lg:h-full lg:overflow-hidden'
+        }`}
       >
         {/* Sticky Mobile Header */}
         {!isChatPage && (
-          <header className="lg:hidden flex items-center justify-between px-5 py-4 bg-dark-900/40 backdrop-blur-md border-b border-dark-800/80 z-30 shrink-0">
+          <header className="lg:hidden sticky top-0 flex items-center justify-between px-4 sm:px-5 py-3.5 sm:py-4 bg-dark-900/80 backdrop-blur-md border-b border-dark-800/80 z-30 shrink-0">
             <div className="flex items-center gap-3">
               <Logo size={32} className="border border-primary-500/20 rounded-lg bg-dark-950/40" />
               <div>
@@ -103,6 +111,7 @@ const Layout = () => {
             <button 
               onClick={() => setSidebarOpen(!sidebarOpen)}
               className="p-2 rounded-lg bg-dark-950 border border-dark-800/80 text-slate-350 hover:text-white transition-colors"
+              aria-label={sidebarOpen ? "Close menu" : "Open menu"}
             >
               {sidebarOpen ? <X size={18} /> : <Menu size={18} />}
             </button>
@@ -110,18 +119,26 @@ const Layout = () => {
         )}
 
         {/* Scrollable Main Area */}
-        <main className={`flex-1 relative flex flex-col ${
-          isChatPage 
-            ? 'p-0 md:p-4 lg:p-6 overflow-hidden' 
-            : 'p-4 md:p-6 lg:p-8 overflow-y-auto'
-        }`}>
+        <main 
+          ref={mainRef}
+          className={`flex-1 relative flex flex-col ${
+            isChatPage 
+              ? 'p-0 md:p-4 lg:p-6 overflow-hidden' 
+              : 'p-3 sm:p-5 md:p-6 lg:p-8 lg:overflow-y-auto'
+          }`}
+        >
           <div className={`w-full mx-auto flex flex-col ${
             isChatPage 
               ? 'max-w-7xl h-full pb-0' 
-              : 'max-w-7xl pb-12'
+              : 'max-w-7xl pb-8 sm:pb-12'
           }`}>
             <Routes>
               <Route path="/" element={<Dashboard />} />
+              <Route path="/special-batches" element={
+                <ProtectedRoute allowedRoles={['SuperAdmin', 'Teacher']}>
+                  <SpecialBatchesPanel />
+                </ProtectedRoute>
+              } />
               <Route path="/timetable" element={
                 <ProtectedRoute allowedRoles={['SuperAdmin', 'Teacher']}>
                   <TimetablePage />

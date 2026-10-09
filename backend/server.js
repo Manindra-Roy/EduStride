@@ -18,9 +18,11 @@ import subjectRoutes from './routes/subjects.js';
 import automationRoutes from './routes/automations.js';
 import timetableRoutes from './routes/timetable.js';
 import systemRoutes from './routes/system.js';
+import specialBatchRoutes from './routes/specialBatches.js';
 import errorHandler from './middleware/error.js';
 import ChatMessage from './models/ChatMessage.js';
 import ClassLevel from './models/ClassLevel.js';
+import SpecialBatch from './models/SpecialBatch.js';
 
 dotenv.config();
 
@@ -52,19 +54,39 @@ app.use('/api/subjects', subjectRoutes);
 app.use('/api/automations', automationRoutes);
 app.use('/api/timetable', timetableRoutes);
 app.use('/api/system', systemRoutes);
+app.use('/api/special-batches', specialBatchRoutes);
 
 // Chat History Router
 app.get('/api/chats/:class_level', async (req, res, next) => {
   try {
     const { class_level } = req.params;
+    let isValidRoom = false;
+
+    // Check standard class level first
     const classExists = await ClassLevel.findOne({ name: class_level.toUpperCase() });
-    if (!classExists) {
-      return res.status(400).json({ success: false, message: 'Invalid class level' });
+    if (classExists) {
+      isValidRoom = true;
+    } else {
+      // Check if it matches a Special Batch by ID or formatted room name
+      let cleanBatchId = class_level;
+      if (class_level.startsWith('BATCH_')) {
+        cleanBatchId = class_level.replace('BATCH_', '');
+      }
+      if (cleanBatchId.match(/^[0-9a-fA-F]{24}$/)) {
+        const batchExists = await SpecialBatch.findById(cleanBatchId);
+        if (batchExists) isValidRoom = true;
+      }
     }
+
+    if (!isValidRoom) {
+      return res.status(400).json({ success: false, message: 'Invalid class level or special batch room' });
+    }
+
     const messages = await ChatMessage.find({ class_level })
       .populate('reply_to')
       .sort({ created_at: 1 })
       .limit(100);
+
     res.json({ success: true, data: messages });
   } catch (error) {
     next(error);

@@ -15,7 +15,8 @@ import {
   GraduationCap,
   UserPlus,
   Palette,
-  Calendar
+  Calendar,
+  Zap
 } from 'lucide-react';
 
 import Logo from './Logo';
@@ -389,6 +390,12 @@ const Sidebar = ({ isOpen, setIsOpen }) => {
     // Add the rest
     items.push(
       {
+        name: 'Special Batches',
+        path: '/special-batches',
+        icon: Zap,
+        roles: ['SuperAdmin', 'Teacher']
+      },
+      {
         name: 'Class Timetable',
         path: '/timetable',
         icon: Calendar,
@@ -439,14 +446,14 @@ const Sidebar = ({ isOpen, setIsOpen }) => {
     <>
       {/* Sidebar Container */}
       <aside className={`
-        fixed inset-y-0 left-0 z-40 w-64 lg:static lg:block
+        fixed inset-y-0 left-0 z-40 w-64 max-w-[85vw] lg:max-w-none lg:static lg:block
         glass-panel border-r border-dark-800 flex flex-col justify-between
         transform ${isOpen ? 'translate-x-0' : '-translate-x-full'} lg:transform-none
         transition-transform duration-300 ease-in-out
       `}>
         {/* Header */}
-        <div>
-          <div className="h-20 flex items-center px-6 border-b border-dark-800/80 gap-3">
+        <div className="flex flex-col flex-1 overflow-hidden min-h-0">
+          <div className="h-20 flex items-center px-6 border-b border-dark-800/80 gap-3 shrink-0">
             <Logo className="border border-primary-500/35 rounded-xl bg-dark-900/40 glow-indigo" size={40} />
             <div>
               <h1 className="text-lg font-bold tracking-tight text-white font-outfit">EduStride</h1>
@@ -455,7 +462,7 @@ const Sidebar = ({ isOpen, setIsOpen }) => {
           </div>
 
           {/* Navigation Links */}
-          <nav className="p-4 space-y-1.5 overflow-y-auto max-h-[calc(100vh-18rem)]">
+          <nav className="p-4 space-y-1.5 overflow-y-auto flex-1 overscroll-contain">
             {filteredItems.map((item) => (
               <NavLink
                 key={item.name}
@@ -527,15 +534,15 @@ const Sidebar = ({ isOpen, setIsOpen }) => {
       {/* --- PROFILE SETTINGS MODAL --- */}
       {showProfileModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
-          <div className="glass-panel w-full max-w-md max-h-[90vh] overflow-y-auto rounded-2xl border border-dark-800 shadow-2xl relative animate-scaleUp">
-            <div className="p-6 border-b border-dark-800 flex justify-between items-center">
+          <div className="glass-panel w-full max-w-md max-h-[85dvh] flex flex-col overflow-hidden rounded-2xl border border-dark-800 shadow-2xl relative animate-scaleUp">
+            <div className="p-4 sm:p-6 border-b border-dark-800 flex justify-between items-center shrink-0">
               <h3 className="text-base font-bold text-white font-outfit">My Profile Settings</h3>
               <button onClick={handleCloseModal} className="text-slate-500 hover:text-white transition">
                 <X size={20} />
               </button>
             </div>
 
-            <div className="p-6 space-y-6">
+            <div className="p-4 sm:p-6 space-y-6 overflow-y-auto flex-1 overscroll-contain">
               {/* Profile Avatar Display */}
               <div className="flex flex-col items-center gap-4 text-center">
                 <div className="relative group">
