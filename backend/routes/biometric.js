@@ -280,6 +280,12 @@ router.post('/device/command-ack', authenticateDevice, async (req, res, next) =>
 
     if (status === 'COMPLETED') {
       if (effectiveAction === 'ENROLL' && currentCmd.student && effectiveSlot) {
+        // Clear any stale/orphan mapping occupying the same hardware slot before upsert
+        await FingerprintTemplate.deleteMany({
+          device_id: device.device_id,
+          slot_id: effectiveSlot,
+          student: { $ne: currentCmd.student }
+        });
         // Save/update FingerprintTemplate mapping
         await FingerprintTemplate.findOneAndUpdate(
           { device_id: device.device_id, student: currentCmd.student },
@@ -560,6 +566,18 @@ router.delete('/devices/:deviceId/templates/:studentId', protect, authorize('Sup
     };
     await device.save();
 
+    const io = getIO();
+    if (io) {
+      io.to('GATE_MONITOR').emit('gate_command_update', {
+        device_id: device.device_id,
+        action: 'DELETE',
+        slot_id: slotId,
+        status: 'PENDING',
+        student_name: studentName,
+        message: device.pending_command.message
+      });
+    }
+
     res.json({
       success: true,
       message: `Removed fingerprint for ${studentName} (Slot #${slotId}). Sensor erase queued.`
@@ -591,6 +609,17 @@ router.post('/devices/:deviceId/cancel-command', protect, authorize('SuperAdmin'
       updated_at: new Date()
     };
     await device.save();
+
+    const io = getIO();
+    if (io) {
+      io.to('GATE_MONITOR').emit('gate_command_update', {
+        device_id: device.device_id,
+        action: 'NONE',
+        slot_id: null,
+        status: 'IDLE',
+        message: 'Cancelled by user'
+      });
+    }
 
     res.json({ success: true, message: 'Pending command cleared' });
   } catch (error) {
@@ -681,7 +710,7 @@ router.get('/logs', protect, async (req, res, next) => {
       if (l.event_type === 'ENTRY') entriesToday++;
       if (l.event_type === 'EXIT') exitsToday++;
       if (l.attendance_marked) attendanceSynced++;
-      latestStateByStudent.set(l.student.toString(), l.event_type);
+      if (l.student) latestStateByStudent.set(l.student.toString(), l.event_type);
     });
 
     let insideNow = 0;

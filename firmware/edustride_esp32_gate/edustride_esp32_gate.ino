@@ -10,7 +10,7 @@
  * Design Principles (Clean Remake):
  *   1. Exact proven Adafruit R307S capture flow (getImage -> image2Tz -> fingerFastSearch).
  *   2. NEVER sends LEDcontrol(false) on idle or OTA (prevents R307S optical LED latching OFF across reboots!).
- *   3. Hybrid Touch + Calm Polling: instant wake on GPIO 4 if TOUCH toggles + calm 160ms cool polling fallback.
+ *   3. Pure 6-Wire Touch Wake on GPIO 4 (LED stays 100% dark & cool while idle, flashes only on finger touch!).
  *   4. Zero Wi-Fi / R307S overlap: Core 0 heartbeat (5.5s) never collides with optical capture.
  *   5. Cute Vector/EMO OLED desk-robot eyes with dirty-only rendering & balanced contrast for clean 3.3V power.
  *   6. Built-in Wireless Wi-Fi OTA (ArduinoOTA).
@@ -505,6 +505,7 @@ bool initR307Sensor() {
   if (finger.security_level > 2) {
     finger.setSecurityLevel(2); // Balanced forgiving matching for dry fingers
     delay(50);
+    finger.security_level = 2;
   }
   finger.getTemplateCount();
 
@@ -741,8 +742,8 @@ void scanAndSubmitFingerprint() {
   for (int attempt = 0; attempt < 3; attempt++) {
     uint8_t p = finger.getImage();
     if (p == FINGERPRINT_OK) {
-      capturedAny = true;
       if (finger.image2Tz() == FINGERPRINT_OK) {
+        capturedAny = true; // Only flag as real finger attempt once ridge features extract cleanly
         if (searchStoredTemplates() == FINGERPRINT_OK) {
           matchedSlot = finger.fingerID;
           confidence = finger.confidence;
@@ -817,6 +818,7 @@ void scanAndSubmitFingerprint() {
     messageHoldUntilMs = millis() + 2200;
   } else if (status == "PAUSED") {
     sensingEnabled = false;
+    prevSensingObserved = false; // Prevent duplicate beepNotice() on next loop() tick
     showIdleScreen();
     beepNotice();
   } else {
@@ -997,9 +999,13 @@ void loop() {
       executeRemoteDelete(runSlot, runStudent);
     } else if (runAction == "CLEAR_ALL") {
       commandInProgress = true;
+      showOledStatus("CLEARING MEMORY", "Erasing all prints", "Please wait...", "");
       finger.emptyDatabase();
       finger.getTemplateCount();
       sendCommandAck("CLEAR_ALL", "COMPLETED", 0, "Sensor memory cleared.");
+      showOledStatus("MEMORY CLEARED", "All slots erased", "0 stored prints", "");
+      beepNotice();
+      messageHoldUntilMs = millis() + 2500;
       commandInProgress = false;
     }
   }
@@ -1012,7 +1018,7 @@ void loop() {
   animateIdleFace(now);
 
   // Pure 6-Wire Touch Trigger: LED stays 100% DARK & cool while idle, flashes ONLY when finger touches!
-  if (messageHoldUntilMs == 0 && now - lastFpPollMs >= 20) {
+  if (sensingEnabled && sensorReady && messageHoldUntilMs == 0 && now - lastFpPollMs >= 20) {
     lastFpPollMs = now;
     if (touchPinTriggered()) {
       delay(25); // 25ms hardware debounce

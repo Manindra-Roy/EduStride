@@ -4,6 +4,7 @@ import FeeLedger from '../models/FeeLedger.js';
 import User from '../models/User.js';
 import Attendance from '../models/Attendance.js';
 import Timetable from '../models/Timetable.js';
+import FingerprintTemplate from '../models/FingerprintTemplate.js';
 import { protect, authorize } from '../middleware/auth.js';
 import { deleteFromCloud } from '../services/cloudStorage.js';
 import { recalculateRollNumbers, recalculateMonthlyAttendance, emitAttendanceUpdated } from '../services/attendanceSync.js';
@@ -339,8 +340,9 @@ router.delete('/:id', protect, authorize('SuperAdmin', 'Teacher'), async (req, r
     const classLevel = student.class_level;
 
     await Student.findByIdAndDelete(req.params.id);
-    // Delete their Fee Ledger
+    // Delete their Fee Ledger & any linked biometric fingerprint templates
     await FeeLedger.deleteOne({ student_id: req.params.id });
+    await FingerprintTemplate.deleteMany({ student: req.params.id });
 
     // Delete associated User accounts if any
     const associatedUsers = await User.find({ studentProfile: req.params.id });

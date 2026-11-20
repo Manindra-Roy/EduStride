@@ -386,6 +386,15 @@ export const appendBiometricExitRemark = async (student, dateStr, time12Str, ses
       const exitNote = `Exit ${time12Str}`;
       existingRec.remarks = existingRec.remarks ? `${existingRec.remarks} | ${exitNote}` : exitNote;
       await sheet.save();
+
+      emitAttendanceUpdated({
+        class_level: student.class_level,
+        date: dateStr,
+        session_name: sheet.session_name,
+        student_id: student._id,
+        student_name: student.name,
+        source: 'biometric_exit'
+      });
     }
   } catch (err) {
     console.error('[Biometric Exit Remark Error]:', err.message);

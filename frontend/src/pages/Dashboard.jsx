@@ -261,6 +261,22 @@ const Dashboard = () => {
     if (!user) return;
     if (!socket.connected) socket.connect();
 
+    const joinDashboardRooms = () => {
+      if (user.role === 'Student') {
+        const myId = user.studentProfile?._id || (typeof user.studentProfile === 'string' ? user.studentProfile : null);
+        const myClass = user.studentProfile?.class_level;
+        if (myId) socket.emit('join_room', `USER_${myId}`);
+        if (myClass) {
+          socket.emit('join_room', myClass);
+          socket.emit('join_room', myClass.trim().toUpperCase());
+        }
+      } else {
+        socket.emit('join_room', 'GATE_MONITOR');
+      }
+    };
+
+    joinDashboardRooms();
+
     const handleLiveAttendance = async (data) => {
       try {
         if (user.role === 'Student') {
@@ -301,8 +317,10 @@ const Dashboard = () => {
       }
     };
 
+    socket.on('connect', joinDashboardRooms);
     socket.on('attendance_updated', handleLiveAttendance);
     return () => {
+      socket.off('connect', joinDashboardRooms);
       socket.off('attendance_updated', handleLiveAttendance);
     };
   }, [user]);

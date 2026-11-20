@@ -221,10 +221,20 @@ const BiometricGatePanel = () => {
     const handleScanEvent = (newLog) => {
       if (!newLog) return;
       if (newLog.date === selectedDate) {
-        setLogs(prev => {
-          const withoutDup = prev.filter(item => item._id !== newLog._id);
-          return [newLog, ...withoutDup];
-        });
+        const matchesClass = !isStaff || classFilter === 'All' ||
+          newLog.student?.class_level?.toUpperCase() === classFilter.trim().toUpperCase();
+        const matchesEvent = !isStaff || eventFilter === 'All' || newLog.event_type === eventFilter;
+        const q = searchQuery.trim().toLowerCase();
+        const matchesSearch = !isStaff || !q ||
+          newLog.student?.name?.toLowerCase().includes(q) ||
+          newLog.student?.roll_number?.toLowerCase().includes(q);
+
+        if (matchesClass && matchesEvent && matchesSearch) {
+          setLogs(prev => {
+            const withoutDup = prev.filter(item => item._id !== newLog._id);
+            return [newLog, ...withoutDup];
+          });
+        }
         fetchLogs(true);
       }
     };
@@ -234,10 +244,14 @@ const BiometricGatePanel = () => {
       setDevices(prev => prev.map(d => (d.device_id === updatedDev.device_id ? { ...d, ...updatedDev } : d)));
     };
 
-    const handleCommandUpdate = (cmdData) => {
+        const handleCommandUpdate = (cmdData) => {
       if (!isStaff) return;
-      setLiveCommand(cmdData);
-      if (cmdData.status === 'COMPLETED' || cmdData.status === 'FAILED') {
+      if (cmdData.status === 'IDLE') {
+        setLiveCommand(null);
+      } else {
+        setLiveCommand(cmdData);
+      }
+      if (cmdData.status === 'COMPLETED' || cmdData.status === 'FAILED' || cmdData.status === 'IDLE') {
         fetchDevices(true);
         if (activeTab === 'enroll') fetchEnrollmentData();
       }
@@ -254,7 +268,7 @@ const BiometricGatePanel = () => {
       socket.off('gate_device_updated', handleDeviceUpdated);
       socket.off('gate_command_update', handleCommandUpdate);
     };
-  }, [user, isStaff, selectedDate, activeTab, fetchLogs, fetchDevices, fetchEnrollmentData]);
+  }, [user, isStaff, selectedDate, activeTab, classFilter, eventFilter, searchQuery, fetchLogs, fetchDevices, fetchEnrollmentData]);
 
   // Toggle Fingerprint Sensing ON / OFF remotely
   const handleToggleSensing = async () => {
@@ -270,8 +284,8 @@ const BiometricGatePanel = () => {
         showToastBanner(
           'success',
           nextState
-            ? 'Fingerprint Sensing turned ON — ESP32 will resume scanning within 2 seconds.'
-            : 'Fingerprint Sensing turned OFF — ESP32 will pause & switch off sensor LED within 2 seconds.'
+            ? 'Fingerprint Sensing turned ON — ESP32 will resume scanning within a few seconds.'
+            : 'Fingerprint Sensing turned OFF — ESP32 will enter sleepy paused mode within a few seconds.'
         );
       }
     } catch (err) {
