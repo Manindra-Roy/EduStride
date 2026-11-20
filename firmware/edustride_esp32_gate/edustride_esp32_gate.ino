@@ -376,8 +376,8 @@ void animateIdleFace(unsigned long now) {
     return;
   }
 
-  // Smooth ~30 FPS physics frame tick for Vector / EMO idle personality
-  if (now - lastFrameMs < 33) return;
+  // Smooth ~18 FPS physics frame tick for Vector / EMO idle personality (gentle on I2C & 3.3V rail)
+  if (now - lastFrameMs < 55) return;
   lastFrameMs = now;
 
   // 1. Trigger natural single or double blinks every 2.5 - 5.5s
@@ -465,15 +465,11 @@ void animateIdleFace(unsigned long now) {
   renderRoboEyes(FACE_IDLE, "", now);
 }
 
-void setSensorLed(bool on) {
+void setSensorLed(bool on, bool force = false) {
   if (!sensorReady) return;
-  // Let R307S auto-strobe its optical LED cleanly during getImage() for sharp ridge contrast;
-  // only explicitly force LED OFF when sensing is paused from the mobile app.
-  if (!on && ledCurrentlyOn) {
-    finger.LEDcontrol(false);
-    ledCurrentlyOn = false;
-  } else if (on && !ledCurrentlyOn) {
-    ledCurrentlyOn = true;
+  if (force || ledCurrentlyOn != on) {
+    finger.LEDcontrol(on);
+    ledCurrentlyOn = on;
   }
 }
 
@@ -535,37 +531,29 @@ int performHttpRequest(const String& method, const String& path, const String& j
 }
 
 // ============================================================================
-// R307S SETTLED CAPTURE HELPER (220ms flat-press settle + UART flush!)
+// R307S PROVEN DIRECT CAPTURE HELPER (Immediate getImage -> image2Tz!)
 // ============================================================================
 uint8_t lastCaptureErrCode = 0;
 
 bool captureCleanFingerToSlot(uint8_t tzSlot, unsigned long timeoutMs) {
-  while (fpSerial.available()) fpSerial.read(); // flush any stray UART bytes
   unsigned long startWait = millis();
   lastCaptureErrCode = 0;
 
   while (millis() - startWait < timeoutMs) {
     uint8_t p = finger.getImage();
     if (p == FINGERPRINT_OK) {
-      // Give human finger 220ms to press flat and evenly onto the optical glass
-      delay(220);
-      for (int attempt = 0; attempt < 4; attempt++) {
-        uint8_t p2 = finger.getImage();
-        if (p2 == FINGERPRINT_OK) {
-          uint8_t tz = finger.image2Tz(tzSlot);
-          if (tz == FINGERPRINT_OK) {
-            return true;
-          }
-          lastCaptureErrCode = tz;
-          Serial.printf("[R307S] image2Tz(%d) err=0x%02X\n", tzSlot, tz);
-        } else {
-          lastCaptureErrCode = p2;
-        }
-        delay(100);
+      // Immediately convert the captured frame (standard Adafruit R307S flow — no frame discard!)
+      uint8_t tz = finger.image2Tz(tzSlot);
+      if (tz == FINGERPRINT_OK) {
+        return true;
       }
+      lastCaptureErrCode = tz;
+      Serial.printf("[R307S] image2Tz(%d) err=0x%02X (retrying)\n", tzSlot, tz);
+    } else if (p != FINGERPRINT_NOFINGER) {
+      lastCaptureErrCode = p;
     }
     if (otaInitialized && WiFi.status() == WL_CONNECTED) ArduinoOTA.handle();
-    delay(40);
+    delay(50);
   }
   return false;
 }
@@ -588,43 +576,45 @@ void sendCommandAck(const String& action, const String& status, int slotId, cons
 // ============================================================================
 void executeRemoteEnroll(int slotId, const String& studentName) {
   commandInProgress = true;
+  setSensorLed(true, true); // Explicitly ensure R307S optical LED is ON!
+  delay(80);
   Serial.printf("[ENROLL] Starting slot #%d for %s\n", slotId, studentName.c_str());
-  sendCommandAck("ENROLL", "IN_PROGRESS", slotId, "Press finger firmly & flat on glass (Step 1/2)...");
-  showOledStatus("ENROLL SLOT #" + String(slotId), studentName, "Press Finger FLAT", "Step 1 of 2...");
+  sendCommandAck("ENROLL", "IN_PROGRESS", slotId, "Place finger on sensor (Step 1/2)...");
+  showOledStatus("ENROLL SLOT #" + String(slotId), studentName, "Place Finger (1/2)", "Hold steady...");
   beepNotice();
 
-  // Step 1: Wait for first crisp settled finger capture into Buffer 1
+  // Step 1: Wait for first finger placement into Buffer 1
   if (!captureCleanFingerToSlot(1, ENROLL_STEP_TIMEOUT_MS)) {
     String errHex = String(lastCaptureErrCode, HEX);
-    showOledStatus("ENROLL FAILED", studentName, "Step 1 err: 0x" + errHex, "Press flat & retry");
+    showOledStatus("ENROLL TIMEOUT", studentName, "Step 1 err: 0x" + errHex, "Try again in App");
     beepError();
-    sendCommandAck("ENROLL", "FAILED", slotId, "Step 1 failed (R307S code 0x" + errHex + "). Check glass/power & press flat.");
+    sendCommandAck("ENROLL", "FAILED", slotId, "Step 1 failed/timed out (code 0x" + errHex + ").");
     messageHoldUntilMs = millis() + 3000;
     commandInProgress = false;
     return;
   }
 
-  // Try Step 2 + createModel() up to 4 times without throwing away Step 1!
+  // Try Step 2 + createModel() up to 3 times without throwing away Step 1!
   bool modelCreated = false;
   uint8_t lastModelErr = 0;
 
-  for (int tryIdx = 1; tryIdx <= 4; tryIdx++) {
+  for (int tryIdx = 1; tryIdx <= 3; tryIdx++) {
     beepEntry();
-    showOledStatus("ENROLL SLOT #" + String(slotId), "LIFT FINGER NOW", tryIdx == 1 ? "Step 1 OK!" : ("Adjust & retry " + String(tryIdx) + "/4"), "");
+    showOledStatus("ENROLL SLOT #" + String(slotId), tryIdx == 1 ? "Step 1 Captured!" : ("Retry Step 2 (" + String(tryIdx) + "/3)"), "REMOVE FINGER", "Wait a moment...");
     if (tryIdx == 1) {
-      sendCommandAck("ENROLL", "IN_PROGRESS", slotId, "Step 1 OK! Lift finger, then press same spot flat (Step 2/2)...");
+      sendCommandAck("ENROLL", "IN_PROGRESS", slotId, "Step 1 OK! Lift finger, then place again (Step 2/2)...");
     } else {
-      sendCommandAck("ENROLL", "IN_PROGRESS", slotId, "Slight mismatch — lift & press SAME finger center again (Try " + String(tryIdx) + "/4)...");
+      sendCommandAck("ENROLL", "IN_PROGRESS", slotId, "Did not match — lift & place SAME finger again (Try " + String(tryIdx) + "/3)...");
     }
 
-    delay(700);
+    delay(1100);
     unsigned long liftStart = millis();
     while (finger.getImage() != FINGERPRINT_NOFINGER) {
-      if (millis() - liftStart > 8000) break;
-      delay(50);
+      if (millis() - liftStart > 9000) break;
+      delay(60);
     }
 
-    showOledStatus("ENROLL SLOT #" + String(slotId), studentName, "Press SAME Finger", "Step 2/2 (Try " + String(tryIdx) + "/4)");
+    showOledStatus("ENROLL SLOT #" + String(slotId), studentName, "Place SAME Finger", "Step 2 of 2...");
     if (!captureCleanFingerToSlot(2, ENROLL_STEP_TIMEOUT_MS)) {
       lastModelErr = lastCaptureErrCode;
       continue;
@@ -643,9 +633,9 @@ void executeRemoteEnroll(int slotId, const String& studentName) {
 
   if (!modelCreated) {
     String errHex = String(lastModelErr, HEX);
-    showOledStatus("NO MATCH (0x" + errHex + ")", "Clean prism & press", "same center firmly", "Retry from App");
+    showOledStatus("NO MATCH (0x" + errHex + ")", "Fingers did not", "match! Retry", "");
     beepError();
-    sendCommandAck("ENROLL", "FAILED", slotId, "Finger mismatch after 4 tries (R307S code 0x" + errHex + "). Ensure clean glass & firm flat press (check R307S power brightness).");
+    sendCommandAck("ENROLL", "FAILED", slotId, "Two finger scans did not match after 3 tries (code 0x" + errHex + "). Please retry.");
     messageHoldUntilMs = millis() + 3500;
     commandInProgress = false;
     return;
@@ -752,64 +742,45 @@ void heartbeatTask(void* param) {
 }
 
 // ============================================================================
-// FAST, HIGH-ACCURACY FINGERPRINT SCAN & SERVER SUBMISSION (Core 1)
+// FAST, PROVEN FINGERPRINT SCAN & SERVER SUBMISSION (Core 1)
 // ============================================================================
 void scanAndSubmitFingerprint() {
   if (!sensorReady || !sensingEnabled || WiFi.status() != WL_CONNECTED) return;
 
-  // Quick non-blocking check if a finger has touched the R307S glass
+  // Step 1: Non-blocking check for finger on R307S glass
   uint8_t p = finger.getImage();
   if (p == FINGERPRINT_NOFINGER) return;
   if (p != FINGERPRINT_OK) return;
 
-  scanInProgress = true;
-  drawCuteFace(FACE_FOCUSED, "Reading Finger...");
-
-  // Let finger settle flat on prism (160ms), then try up to 4 crisp frames with full fingerSearch()
-  delay(160);
-  int matchedSlot = -1;
-  int confidence = 0;
-  bool fingerPresent = false;
-  uint8_t lastSearchCode = FINGERPRINT_NOTFOUND;
-
-  for (int attempt = 0; attempt < 4; attempt++) {
-    uint8_t imgCode = finger.getImage();
-    if (imgCode == FINGERPRINT_NOFINGER) {
-      // Student lifted finger too quickly before capture finished
-      if (attempt == 0) {
-        delay(60);
-        continue;
-      }
-      break;
-    }
-    if (imgCode != FINGERPRINT_OK) {
-      delay(60);
-      continue;
-    }
-
-    fingerPresent = true;
-    uint8_t tzCode = finger.image2Tz();
-    if (tzCode != FINGERPRINT_OK) {
-      Serial.printf("[SCAN] Attempt %d image2Tz err=%d\n", attempt + 1, tzCode);
-      delay(80);
-      continue;
-    }
-
-    // Use full fingerSearch() (far more accurate than fingerFastSearch for rotated/dry student fingers!)
-    lastSearchCode = finger.fingerSearch();
-    if (lastSearchCode == FINGERPRINT_OK) {
-      matchedSlot = finger.fingerID;
-      confidence = finger.confidence;
-      break;
-    }
-    Serial.printf("[SCAN] Attempt %d search code=%d\n", attempt + 1, lastSearchCode);
-    delay(90);
+  // Step 2: Convert that EXACT captured frame immediately (proven Adafruit R307S flow!)
+  p = finger.image2Tz();
+  if (p != FINGERPRINT_OK) {
+    // Partial touch / edge brush — wait silently for the next 40ms poll
+    return;
   }
 
-  if (!fingerPresent && matchedSlot < 0) {
-    // Brief accidental brush — quietly return to cute idle eyes
+  scanInProgress = true;
+
+  // Step 3: Search all stored templates (using real capacity from getParameters())
+  int matchedSlot = -1;
+  int confidence = 0;
+
+  p = finger.fingerSearch();
+  if (p == FINGERPRINT_OK) {
+    matchedSlot = finger.fingerID;
+    confidence = finger.confidence;
+  } else if (p == FINGERPRINT_NOTFOUND) {
+    // One fast 90ms second-chance read in case the first frame caught the finger mid-press
+    delay(90);
+    if (finger.getImage() == FINGERPRINT_OK && finger.image2Tz() == FINGERPRINT_OK) {
+      if (finger.fingerSearch() == FINGERPRINT_OK) {
+        matchedSlot = finger.fingerID;
+        confidence = finger.confidence;
+      }
+    }
+  } else {
+    // UART hiccup — silently ignore rather than flashing Unknown
     scanInProgress = false;
-    showIdleScreen();
     return;
   }
 
@@ -927,6 +898,7 @@ void initOtaIfReady() {
 
   ArduinoOTA.onError([](ota_error_t error) {
     otaInProgress = false;
+    setSensorLed(sensingEnabled, true);
     Serial.printf("[OTA] Error[%u]\n", error);
     showOledStatus("OTA FAILED", "Error code: " + String(error), "Resuming normal mode", "");
     beepError();
@@ -1004,10 +976,17 @@ void setup() {
 
   if (finger.verifyPassword()) {
     sensorReady = true;
-    finger.setSecurityLevel(1); // Most forgiving accuracy level for student & dry fingers
+    finger.getParameters(); // Populate real R307S capacity (1000) & security_level
+    if (finger.capacity == 0) finger.capacity = 1000;
+    if (finger.security_level != 3) {
+      // Restore R307S factory default security level (3)
+      finger.setSecurityLevel(3);
+      delay(50);
+    }
     finger.getTemplateCount();
-    Serial.printf("[R307S] Sensor OK! Security=2 | Stored templates: %d\n", finger.templateCount);
-    setSensorLed(true);
+    Serial.printf("[R307S] Sensor OK! Capacity=%d | Security=%d | Stored templates: %d\n",
+                  finger.capacity, finger.security_level, finger.templateCount);
+    setSensorLed(true, true); // Force LED ON (recovers from OTA LED-OFF state!)
   } else {
     sensorReady = false;
     Serial.println("[R307S] Sensor NOT detected! Check VCC(3V3), GND, TXD->GPIO16, RXD->GPIO17.");
@@ -1061,10 +1040,15 @@ void loop() {
     lastSensorRetryMs = now;
     if (finger.verifyPassword()) {
       sensorReady = true;
-      finger.setSecurityLevel(1);
+      finger.getParameters();
+      if (finger.capacity == 0) finger.capacity = 1000;
+      if (finger.security_level != 3) {
+        finger.setSecurityLevel(3);
+        delay(50);
+      }
       finger.getTemplateCount();
-      setSensorLed(sensingEnabled);
-      Serial.printf("[R307S] Recovered! Templates: %d\n", finger.templateCount);
+      setSensorLed(sensingEnabled, true);
+      Serial.printf("[R307S] Recovered! Capacity=%d | Templates: %d\n", finger.capacity, finger.templateCount);
     }
   }
 
