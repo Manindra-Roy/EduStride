@@ -205,12 +205,23 @@ const FeeLedgerPanel = () => {
 
   // Trigger Mock Webhook Payment Confirmation (Student Gateway Checkout simulation)
   const handleCheckoutPayment = async () => {
+    const targetStudent =
+      (selectedLedger?.student_id && typeof selectedLedger.student_id === 'object'
+        ? selectedLedger.student_id
+        : null) || user.studentProfile;
+    const targetStudentId = targetStudent?._id || (typeof selectedLedger?.student_id === 'string' ? selectedLedger.student_id : null);
+
+    if (!targetStudentId) {
+      alert('Please select a student ledger first.');
+      return;
+    }
+
     setSubmitting(true);
     try {
       const payload = {
-        student_id: user.studentProfile._id,
+        student_id: targetStudentId,
         month_name: payingMonth,
-        amount: user.studentProfile?.is_free_tier ? 0 : (user.studentProfile?.monthly_fee || 0),
+        amount: targetStudent?.is_free_tier ? 0 : (targetStudent?.monthly_fee || 0),
         payment_method: 'Stripe Gateway Hook',
         receipt_id: `TXN-STripe-${Date.now().toString().substring(5)}`
       };
@@ -246,12 +257,11 @@ const FeeLedgerPanel = () => {
       if (res.data.success) {
         setShowManualModal(false);
         fetchData();
-        // Refresh selected details
-        if (user.role === 'Student') {
-          setSelectedLedger(res.data.data);
+        // Refresh selected details while preserving populated student_id metadata
+        const updatedLedger = res.data.data;
+        if (updatedLedger && typeof updatedLedger.student_id !== 'object' && selectedLedger?.student_id) {
+          setSelectedLedger({ ...updatedLedger, student_id: selectedLedger.student_id });
         } else {
-          // Re-populate selected ledger
-          const updatedLedger = res.data.data;
           setSelectedLedger(updatedLedger);
         }
       }

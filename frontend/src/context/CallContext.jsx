@@ -24,6 +24,23 @@ export const CallProvider = ({ children }) => {
   const activeCallRef = useRef(null);
   const isCallHostRef = useRef(false);
   const currentRoomRef = useRef('');
+  const pathnameRef = useRef(location.pathname);
+  const audioCtxRef = useRef(null);
+  const toastTimersRef = useRef(new Map());
+
+  useEffect(() => {
+    pathnameRef.current = location.pathname;
+  }, [location.pathname]);
+
+  useEffect(() => {
+    return () => {
+      toastTimersRef.current.forEach((timerId) => clearTimeout(timerId));
+      toastTimersRef.current.clear();
+      if (audioCtxRef.current && audioCtxRef.current.state !== 'closed') {
+        audioCtxRef.current.close().catch(() => {});
+      }
+    };
+  }, []);
 
   useEffect(() => {
     activeCallRef.current = activeCall;
@@ -57,7 +74,13 @@ export const CallProvider = ({ children }) => {
     try {
       const AudioCtx = window.AudioContext || window.webkitAudioContext;
       if (!AudioCtx) return;
-      const ctx = new AudioCtx();
+      if (!audioCtxRef.current || audioCtxRef.current.state === 'closed') {
+        audioCtxRef.current = new AudioCtx();
+      }
+      const ctx = audioCtxRef.current;
+      if (ctx.state === 'suspended') {
+        ctx.resume().catch(() => {});
+      }
       const osc1 = ctx.createOscillator();
       const osc2 = ctx.createOscillator();
       const gain = ctx.createGain();
@@ -90,13 +113,17 @@ export const CallProvider = ({ children }) => {
   const addToast = React.useCallback(({ id, title, description, type, link, class_level }) => {
     if (!allowOnScreenToasts) return;
     playNotificationSound();
-    
+
+    const generatedId = id || `toast-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    let targetToastId = generatedId;
+
     setToasts(prev => {
       // Coalesce chat messages for the same class level into 1 toast card
       if (type === 'chat' && class_level) {
         const existingIndex = prev.findIndex(t => t.type === 'chat' && t.class_level === class_level);
         if (existingIndex > -1) {
           const existing = prev[existingIndex];
+          targetToastId = existing.id;
           const count = (existing.count || 1) + 1;
           const updated = {
             ...existing,
@@ -111,17 +138,21 @@ export const CallProvider = ({ children }) => {
         }
       }
 
-      const toastId = id || `toast-${Date.now()}`;
-      const filtered = prev.filter(t => t.id !== toastId);
+      const filtered = prev.filter(t => t.id !== generatedId);
       // Cap visible toast stack to MAX 2 items so screen is never cluttered
-      return [...filtered, { id: toastId, title, description, type, link, class_level, count: 1, createdAt: Date.now() }].slice(-2);
+      return [...filtered, { id: generatedId, title, description, type, link, class_level, count: 1, createdAt: Date.now() }].slice(-2);
     });
 
-    const timeoutId = id || `toast-${Date.now()}`;
-    setTimeout(() => {
-      setToasts(prev => prev.filter(t => t.id !== timeoutId));
+    const timerKey = type === 'chat' && class_level ? `chat-${class_level}` : targetToastId;
+    if (toastTimersRef.current.has(timerKey)) {
+      clearTimeout(toastTimersRef.current.get(timerKey));
+    }
+    const timerHandle = setTimeout(() => {
+      toastTimersRef.current.delete(timerKey);
+      setToasts(prev => prev.filter(t => (type === 'chat' && class_level ? !(t.type === 'chat' && t.class_level === class_level) : t.id !== targetToastId)));
     }, 4500);
-  }, [playNotificationSound]);
+    toastTimersRef.current.set(timerKey, timerHandle);
+  }, [allowOnScreenToasts, playNotificationSound]);
 
   const removeToast = React.useCallback((id) => {
     setToasts(prev => prev.filter(t => t.id !== id));
@@ -178,55 +209,97 @@ export const CallProvider = ({ children }) => {
       return;
     }
 
-    if (window.AndroidNotificationBridge && typeof window.AndroidNotificationBridge.registerUser === 'function') {
-      try {
-        const myName = user.studentProfile?.name || (user.role === 'SuperAdmin' ? 'Admin' : 'Teacher');
-        const myClass = user.studentProfile?.class_level || 'All';
-        const socketUrl = import.meta.env.VITE_API_URL || window.location.origin;
-        window.AndroidNotificationBridge.registerUser(user.email, myClass, myName, socketUrl);
-      } catch (err) {
-        console.error('Failed to register native user:', err);
-      }
-    }
-
     if (!socket.connected) {
       socket.connect();
     }
 
+    const syncNativeBridge = (roomsList) => {
+      if (window.AndroidNotificationBridge && typeof window.AndroidNotificationBridge.registerUser === 'function') {
+        try {
+          const myName = user.studentProfile?.name || (user.role === 'SuperAdmin' ? 'Admin' : 'Teacher');
+          const roomValue = roomsList.length > 0 ? roomsList.join(',') : (user.studentProfile?.class_level || 'All');
+          const socketUrl = import.meta.env.VITE_API_URL || window.location.origin;
+          window.AndroidNotificationBridge.registerUser(user.email, roomValue, myName, socketUrl);
+        } catch (err) {
+          console.error('Failed to register native user:', err);
+        }
+      }
+    };
+
     // Join room(s)
     const joinClassrooms = async () => {
+      const joinedRooms = new Set();
       if (user.role === 'Student') {
         const classLevel = user.studentProfile?.class_level;
         if (classLevel) {
           socket.emit('join_room', classLevel);
           socket.emit('join_room', classLevel.trim().toUpperCase());
+          joinedRooms.add(classLevel.trim());
+        }
+        const studentId = user.studentProfile?._id || (typeof user.studentProfile === 'string' ? user.studentProfile : null);
+        if (studentId) {
+          socket.emit('join_room', `USER_${studentId}`);
+          joinedRooms.add(`USER_${studentId}`);
+        }
+        try {
+          const batchRes = await axios.get('/api/special-batches');
+          if (batchRes.data.success && Array.isArray(batchRes.data.data)) {
+            batchRes.data.data.forEach(b => {
+              const bRoom = `BATCH_${b._id}`;
+              socket.emit('join_room', bRoom);
+              joinedRooms.add(bRoom);
+            });
+          }
+        } catch {
+          // Non-fatal: student still receives class notifications
         }
         socket.emit('join_room', 'ALL');
       } else {
         socket.emit('join_room', 'ALL');
+        joinedRooms.add('All');
         try {
           const res = await axios.get('/api/classes');
           if (res.data.success && Array.isArray(res.data.data)) {
             res.data.data.forEach(room => {
               socket.emit('join_room', room);
               socket.emit('join_room', room.trim().toUpperCase());
+              joinedRooms.add(room.trim());
             });
           } else {
             const fallbackRooms = ['VII', 'VIII', 'IX', 'X'];
-            fallbackRooms.forEach(room => socket.emit('join_room', room));
+            fallbackRooms.forEach(room => {
+              socket.emit('join_room', room);
+              joinedRooms.add(room);
+            });
           }
         } catch (err) {
           const fallbackRooms = ['VII', 'VIII', 'IX', 'X'];
-          fallbackRooms.forEach(room => socket.emit('join_room', room));
+          fallbackRooms.forEach(room => {
+            socket.emit('join_room', room);
+            joinedRooms.add(room);
+          });
+        }
+        try {
+          const batchRes = await axios.get('/api/special-batches');
+          if (batchRes.data.success && Array.isArray(batchRes.data.data)) {
+            batchRes.data.data.forEach(b => {
+              const bRoom = `BATCH_${b._id}`;
+              socket.emit('join_room', bRoom);
+              joinedRooms.add(bRoom);
+            });
+          }
+        } catch {
+          // Non-fatal
         }
       }
+      syncNativeBridge(Array.from(joinedRooms));
     };
 
     joinClassrooms();
 
     const handleGlobalIncomingCall = (data) => {
       playNotificationSound();
-      if (location.pathname !== '/chats') {
+      if (pathnameRef.current !== '/chats') {
         setIncomingCall(data);
       }
       setActiveRoomCall(data);
@@ -245,7 +318,7 @@ export const CallProvider = ({ children }) => {
       const myName = user.studentProfile?.name || (user.role === 'SuperAdmin' ? 'Admin' : 'Teacher');
       if (msg.sender_name === myName) return;
 
-      const isChatPage = location.pathname === '/chats';
+      const isChatPage = pathnameRef.current === '/chats';
       const isCurrentRoom = msg.class_level === currentRoomRef.current;
       const isTabVisible = !document.hidden;
 
@@ -280,7 +353,7 @@ export const CallProvider = ({ children }) => {
         if (studentClass && studentClass.trim().toUpperCase() !== data.class_level?.trim().toUpperCase()) return;
       }
 
-      const isLmsPage = location.pathname === '/lms';
+      const isLmsPage = pathnameRef.current === '/lms';
       const isTabVisible = !document.hidden;
 
       const shouldShowInAppToast = !isLmsPage;
@@ -356,7 +429,7 @@ export const CallProvider = ({ children }) => {
       socket.off('new_study_material', handleNewStudyMaterialGlobal);
       socket.off('new_notice', handleNewNoticeGlobal);
     };
-  }, [user, user?.studentProfile?.class_level, location.pathname, addToast, sendBrowserNotification, playNotificationSound]);
+  }, [user, user?.studentProfile?.class_level, addToast, sendBrowserNotification, playNotificationSound]);
 
   const handleStartCall = async (isHost = false) => {
     try {

@@ -1,0 +1,6 @@
+.tools/
+edustride_esp32_gate/build/
+edustride_esp32_gate/config.h
+*.bin
+*.elf
+*.map

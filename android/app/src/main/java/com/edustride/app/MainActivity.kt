@@ -31,7 +31,12 @@ import android.webkit.JavascriptInterface
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import android.Manifest
+import android.app.DownloadManager
 import android.content.pm.PackageManager
+import android.os.Environment
+import android.webkit.CookieManager
+import android.webkit.URLUtil
+import android.widget.Toast
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import android.util.Log
@@ -155,6 +160,11 @@ class MainActivity : AppCompatActivity() {
                 fileCallback = filePathCallback
 
                 val intent = fileChooserParams?.createIntent()
+                if (intent == null) {
+                    fileCallback?.onReceiveValue(null)
+                    fileCallback = null
+                    return false
+                }
                 try {
                     filePickerLauncher.launch(intent)
                 } catch (e: Exception) {
@@ -163,6 +173,36 @@ class MainActivity : AppCompatActivity() {
                     return false
                 }
                 return true
+            }
+        }
+
+        // Handle file downloads (LMS handouts, PDFs, APK) cleanly
+        binding.webView.setDownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
+            try {
+                if (url.startsWith("http://") || url.startsWith("https://")) {
+                    val fileName = URLUtil.guessFileName(url, contentDisposition, mimeType)
+                    val request = DownloadManager.Request(Uri.parse(url)).apply {
+                        setMimeType(mimeType)
+                        val cookies = CookieManager.getInstance().getCookie(url)
+                        if (!cookies.isNullOrEmpty()) {
+                            addRequestHeader("Cookie", cookies)
+                        }
+                        addRequestHeader("User-Agent", userAgent)
+                        setTitle(fileName)
+                        setDescription("Downloading EduStride file...")
+                        setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                        setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
+                    }
+                    val dm = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+                    dm.enqueue(request)
+                    Toast.makeText(this, "Downloading $fileName...", Toast.LENGTH_SHORT).show()
+                } else {
+                    val viewIntent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                    startActivity(viewIntent)
+                }
+            } catch (e: Exception) {
+                Log.e("MainActivity", "Failed to start download for $url", e)
+                Toast.makeText(this, "Unable to download file", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -189,6 +229,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showOfflineScreen() {
+        isPageLoading = false
         binding.progressBar.visibility = View.GONE
         binding.swipeRefresh.isRefreshing = false
         binding.offlineLayout.visibility = View.VISIBLE
@@ -252,10 +293,9 @@ class MainActivity : AppCompatActivity() {
             .apply()
         try {
             binding.webView.onPause()
-            binding.webView.pauseTimers()
-            Log.d("MainActivity", "App minimized (Foreground=false). WebView JS paused.")
+            Log.d("MainActivity", "App minimized (Foreground=false). WebView paused.")
         } catch (e: Exception) {
-            Log.e("MainActivity", "Error pausing WebView timers", e)
+            Log.e("MainActivity", "Error pausing WebView", e)
         }
     }
 
@@ -267,11 +307,23 @@ class MainActivity : AppCompatActivity() {
             .apply()
         try {
             binding.webView.onResume()
-            binding.webView.resumeTimers()
-            Log.d("MainActivity", "App open on screen (Foreground=true). WebView JS resumed.")
+            Log.d("MainActivity", "App open on screen (Foreground=true). WebView resumed.")
         } catch (e: Exception) {
-            Log.e("MainActivity", "Error resuming WebView timers", e)
+            Log.e("MainActivity", "Error resuming WebView", e)
         }
+    }
+
+    override fun onDestroy() {
+        try {
+            binding.webView.removeJavascriptInterface("AndroidNotificationBridge")
+            binding.webView.stopLoading()
+            binding.webView.webChromeClient = null
+            binding.webView.webViewClient = WebViewClient()
+            binding.webView.destroy()
+        } catch (e: Exception) {
+            Log.e("MainActivity", "Error cleaning up WebView", e)
+        }
+        super.onDestroy()
     }
 
     private val CHANNEL_ID = "edustride_notifications"
@@ -353,14 +405,18 @@ class MainActivity : AppCompatActivity() {
                 .putString("socket_url", socketUrl)
                 .apply()
 
-            // Start background service as foreground service
+            // Start background service as foreground service safely
             val serviceIntent = Intent(context, BackgroundSocketService::class.java)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(serviceIntent)
-            } else {
-                context.startService(serviceIntent)
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(serviceIntent)
+                } else {
+                    context.startService(serviceIntent)
+                }
+                Log.d("MainActivity", "User registered: $name, starting background service to socket: $socketUrl")
+            } catch (e: Exception) {
+                Log.e("MainActivity", "Failed to start BackgroundSocketService", e)
             }
-            Log.d("MainActivity", "User registered: $name, starting background service to socket: $socketUrl")
         }
 
         @JavascriptInterface

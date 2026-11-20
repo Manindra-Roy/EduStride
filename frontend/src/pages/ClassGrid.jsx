@@ -307,6 +307,14 @@ const ClassGrid = () => {
       const res = await axios.put(`/api/students/${selectedStudent._id}`, studentForm);
       if (res.data.success) {
         setShowEditModal(false);
+        if (res.data.data) {
+          setSelectedStudent(prev => prev ? {
+            ...prev,
+            ...res.data.data,
+            fee_status: prev.fee_status,
+            ledger: prev.ledger
+          } : res.data.data);
+        }
         fetchStudents();
       }
     } catch (err) {
@@ -349,6 +357,16 @@ const ClassGrid = () => {
   const handleAddTestScore = async (e) => {
     e.preventDefault();
     setSubmitError('');
+    const obtained = Number(testForm.marks_obtained);
+    const total = Number(testForm.total_marks);
+    if (!Number.isFinite(total) || total <= 0) {
+      setSubmitError('Maximum marks must be greater than 0');
+      return;
+    }
+    if (!Number.isFinite(obtained) || obtained < 0 || obtained > total) {
+      setSubmitError(`Marks obtained must be between 0 and ${total}`);
+      return;
+    }
     setSubmitting(true);
     try {
       const endpoint = testForm.type === 'tuition'
@@ -435,8 +453,9 @@ const ClassGrid = () => {
 
   // Toggle single attendance checkbox
   const toggleSingleAttendance = (index) => {
-    const list = [...bulkAttendanceList];
-    list[index].attended = !list[index].attended;
+    const list = bulkAttendanceList.map((item, i) =>
+      i === index ? { ...item, attended: !item.attended } : item
+    );
     setBulkAttendanceList(list);
 
     // Update master status check
@@ -481,7 +500,7 @@ const ClassGrid = () => {
     : (selectedStudent?.tuition_test_scores || []);
   const performanceChartData = selectedStudentScores.map(score => ({
     name: score.test_name,
-    percentage: Math.round((score.marks_obtained / score.total_marks) * 100),
+    percentage: score.total_marks > 0 ? Math.round((score.marks_obtained / score.total_marks) * 100) : 0,
     subject: score.subject
   })).slice(-8);
 
@@ -800,7 +819,7 @@ const ClassGrid = () => {
                           {selectedStudent.academic_history.map((record, index) => {
                             const totalScores = record.test_scores || [];
                             const avgScore = totalScores.length > 0 
-                              ? Math.round(totalScores.reduce((sum, s) => sum + (s.marks_obtained / s.total_marks * 100), 0) / totalScores.length)
+                              ? Math.round(totalScores.reduce((sum, s) => sum + (s.total_marks > 0 ? (s.marks_obtained / s.total_marks * 100) : 0), 0) / totalScores.length)
                               : null;
 
                             let totalClasses = 0;
@@ -1414,7 +1433,7 @@ const ClassGrid = () => {
                     {selectedStudent.academic_history.map((record, index) => {
                       const totalScores = record.test_scores || [];
                       const avgScore = totalScores.length > 0 
-                        ? Math.round(totalScores.reduce((sum, s) => sum + (s.marks_obtained / s.total_marks * 100), 0) / totalScores.length)
+                        ? Math.round(totalScores.reduce((sum, s) => sum + (s.total_marks > 0 ? (s.marks_obtained / s.total_marks * 100) : 0), 0) / totalScores.length)
                         : null;
 
                       let totalClasses = 0;

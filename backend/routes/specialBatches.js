@@ -5,6 +5,7 @@ import fs from 'fs';
 import { fileURLToPath } from 'url';
 import SpecialBatch from '../models/SpecialBatch.js';
 import Student from '../models/Student.js';
+import User from '../models/User.js';
 import { protect, authorize } from '../middleware/auth.js';
 import { uploadToCloud, deleteFromCloud } from '../services/cloudStorage.js';
 import { getIO } from '../config/socket.js';
@@ -55,15 +56,16 @@ router.get('/', protect, async (req, res, next) => {
     let filter = {};
 
     if (req.user.role === 'Student') {
-      let studentProfile = await Student.findOne({ user: req.user._id });
-      if (!studentProfile && req.user.studentProfile) {
+      let studentProfile = null;
+      if (req.user.studentProfile) {
         studentProfile = await Student.findById(req.user.studentProfile);
       }
       if (!studentProfile && req.user.email) {
+        const escapedPrefix = req.user.email.split('@')[0].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         studentProfile = await Student.findOne({
           $or: [
             { primary_contact: req.user.email },
-            { name: new RegExp('^' + req.user.email.split('@')[0], 'i') }
+            { name: new RegExp('^' + escapedPrefix, 'i') }
           ]
         });
       }
@@ -71,7 +73,7 @@ router.get('/', protect, async (req, res, next) => {
       if (studentProfile) {
         filter.students = studentProfile._id;
       } else {
-        filter.status = 'Active';
+        return res.json({ success: true, count: 0, data: [] });
       }
     } else if (req.user.role === 'Teacher') {
       if (req.query.my_batches === 'true') {
@@ -172,7 +174,19 @@ router.get('/:id', protect, async (req, res, next) => {
     }
 
     if (req.user.role === 'Student') {
-      const studentProfile = await Student.findOne({ user: req.user._id });
+      let studentProfile = null;
+      if (req.user.studentProfile) {
+        studentProfile = await Student.findById(req.user.studentProfile);
+      }
+      if (!studentProfile && req.user.email) {
+        const escapedPrefix = req.user.email.split('@')[0].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        studentProfile = await Student.findOne({
+          $or: [
+            { primary_contact: req.user.email },
+            { name: new RegExp('^' + escapedPrefix, 'i') }
+          ]
+        });
+      }
       if (!studentProfile || !batch.students.some(s => s && s._id && s._id.toString() === studentProfile._id.toString())) {
         return res.status(403).json({ success: false, message: 'You are not enrolled in this special batch' });
       }
@@ -574,8 +588,16 @@ router.post('/:id/attendance', protect, authorize('SuperAdmin', 'Teacher'), asyn
 router.post('/:id/test-scores', protect, authorize('SuperAdmin', 'Teacher'), async (req, res, next) => {
   try {
     const { test_name, subject, total_marks, date, scores } = req.body; // scores: [{ student: id, marks_obtained: num }]
-    if (!test_name || !total_marks || !scores || !Array.isArray(scores)) {
-      return res.status(400).json({ success: false, message: 'Test name, total marks, and student scores are required' });
+    const totalNum = Number(total_marks);
+    if (!test_name || !Number.isFinite(totalNum) || totalNum <= 0 || !scores || !Array.isArray(scores)) {
+      return res.status(400).json({ success: false, message: 'Test name, a positive total marks value, and student scores are required' });
+    }
+
+    for (const s of scores) {
+      const obtained = Number(s.marks_obtained || 0);
+      if (!Number.isFinite(obtained) || obtained < 0 || obtained > totalNum) {
+        return res.status(400).json({ success: false, message: `Marks obtained must be between 0 and ${totalNum}` });
+      }
     }
 
     const batch = await SpecialBatch.findById(req.params.id);
@@ -586,7 +608,7 @@ router.post('/:id/test-scores', protect, authorize('SuperAdmin', 'Teacher'), asy
     batch.test_scores.unshift({
       test_name,
       subject: subject || batch.subject,
-      total_marks: Number(total_marks),
+      total_marks: totalNum,
       date: date ? new Date(date) : new Date(),
       scores: scores.map(s => ({
         student: s.student,
@@ -707,14 +729,16 @@ router.post('/:id/trigger-report', protect, authorize('SuperAdmin', 'Teacher'), 
       });
       const testAvgPct = totalMarksPossible > 0 ? ((totalMarksGot / totalMarksPossible) * 100).toFixed(1) : 'N/A';
 
-      // Target email address
-      let targetEmail = student.primary_contact;
-      if (!targetEmail || !targetEmail.includes('@')) {
-        targetEmail = `${student.name.toLowerCase().replace(/\s+/g, '')}@edustride.edu`;
+      // Target email address: look up linked User account first
+      const studentUser = await User.findOne({ studentProfile: student._id });
+      let targetEmail = studentUser?.email || (student.primary_contact && student.primary_contact.includes('@') ? student.primary_contact : null);
+      if (!targetEmail) {
+        errors.push(`${student.name}: No registered email address found`);
+        continue;
       }
 
       const reportHtml = `
-        <div style="font-family: Arial, sans-serif; background-color: #07080a; color: #f8fafc; padding: 24px; borderRadius: 16px;">
+        <div style="font-family: Arial, sans-serif; background-color: #07080a; color: #f8fafc; padding: 24px; border-radius: 16px;">
           <h2 style="color: #6366f1;">EduStride Special Batch Progress Summary</h2>
           <p>Dear Parent / Guardian of <strong>${student.name}</strong>,</p>
           <p>Here is the academic and attendance progress update for <strong>${student.name}</strong> in special batch <strong>${batch.name} (${batch.subject})</strong>:</p>

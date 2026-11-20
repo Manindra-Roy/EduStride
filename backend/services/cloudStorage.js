@@ -90,7 +90,8 @@ export const deleteFromCloud = async (fileUrl) => {
         publicId = filenameWithFolder;
         destroyOptions.resource_type = 'raw';
       } else {
-        publicId = filenameWithFolder.substring(0, filenameWithFolder.lastIndexOf('.'));
+        const dotIndex = filenameWithFolder.lastIndexOf('.');
+        publicId = dotIndex !== -1 ? filenameWithFolder.substring(0, dotIndex) : filenameWithFolder;
       }
       
       await cloudinary.uploader.destroy(publicId, destroyOptions);
@@ -99,8 +100,14 @@ export const deleteFromCloud = async (fileUrl) => {
       console.error('Failed to delete cloud asset:', error);
     }
   } else {
-    // Local delete
-    const filePath = path.join(__dirname, '..', fileUrl);
+    // Local delete — restrict strictly inside backend/uploads
+    const uploadsDir = path.resolve(__dirname, '..', 'uploads');
+    const relativePath = fileUrl.replace(/^[/\\]+/, '');
+    const filePath = path.resolve(__dirname, '..', relativePath);
+    if (!filePath.startsWith(uploadsDir + path.sep)) {
+      console.warn(`Blocked local file deletion outside uploads directory: ${fileUrl}`);
+      return;
+    }
     if (fs.existsSync(filePath)) {
       try {
         fs.unlinkSync(filePath);

@@ -16,6 +16,10 @@ const PageTitleUpdater = () => {
       title = `Class ${classLevel || ''} Classroom | EduStride`;
     } else if (path === '/timetable') {
       title = 'Class Timetable & Master Schedule | EduStride';
+    } else if (path === '/special-batches') {
+      title = 'Special Batches | EduStride';
+    } else if (path === '/biometric-gate') {
+      title = 'Biometric Gate Scanner | EduStride';
     } else if (path === '/fees') {
       title = 'Tuition Fee Ledger | EduStride';
     } else if (path === '/lms') {

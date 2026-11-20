@@ -19,6 +19,7 @@ import automationRoutes from './routes/automations.js';
 import timetableRoutes from './routes/timetable.js';
 import systemRoutes from './routes/system.js';
 import specialBatchRoutes from './routes/specialBatches.js';
+import biometricRoutes from './routes/biometric.js';
 import errorHandler from './middleware/error.js';
 import ChatMessage from './models/ChatMessage.js';
 import ClassLevel from './models/ClassLevel.js';
@@ -55,6 +56,7 @@ app.use('/api/automations', automationRoutes);
 app.use('/api/timetable', timetableRoutes);
 app.use('/api/system', systemRoutes);
 app.use('/api/special-batches', specialBatchRoutes);
+app.use('/api/biometric', biometricRoutes);
 
 // Chat History Router
 app.get('/api/chats/:class_level', async (req, res, next) => {
@@ -82,10 +84,16 @@ app.get('/api/chats/:class_level', async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'Invalid class level or special batch room' });
     }
 
-    const messages = await ChatMessage.find({ class_level })
+    const roomQuery = classExists
+      ? { class_level: { $in: [class_level, class_level.toUpperCase()] } }
+      : { class_level };
+
+    const latestMessages = await ChatMessage.find(roomQuery)
       .populate('reply_to')
-      .sort({ created_at: 1 })
+      .sort({ created_at: -1 })
       .limit(100);
+
+    const messages = latestMessages.reverse();
 
     res.json({ success: true, data: messages });
   } catch (error) {

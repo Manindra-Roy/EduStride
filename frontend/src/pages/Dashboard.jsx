@@ -291,7 +291,7 @@ const Dashboard = () => {
     // Prepare chart data for student performance curve
     const chartData = recentScores.map(score => ({
       name: score.test_name,
-      percentage: Math.round((score.marks_obtained / score.total_marks) * 100),
+      percentage: score.total_marks > 0 ? Math.round((score.marks_obtained / score.total_marks) * 100) : 0,
       subject: score.subject
     })).slice(-6); // Last 6 tests
 
@@ -450,9 +450,9 @@ const Dashboard = () => {
                   (currentStudentId && s._id.toString() === currentStudentId.toString()) ||
                   (studentDetails?.name && s.name?.toLowerCase() === studentDetails.name.toLowerCase()) ||
                   (user?.email && s.name?.toLowerCase() === user.email.split('@')[0].toLowerCase())
-                )) || batch.students?.[0];
+                ));
 
-                const meritRank = myRecord?.batch_merit_rank || 1;
+                const meritRank = myRecord?.batch_merit_rank ?? '-';
                 const attendancePct = myRecord?.batch_attendance_pct !== undefined ? myRecord.batch_attendance_pct : 100;
                 const testAvgPct = myRecord?.batch_test_avg_pct || 0;
                 const meritScore = myRecord?.merit_score || 0;
@@ -474,14 +474,15 @@ const Dashboard = () => {
                         )}
                       </div>
 
-                      <a
-                        href="/chats"
+                      <Link
+                        to="/chats"
+                        state={{ targetRoom: `BATCH_${batch._id}` }}
                         className="px-3 py-1.5 rounded-xl bg-primary-600 hover:bg-primary-500 text-white font-bold text-xs transition flex items-center justify-center gap-1.5 self-start sm:self-auto shrink-0 shadow-md shadow-primary-500/20"
                         title="Open Live Chat Room & Lounge"
                       >
                         <MessageSquare size={13} />
                         <span>Chat & Lounge</span>
-                      </a>
+                      </Link>
                     </div>
 
                     {/* Student Performance Metrics Bar */}
@@ -707,7 +708,7 @@ const Dashboard = () => {
                 </span>
                 {recentScores.length > 0 && (
                   <span className="px-3 py-1.5 rounded-xl bg-emerald-950/40 border border-emerald-800/30 text-xs font-semibold text-emerald-400">
-                    Average: {Math.round(recentScores.reduce((sum, s) => sum + (s.marks_obtained / s.total_marks * 100), 0) / recentScores.length)}%
+                    Average: {Math.round(recentScores.reduce((sum, s) => sum + (s.total_marks > 0 ? (s.marks_obtained / s.total_marks * 100) : 0), 0) / recentScores.length)}%
                   </span>
                 )}
               </div>
@@ -730,7 +731,7 @@ const Dashboard = () => {
                     </thead>
                     <tbody className="divide-y divide-dark-850/40 text-sm">
                       {recentScores.map((score, index) => {
-                        const percentage = Math.round((score.marks_obtained / score.total_marks) * 100);
+                        const percentage = score.total_marks > 0 ? Math.round((score.marks_obtained / score.total_marks) * 100) : 0;
                         let badgeClass = '';
                         let statusLabel = '';
                         if (percentage >= 85) {
@@ -783,7 +784,7 @@ const Dashboard = () => {
                 {/* Mobile Card view */}
                 <div className="grid grid-cols-1 gap-3 lg:hidden">
                   {recentScores.map((score, index) => {
-                    const percentage = Math.round((score.marks_obtained / score.total_marks) * 100);
+                    const percentage = score.total_marks > 0 ? Math.round((score.marks_obtained / score.total_marks) * 100) : 0;
                     let badgeClass = '';
                     let statusLabel = '';
                     if (percentage >= 85) {
@@ -851,7 +852,7 @@ const Dashboard = () => {
                 </span>
                 {tuitionScores.length > 0 && (
                   <span className="px-3 py-1.5 rounded-xl bg-emerald-950/40 border border-emerald-800/30 text-xs font-semibold text-emerald-400">
-                    Average: {Math.round(tuitionScores.reduce((sum, s) => sum + (s.marks_obtained / s.total_marks * 100), 0) / tuitionScores.length)}%
+                    Average: {Math.round(tuitionScores.reduce((sum, s) => sum + (s.total_marks > 0 ? (s.marks_obtained / s.total_marks * 100) : 0), 0) / tuitionScores.length)}%
                   </span>
                 )}
               </div>
@@ -874,7 +875,7 @@ const Dashboard = () => {
                     </thead>
                     <tbody className="divide-y divide-dark-850/40 text-sm">
                       {tuitionScores.map((score, index) => {
-                        const percentage = Math.round((score.marks_obtained / score.total_marks) * 100);
+                        const percentage = score.total_marks > 0 ? Math.round((score.marks_obtained / score.total_marks) * 100) : 0;
                         let badgeClass = '';
                         let statusLabel = '';
                         if (percentage >= 85) {
@@ -927,7 +928,7 @@ const Dashboard = () => {
                 {/* Mobile Card view */}
                 <div className="grid grid-cols-1 gap-3 lg:hidden">
                   {tuitionScores.map((score, index) => {
-                    const percentage = Math.round((score.marks_obtained / score.total_marks) * 100);
+                    const percentage = score.total_marks > 0 ? Math.round((score.marks_obtained / score.total_marks) * 100) : 0;
                     let badgeClass = '';
                     let statusLabel = '';
                     if (percentage >= 85) {
@@ -1044,7 +1045,7 @@ const Dashboard = () => {
         </div>
 
         <div className="grid grid-cols-2 sm:flex sm:flex-wrap items-center gap-2 sm:gap-2.5 w-full sm:w-auto">
-          <Link to="/classes" className="px-3 py-2.5 sm:px-3.5 sm:py-2 rounded-xl bg-dark-900/90 hover:bg-primary-600/20 hover:border-primary-500/40 border border-dark-800 text-xs font-semibold text-white transition flex items-center justify-center sm:justify-start gap-2 group shadow-sm active:scale-95">
+          <Link to={`/class/${classes[0] || 'VII'}`} className="px-3 py-2.5 sm:px-3.5 sm:py-2 rounded-xl bg-dark-900/90 hover:bg-primary-600/20 hover:border-primary-500/40 border border-dark-800 text-xs font-semibold text-white transition flex items-center justify-center sm:justify-start gap-2 group shadow-sm active:scale-95">
             <Users size={14} className="text-primary-400 group-hover:scale-110 transition-transform shrink-0" />
             <span className="truncate">Class Roster</span>
           </Link>
@@ -1208,9 +1209,11 @@ const Dashboard = () => {
               </div>
             </div>
           </div>
-          <Link to="/automations" className="w-full mt-4 text-center py-2 rounded-xl bg-dark-900 hover:bg-dark-800 border border-dark-850 text-xs font-semibold text-slate-300 transition duration-150 block">
-            Manage Cron Systems
-          </Link>
+          {user?.role === 'SuperAdmin' && (
+            <Link to="/automations" className="w-full mt-4 text-center py-2 rounded-xl bg-dark-900 hover:bg-dark-800 border border-dark-850 text-xs font-semibold text-slate-300 transition duration-150 block">
+              Manage Cron Systems
+            </Link>
+          )}
         </div>
       </div>
     </div>

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import Logo from './Logo';
 
 const LOADING_STATUSES = [
@@ -13,6 +13,11 @@ const Preloader = ({ loading, onFinished }) => {
   const [statusIndex, setStatusIndex] = useState(0);
   const [fadeOut, setFadeOut] = useState(false);
   const [shouldRender, setShouldRender] = useState(true);
+  const onFinishedRef = useRef(onFinished);
+
+  useEffect(() => {
+    onFinishedRef.current = onFinished;
+  }, [onFinished]);
 
   // Smooth Progress Interpolation Logic
   useEffect(() => {
@@ -53,7 +58,7 @@ const Preloader = ({ loading, onFinished }) => {
 
       const unmountTimeout = setTimeout(() => {
         setShouldRender(false);
-        if (onFinished) onFinished();
+        if (onFinishedRef.current) onFinishedRef.current();
       }, 650);
 
       return () => {
@@ -61,7 +66,7 @@ const Preloader = ({ loading, onFinished }) => {
         clearTimeout(unmountTimeout);
       };
     }
-  }, [progress, onFinished]);
+  }, [progress]);
 
   if (!shouldRender) return null;
 

@@ -6,108 +6,10 @@ import Attendance from '../models/Attendance.js';
 import Timetable from '../models/Timetable.js';
 import { protect, authorize } from '../middleware/auth.js';
 import { deleteFromCloud } from '../services/cloudStorage.js';
+import { recalculateRollNumbers, recalculateMonthlyAttendance } from '../services/attendanceSync.js';
 
 const router = express.Router();
 const DAYS_OF_WEEK_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-
-// Helper to recalculate roll numbers based on student progress
-const recalculateRollNumbers = async (class_level) => {
-  try {
-    const students = await Student.find({ class_level });
-    if (students.length === 0) return;
-
-    const studentsWithProgress = students.map(student => {
-      let totalMarksObtained = 0;
-      let totalMarksPossible = 0;
-
-      if (student.test_scores && student.test_scores.length > 0) {
-        student.test_scores.forEach(score => {
-          totalMarksObtained += score.marks_obtained;
-          totalMarksPossible += score.total_marks;
-        });
-      }
-
-      const testScorePercentage = totalMarksPossible > 0 
-        ? (totalMarksObtained / totalMarksPossible) * 100 
-        : 0;
-
-      // Calculate attendance percentage
-      let totalClasses = 0;
-      let totalAttended = 0;
-      if (student.attendance_history && student.attendance_history.length > 0) {
-        student.attendance_history.forEach(att => {
-          totalClasses += att.total_classes;
-          totalAttended += att.attended;
-        });
-      }
-      const attendancePercentage = totalClasses > 0
-        ? (totalAttended / totalClasses) * 100
-        : 0;
-
-      // Combined progress score: 80% test scores, 20% attendance
-      let progressScore = 0;
-      if (totalMarksPossible > 0) {
-        progressScore = (testScorePercentage * 0.8) + (attendancePercentage * 0.2);
-      } else if (totalClasses > 0) {
-        progressScore = attendancePercentage;
-      }
-
-      return {
-        _id: student._id,
-        status: student.status || 'Active',
-        progressScore,
-        testScorePercentage,
-        attendancePercentage,
-        joining_date: student.joining_date || new Date(),
-        name: student.name
-      };
-    });
-
-    // Sort students:
-    // 1. status ('Active' first)
-    // 2. progressScore (descending)
-    // 3. testScorePercentage (descending)
-    // 4. attendancePercentage (descending)
-    // 5. joining_date (ascending)
-    // 6. name (ascending)
-    studentsWithProgress.sort((a, b) => {
-      if (a.status !== b.status) {
-        return a.status === 'Active' ? -1 : 1;
-      }
-      if (b.progressScore !== a.progressScore) {
-        return b.progressScore - a.progressScore;
-      }
-      if (b.testScorePercentage !== a.testScorePercentage) {
-        return b.testScorePercentage - a.testScorePercentage;
-      }
-      if (b.attendancePercentage !== a.attendancePercentage) {
-        return b.attendancePercentage - a.attendancePercentage;
-      }
-      const timeA = a.joining_date ? new Date(a.joining_date).getTime() : 0;
-      const timeB = b.joining_date ? new Date(b.joining_date).getTime() : 0;
-      const validA = isNaN(timeA) ? 0 : timeA;
-      const validB = isNaN(timeB) ? 0 : timeB;
-      if (validA !== validB) {
-        return validA - validB;
-      }
-      return a.name.localeCompare(b.name);
-    });
-
-    // Assign temporary roll numbers first to avoid unique index violation
-    for (let i = 0; i < studentsWithProgress.length; i++) {
-      const tempRoll = `TEMP_${Date.now()}_${i + 1}`;
-      await Student.findByIdAndUpdate(studentsWithProgress[i]._id, { roll_number: tempRoll });
-    }
-
-    // Assign final roll numbers sequentially (01, 02, 03...)
-    for (let i = 0; i < studentsWithProgress.length; i++) {
-      const finalRoll = (i + 1).toString().padStart(2, '0');
-      await Student.findByIdAndUpdate(studentsWithProgress[i]._id, { roll_number: finalRoll });
-    }
-  } catch (error) {
-    console.error(`Error recalculating roll numbers for class ${class_level}:`, error);
-  }
-};
 
 // Helper to initialize 12-month ledger for a student
 const initializeFeeLedger = async (studentId, year = new Date().getFullYear()) => {
@@ -183,9 +85,10 @@ router.get('/', protect, async (req, res, next) => {
         
         // Allow search on classmates
         if (search) {
+          const escapedSearch = String(search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
           query.$or = [
-            { name: { $regex: search, $options: 'i' } },
-            { roll_number: { $regex: search, $options: 'i' } }
+            { name: { $regex: escapedSearch, $options: 'i' } },
+            { roll_number: { $regex: escapedSearch, $options: 'i' } }
           ];
         }
       } else {
@@ -197,9 +100,10 @@ router.get('/', protect, async (req, res, next) => {
         query.class_level = class_level;
       }
       if (search) {
+        const escapedSearch = String(search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         query.$or = [
-          { name: { $regex: search, $options: 'i' } },
-          { roll_number: { $regex: search, $options: 'i' } }
+          { name: { $regex: escapedSearch, $options: 'i' } },
+          { roll_number: { $regex: escapedSearch, $options: 'i' } }
         ];
       }
     }
@@ -226,14 +130,16 @@ router.get('/', protect, async (req, res, next) => {
       }
     }
 
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.max(1, parseInt(limit, 10) || 10);
     const count = await Student.countDocuments(query);
-    const pages = Math.ceil(count / limit);
-    const skip = (page - 1) * limit;
+    const pages = Math.max(1, Math.ceil(count / limitNum));
+    const skip = (pageNum - 1) * limitNum;
 
     const students = await Student.find(query)
       .sort({ class_level: 1, roll_number: 1 })
       .skip(skip)
-      .limit(Number(limit));
+      .limit(limitNum);
 
     // Attach fee status to results for tables, with role-based redactions
     const studentDataWithFees = await Promise.all(students.map(async (student) => {
@@ -262,6 +168,7 @@ router.get('/', protect, async (req, res, next) => {
         studentObj.test_scores = [];
         studentObj.tuition_test_scores = [];
         studentObj.attendance_history = [];
+        studentObj.academic_history = [];
       }
 
       return {
@@ -373,13 +280,13 @@ router.put('/:id', protect, authorize('SuperAdmin', 'Teacher'), async (req, res,
     const { class_level, status } = req.body;
 
     // Remove roll_number from update payload since it's auto-calculated
-    if (req.body.roll_number) {
+    if ('roll_number' in req.body) {
       delete req.body.roll_number;
     }
 
     // If class level is changing, temporarily set roll number to a unique string to avoid unique key index clashes
     if (class_level && class_level !== oldClassLevel) {
-      req.body.roll_number = `TEMP_${Date.now()}_MOVE`;
+      req.body.roll_number = `TEMP_${Date.now()}_${student._id}_MOVE`;
     }
 
     // Handle free tier status and monthly fee logic
@@ -395,17 +302,16 @@ router.put('/:id', protect, authorize('SuperAdmin', 'Teacher'), async (req, res,
       runValidators: true
     });
 
-    // Recalculate roll numbers for the old class
-    await recalculateRollNumbers(oldClassLevel);
-
-    // Recalculate for the new class if it changed
+    // Deduplicate classes needing roll number recalculation
+    const classesToRecalc = new Set([oldClassLevel]);
     if (class_level && class_level !== oldClassLevel) {
-      await recalculateRollNumbers(class_level);
+      classesToRecalc.add(class_level);
     }
-
-    // Recalculate if status changed (Active/Inactive)
-    if (status && status !== oldStatus) {
-      await recalculateRollNumbers(updatedStudent.class_level);
+    if (status && status !== oldStatus && updatedStudent?.class_level) {
+      classesToRecalc.add(updatedStudent.class_level);
+    }
+    for (const cls of classesToRecalc) {
+      await recalculateRollNumbers(cls);
     }
 
     const finalStudent = await Student.findById(req.params.id);
@@ -603,71 +509,8 @@ router.post('/attendance/bulk', protect, authorize('SuperAdmin', 'Teacher'), asy
       { upsert: true, new: true }
     );
 
-    // Recalculate monthly attendance for all active students in the class
-    const studentsInClass = await Student.find({ class_level, status: 'Active' });
-
-    const startOfMonth = new Date(`${trackingMonth}-01T00:00:00.000Z`);
-    const year = parseInt(trackingMonth.split('-')[0]);
-    const month = parseInt(trackingMonth.split('-')[1]);
-    const nextMonthYear = month === 12 ? year + 1 : year;
-    const nextMonthVal = month === 12 ? 1 : month + 1;
-    const nextMonthStr = nextMonthVal < 10 ? `0${nextMonthVal}` : `${nextMonthVal}`;
-    const endOfMonth = new Date(`${nextMonthYear}-${nextMonthStr}-01T00:00:00.000Z`);
-
-    const monthlySheets = await Attendance.find({
-      class_level,
-      date: {
-        $gte: startOfMonth,
-        $lt: endOfMonth
-      }
-    });
-
-    const updatePromises = studentsInClass.map(async (student) => {
-      let total_classes = 0;
-      let attended = 0;
-
-      monthlySheets.forEach(sheet => {
-        const studentRecord = sheet.records.find(r => r.student.toString() === student._id.toString());
-        if (studentRecord) {
-          total_classes++;
-          if (studentRecord.status === 'Present' || studentRecord.status === 'Late') {
-            attended++;
-          }
-        }
-      });
-
-      return Student.findOneAndUpdate(
-        {
-          _id: student._id,
-          'attendance_history.month': trackingMonth
-        },
-        {
-          $set: {
-            'attendance_history.$.total_classes': total_classes,
-            'attendance_history.$.attended': attended
-          }
-        }
-      ).then(async (result) => {
-        if (!result) {
-          return Student.findByIdAndUpdate(
-            student._id,
-            {
-              $push: {
-                attendance_history: {
-                  month: trackingMonth,
-                  total_classes,
-                  attended
-                }
-              }
-            }
-          );
-        }
-        return result;
-      });
-    });
-
-    await Promise.all(updatePromises);
-    await recalculateRollNumbers(class_level);
+    // Recalculate monthly attendance & dynamic roll numbers for all active students in the class
+    await recalculateMonthlyAttendance(class_level, trackingMonth);
 
     res.json({
       success: true,
@@ -854,9 +697,10 @@ router.post('/promote', protect, authorize('SuperAdmin'), async (req, res, next)
       throw new Error('Please specify target class level');
     }
 
-    if (!newAcademicYear) {
+    const parsedYear = Number(newAcademicYear);
+    if (!newAcademicYear || !Number.isInteger(parsedYear) || parsedYear < 2000 || parsedYear > 2100) {
       res.status(400);
-      throw new Error('Please specify new academic year');
+      throw new Error('Please specify a valid new academic year');
     }
 
     let query = {};
@@ -876,7 +720,9 @@ router.post('/promote', protect, authorize('SuperAdmin'), async (req, res, next)
     }
 
     const processedStudents = [];
-    const archivedYear = Number(newAcademicYear) - 1;
+    const affectedClasses = new Set();
+    if (sourceClass) affectedClasses.add(sourceClass);
+    const archivedYear = parsedYear - 1;
 
     for (const student of students) {
       // Fetch the student's current fee ledger to archive
@@ -890,6 +736,7 @@ router.post('/promote', protect, authorize('SuperAdmin'), async (req, res, next)
         roll_number: student.roll_number,
         attendance_history: student.attendance_history || [],
         test_scores: student.test_scores || [],
+        tuition_test_scores: student.tuition_test_scores || [],
         fee_ledger: ledgerMonths,
         promotion_status: promotionStatus,
         promoted_at: new Date()
@@ -902,10 +749,11 @@ router.post('/promote', protect, authorize('SuperAdmin'), async (req, res, next)
       // 2. Clear current session data
       student.test_scores = [];
       student.attendance_history = [];
-      student.tuition_test_scores = []; // clear tuition scores too
+      student.tuition_test_scores = []; // clear tuition scores after archiving
 
       // 3. Move to target class
       const oldClass = student.class_level;
+      affectedClasses.add(oldClass);
       student.class_level = targetClass.toUpperCase().trim();
 
       if (promotionStatus === 'Graduated' || targetClass.toUpperCase().trim() === 'GRADUATED') {
@@ -918,7 +766,7 @@ router.post('/promote', protect, authorize('SuperAdmin'), async (req, res, next)
       await student.save();
 
       // 5. Update/Reset Fee Ledger for the new academic year
-      await resetOrCreateFeeLedger(student._id, Number(newAcademicYear));
+      await resetOrCreateFeeLedger(student._id, parsedYear);
 
       processedStudents.push({
         _id: student._id,
@@ -929,11 +777,11 @@ router.post('/promote', protect, authorize('SuperAdmin'), async (req, res, next)
       });
     }
 
-    // 6. Recalculate roll numbers for source and target classes
-    if (sourceClass) {
-      await recalculateRollNumbers(sourceClass);
+    // 6. Recalculate roll numbers for all affected source and target classes
+    affectedClasses.add(targetClass.toUpperCase().trim());
+    for (const cls of affectedClasses) {
+      await recalculateRollNumbers(cls);
     }
-    await recalculateRollNumbers(targetClass.toUpperCase().trim());
 
     res.json({
       success: true,

@@ -31,7 +31,11 @@ export const initCronJobs = () => {
           const student = ledger.student_id;
           if (student.is_free_tier) continue;
           const studentUser = await User.findOne({ studentProfile: student._id });
-          const parentEmail = studentUser ? studentUser.email : `${student.parent_name.toLowerCase().replace(/\s+/g, '')}@example.com`;
+          if (!studentUser?.email) {
+            console.warn(`[Fee Nagging] Skipping ${student.name}: no registered email.`);
+            continue;
+          }
+          const parentEmail = studentUser.email;
 
           const mailOptions = {
             from: '"School ERP Admin" <admin@schoolerp.com>',
@@ -40,8 +44,12 @@ export const initCronJobs = () => {
             text: `Dear ${student.parent_name},\n\nThis is a friendly reminder that the tuition fee of ₹${student.monthly_fee || 0} for ${student.name} (Class ${student.class_level}, Roll No ${student.roll_number}) for the month of ${currentMonthName} is currently UNPAID. Please clear the outstanding balance via the student portal at edustride.in at your earliest convenience.\n\nBest regards,\nSchool Administration`
           };
 
-          await sendEmail(mailOptions);
-          console.log(`[Fee Nagging] Sent reminder to ${student.parent_name} (${parentEmail}) for student ${student.name}`);
+          try {
+            await sendEmail(mailOptions);
+            console.log(`[Fee Nagging] Sent reminder to ${student.parent_name} (${parentEmail}) for student ${student.name}`);
+          } catch (mailErr) {
+            console.error(`[Fee Nagging] Failed sending email to ${parentEmail} for ${student.name}:`, mailErr.message);
+          }
         }
       }
     } catch (error) {
@@ -63,7 +71,11 @@ export const initCronJobs = () => {
           const rate = (monthlyAttendance.attended / monthlyAttendance.total_classes) * 100;
           if (rate < 75) {
             const studentUser = await User.findOne({ studentProfile: student._id });
-            const parentEmail = studentUser ? studentUser.email : `${student.parent_name.toLowerCase().replace(/\s+/g, '')}@example.com`;
+            if (!studentUser?.email) {
+              console.warn(`[Attendance Alert] Skipping ${student.name}: no registered email.`);
+              continue;
+            }
+            const parentEmail = studentUser.email;
             const mailOptions = {
               from: '"School Academic Office" <academic@schoolerp.com>',
               to: parentEmail,
@@ -71,8 +83,12 @@ export const initCronJobs = () => {
               text: `Dear ${student.parent_name},\n\nWe are writing to inform you that your ward, ${student.name} (Class ${student.class_level}, Roll No ${student.roll_number}), has a running attendance rate of ${rate.toFixed(1)}% for this month. This is below the required 75% threshold.\n\nPlease ensure they attend regular sessions. You can monitor daily attendance details on the student portal at edustride.in. Feel free to contact the class teacher if you have any queries.\n\nBest regards,\nAcademic Coordinator`
             };
 
-            await sendEmail(mailOptions);
-            console.log(`[Attendance Alert] Sent warning to ${student.parent_name} (${parentEmail}) for ${student.name} (${rate.toFixed(1)}%)`);
+            try {
+              await sendEmail(mailOptions);
+              console.log(`[Attendance Alert] Sent warning to ${student.parent_name} (${parentEmail}) for ${student.name} (${rate.toFixed(1)}%)`);
+            } catch (mailErr) {
+              console.error(`[Attendance Alert] Failed sending email to ${parentEmail} for ${student.name}:`, mailErr.message);
+            }
           }
         }
       }

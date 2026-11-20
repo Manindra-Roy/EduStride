@@ -20,8 +20,16 @@ const LmsDownload = () => {
   const [loading, setLoading] = useState(true);
   
   // Filters
-  const [selectedClass, setSelectedClass] = useState(user.role === 'Student' ? user.studentProfile?.class_level : 'All');
+  const [selectedClass, setSelectedClass] = useState(
+    user.role === 'Student' ? (user.studentProfile?.class_level || '') : 'All'
+  );
   const [selectedSubject, setSelectedSubject] = useState('All');
+
+  useEffect(() => {
+    if (user.role === 'Student' && user.studentProfile?.class_level) {
+      setSelectedClass(user.studentProfile.class_level);
+    }
+  }, [user.role, user.studentProfile?.class_level]);
 
   // Modals
   const [showUploadModal, setShowUploadModal] = useState(false);
@@ -43,6 +51,7 @@ const LmsDownload = () => {
 
   // Fetch filter subjects based on active selection
   useEffect(() => {
+    if (!selectedClass) return;
     const fetchFilterSubjects = async () => {
       try {
         const url = selectedClass === 'All' ? '/api/subjects' : `/api/subjects?class_level=${selectedClass}`;
@@ -262,7 +271,10 @@ const LmsDownload = () => {
           {user.role !== 'Student' && (
             <select
               value={selectedClass}
-              onChange={(e) => setSelectedClass(e.target.value)}
+              onChange={(e) => {
+                setSelectedClass(e.target.value);
+                setSelectedSubject('All');
+              }}
               className="px-3.5 py-2 rounded-xl bg-dark-900 border border-dark-800 text-white text-xs outline-none focus:border-primary-500 transition font-medium"
             >
               <option value="All">All Classes</option>

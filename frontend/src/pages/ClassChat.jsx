@@ -44,10 +44,16 @@ const VoicePlayer = ({ src }) => {
     if (audioRef.current) {
       if (playing) {
         audioRef.current.pause();
+        setPlaying(false);
       } else {
-        audioRef.current.play();
+        setPlaying(true);
+        const playPromise = audioRef.current.play();
+        if (playPromise && typeof playPromise.catch === 'function') {
+          playPromise.catch(() => {
+            setPlaying(false);
+          });
+        }
       }
-      setPlaying(!playing);
     }
   };
 
@@ -348,15 +354,32 @@ const ClassChat = ({ setAppSidebarOpen }) => {
     });
   };
 
+  const isSafeAttachmentUri = (uri) => {
+    if (typeof uri !== 'string') return false;
+    const trimmed = uri.trim();
+    if (/^https?:\/\//i.test(trimmed)) return true;
+    if (/^data:/i.test(trimmed)) {
+      if (/^data:(text\/html|image\/svg\+xml|application\/javascript|text\/javascript)/i.test(trimmed)) {
+        return false;
+      }
+      return true;
+    }
+    return false;
+  };
+
   const parseMessage = (text) => {
-    if (text && text.startsWith('{"isAttachment":true')) {
+    if (typeof text === 'string' && text.startsWith('{"isAttachment":true')) {
       try {
-        return JSON.parse(text);
+        const parsed = JSON.parse(text);
+        if (parsed && parsed.isAttachment && !isSafeAttachmentUri(parsed.content)) {
+          return { isAttachment: false, text: '[Blocked unsafe attachment]' };
+        }
+        return parsed;
       } catch (e) {
         return { isAttachment: false, text };
       }
     }
-    return { isAttachment: false, text };
+    return { isAttachment: false, text: text || '' };
   };
 
   const getLastMessagePreview = (roomName) => {
@@ -442,13 +465,22 @@ const ClassChat = ({ setAppSidebarOpen }) => {
     fetchRooms();
   }, [user]);
 
-  // Fetch chat history from DB
-  const fetchChatHistory = async (room) => {
+  // Fetch chat history from DB (merges safely with any messages received mid-fetch)
+  const fetchChatHistory = async (room, isStillActive = () => true) => {
     if (!room) return;
     try {
       const res = await axios.get(`/api/chats/${room}`);
-      if (res.data.success) {
-        setMessages(res.data.data);
+      if (res.data.success && isStillActive()) {
+        const fetched = Array.isArray(res.data.data) ? res.data.data : [];
+        setMessages((prev) => {
+          const roomPrev = prev.filter((m) => m.class_level === room);
+          const mergedMap = new Map();
+          fetched.forEach((m) => mergedMap.set(m._id, m));
+          roomPrev.forEach((m) => {
+            if (!mergedMap.has(m._id)) mergedMap.set(m._id, m);
+          });
+          return Array.from(mergedMap.values());
+        });
       }
     } catch (err) {
       console.error('Failed to load chat history:', err);
@@ -466,6 +498,7 @@ const ClassChat = ({ setAppSidebarOpen }) => {
   useEffect(() => {
     if (!currentRoom || !socketRef.current) return;
     const sock = socketRef.current;
+    let isActive = true;
 
     // Join chat presence room
     sock.emit('join_room_chat', {
@@ -481,7 +514,7 @@ const ClassChat = ({ setAppSidebarOpen }) => {
     // Global message listener (handles active stream and unread badges)
     const handleNewMessageGlobal = (msg) => {
       if (msg.class_level === currentRoom) {
-        setMessages((prev) => [...prev, msg]);
+        setMessages((prev) => (prev.some((m) => m._id === msg._id) ? prev : [...prev, msg]));
       } else {
         setUnreadCounts((prev) => ({
           ...prev,
@@ -525,9 +558,11 @@ const ClassChat = ({ setAppSidebarOpen }) => {
     setChatSearchQuery('');
     setShowSearchInChat(false);
     setTypingUsers({});
-    fetchChatHistory(currentRoom);
+    setMessages([]);
+    fetchChatHistory(currentRoom, () => isActive);
 
     return () => {
+      isActive = false;
       sock.emit('leave_room_chat');
       sock.off('new_message', handleNewMessageGlobal);
       sock.off('message_deleted', handleMessageDeleted);
@@ -543,12 +578,14 @@ const ClassChat = ({ setAppSidebarOpen }) => {
 
   useEffect(() => {
     if (!socketRef.current || !currentRoom) return;
+    const roomForTyping = currentRoom;
+    const senderName = user.studentProfile?.name || (user.role === 'SuperAdmin' ? 'Admin' : 'Teacher');
 
     if (typedMessage.trim() && !isTypingRef.current) {
       isTypingRef.current = true;
       socketRef.current.emit('typing_status', {
-        class_level: currentRoom,
-        sender_name: user.studentProfile?.name || (user.role === 'SuperAdmin' ? 'Admin' : 'Teacher'),
+        class_level: roomForTyping,
+        sender_name: senderName,
         is_typing: true
       });
     }
@@ -558,9 +595,9 @@ const ClassChat = ({ setAppSidebarOpen }) => {
     typingTimeoutRef.current = setTimeout(() => {
       if (isTypingRef.current) {
         isTypingRef.current = false;
-        socketRef.current.emit('typing_status', {
-          class_level: currentRoom,
-          sender_name: user.studentProfile?.name || (user.role === 'SuperAdmin' ? 'Admin' : 'Teacher'),
+        socketRef.current?.emit('typing_status', {
+          class_level: roomForTyping,
+          sender_name: senderName,
           is_typing: false
         });
       }
@@ -568,6 +605,14 @@ const ClassChat = ({ setAppSidebarOpen }) => {
 
     return () => {
       if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+      if (isTypingRef.current) {
+        isTypingRef.current = false;
+        socketRef.current?.emit('typing_status', {
+          class_level: roomForTyping,
+          sender_name: senderName,
+          is_typing: false
+        });
+      }
     };
   }, [typedMessage, currentRoom]);
 
@@ -611,10 +656,23 @@ const ClassChat = ({ setAppSidebarOpen }) => {
     };
   }, []);
 
-  // Clean recording timers on unmount
+  // Clean recording timers and active microphone stream on unmount
+  const recordingStreamRef = useRef(null);
   useEffect(() => {
     return () => {
       if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+        mediaRecorderRef.current.onstop = null;
+        try {
+          mediaRecorderRef.current.stop();
+        } catch {
+          // ignore
+        }
+      }
+      if (recordingStreamRef.current) {
+        recordingStreamRef.current.getTracks().forEach(track => track.stop());
+        recordingStreamRef.current = null;
+      }
     };
   }, []);
 
@@ -657,7 +715,9 @@ const ClassChat = ({ setAppSidebarOpen }) => {
   // Voice Recording Functions
   const startRecording = async () => {
     try {
+      const targetRoomAtStart = currentRoom;
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      recordingStreamRef.current = stream;
       audioChunksRef.current = [];
       const mediaRecorder = new MediaRecorder(stream);
       mediaRecorderRef.current = mediaRecorder;
@@ -682,7 +742,7 @@ const ClassChat = ({ setAppSidebarOpen }) => {
           });
           
           const messageData = {
-            class_level: currentRoom,
+            class_level: targetRoomAtStart,
             sender_name: user.studentProfile?.name || (user.role === 'SuperAdmin' ? 'Admin' : 'Teacher'),
             sender_role: user.role,
             message_text: msgPayload
@@ -694,6 +754,9 @@ const ClassChat = ({ setAppSidebarOpen }) => {
         };
         
         stream.getTracks().forEach(track => track.stop());
+        if (recordingStreamRef.current === stream) {
+          recordingStreamRef.current = null;
+        }
       };
 
       mediaRecorder.start();
@@ -816,9 +879,10 @@ const ClassChat = ({ setAppSidebarOpen }) => {
     return colors[hash % colors.length];
   };
 
-  const filteredRooms = rooms.filter(room => 
-    `Class ${room} Lounge`.toLowerCase().includes(searchFilter.toLowerCase())
-  );
+  const filteredRooms = rooms.filter(room => {
+    const label = roomMetadataMap[room]?.name || `Class ${room} Lounge`;
+    return label.toLowerCase().includes(searchFilter.toLowerCase());
+  });
 
   // Search filter for chat messages stream
   const searchedMessages = messages.filter(msg => {
@@ -1038,13 +1102,24 @@ const ClassChat = ({ setAppSidebarOpen }) => {
               <div className="flex items-center gap-3">
                 {/* Mobile Navigation Toggle */}
                 {user.role === 'Student' ? (
-                  <button 
-                    onClick={() => setAppSidebarOpen && setAppSidebarOpen(true)}
-                    className="p-1.5 rounded-xl hover:bg-dark-900/60 text-slate-400 transition lg:hidden mr-1 cursor-pointer"
-                    title="Open Navigation"
-                  >
-                    <Menu size={18} />
-                  </button>
+                  <div className="flex items-center gap-1 mr-1">
+                    <button 
+                      onClick={() => setAppSidebarOpen && setAppSidebarOpen(true)}
+                      className="p-1.5 rounded-xl hover:bg-dark-900/60 text-slate-400 transition lg:hidden cursor-pointer"
+                      title="Open Navigation"
+                    >
+                      <Menu size={18} />
+                    </button>
+                    {rooms.length > 1 && (
+                      <button
+                        onClick={() => setShowSidebarOnMobile(true)}
+                        className="p-1.5 rounded-xl hover:bg-dark-900/60 text-slate-400 transition md:hidden cursor-pointer"
+                        title="Switch Chat Room"
+                      >
+                        <ArrowLeft size={18} />
+                      </button>
+                    )}
+                  </div>
                 ) : (
                   <button 
                     onClick={() => setShowSidebarOnMobile(true)}
@@ -1327,9 +1402,9 @@ const ClassChat = ({ setAppSidebarOpen }) => {
                               {msg.reply_to.sender_name}
                             </span>
                             <span className="italic block truncate">
-                              {msg.reply_to.message_text.startsWith('{') && msg.reply_to.message_text.includes('"isAttachment"') 
+                              {typeof msg.reply_to?.message_text === 'string' && msg.reply_to.message_text.startsWith('{') && msg.reply_to.message_text.includes('"isAttachment"') 
                                 ? '📎 Attachment' 
-                                : msg.reply_to.message_text}
+                                : (msg.reply_to?.message_text || 'Message unavailable')}
                             </span>
                           </div>
                         )}
@@ -1595,9 +1670,9 @@ const ClassChat = ({ setAppSidebarOpen }) => {
                         </span>
                       </div>
                       <p className="text-slate-400 truncate italic">
-                        {replyToMessage.message_text.startsWith('{') && replyToMessage.message_text.includes('"isAttachment"') 
+                        {typeof replyToMessage?.message_text === 'string' && replyToMessage.message_text.startsWith('{') && replyToMessage.message_text.includes('"isAttachment"') 
                           ? '📎 Attachment' 
-                          : replyToMessage.message_text}
+                          : (replyToMessage?.message_text || '')}
                       </p>
                     </div>
                     <button

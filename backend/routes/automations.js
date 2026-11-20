@@ -81,7 +81,11 @@ router.post('/trigger-fee-nag', protect, authorize('SuperAdmin'), async (req, re
         const student = ledger.student_id;
         if (student.is_free_tier) continue;
         const studentUser = await User.findOne({ studentProfile: student._id });
-        const parentEmail = studentUser ? studentUser.email : `${student.parent_name.toLowerCase().replace(/\s+/g, '')}@example.com`;
+        if (!studentUser?.email) {
+          console.warn(`[Fee Nagging] Skipping ${student.name}: no registered email.`);
+          continue;
+        }
+        const parentEmail = studentUser.email;
 
         const mailOptions = {
           from: '"EduStride Admin" <admin@edustride.com>',
@@ -90,8 +94,12 @@ router.post('/trigger-fee-nag', protect, authorize('SuperAdmin'), async (req, re
           text: `Dear ${student.parent_name},\n\nThis is a friendly reminder that the tuition fee of ₹${student.monthly_fee || 0} for ${student.name} (Class ${student.class_level}, Roll No ${student.roll_number}) for the month of ${currentMonthName} is currently UNPAID. Please clear the outstanding balance via the student portal at edustride.in at your earliest convenience.\n\nBest regards,\nEduStride Administration`
         };
 
-        await sendEmail(mailOptions);
-        sentCount++;
+        try {
+          await sendEmail(mailOptions);
+          sentCount++;
+        } catch (mailErr) {
+          console.error(`[Fee Nagging] Failed sending email to ${parentEmail} for ${student.name}:`, mailErr.message);
+        }
       }
     }
 
@@ -119,7 +127,11 @@ router.post('/trigger-attendance-alert', protect, authorize('SuperAdmin'), async
         const rate = (monthlyAttendance.attended / monthlyAttendance.total_classes) * 100;
         if (rate < 75) {
           const studentUser = await User.findOne({ studentProfile: student._id });
-          const parentEmail = studentUser ? studentUser.email : `${student.parent_name.toLowerCase().replace(/\s+/g, '')}@example.com`;
+          if (!studentUser?.email) {
+            console.warn(`[Attendance Alert] Skipping ${student.name}: no registered email.`);
+            continue;
+          }
+          const parentEmail = studentUser.email;
           const mailOptions = {
             from: '"EduStride Academic Office" <academic@edustride.com>',
             to: parentEmail,
@@ -127,8 +139,12 @@ router.post('/trigger-attendance-alert', protect, authorize('SuperAdmin'), async
             text: `Dear ${student.parent_name},\n\nWe are writing to inform you that your ward, ${student.name} (Class ${student.class_level}, Roll No ${student.roll_number}), has a running attendance rate of ${rate.toFixed(1)}% for this month. This is below the required 75% threshold.\n\nPlease ensure they attend regular sessions. You can monitor daily attendance details on the student portal at edustride.in. Feel free to contact the class teacher if you have any queries.\n\nBest regards,\nEduStride Academic Office`
           };
 
-          await sendEmail(mailOptions);
-          sentCount++;
+          try {
+            await sendEmail(mailOptions);
+            sentCount++;
+          } catch (mailErr) {
+            console.error(`[Attendance Alert] Failed sending email to ${parentEmail} for ${student.name}:`, mailErr.message);
+          }
         }
       }
     }
@@ -249,7 +265,7 @@ router.post('/trigger-progress-report', protect, authorize('SuperAdmin'), async 
 
       // 5. Parent email
       const studentUser = await User.findOne({ studentProfile: student._id });
-      const parentEmail = studentUser ? studentUser.email : `${student.parent_name.toLowerCase().replace(/\s+/g, '')}@example.com`;
+      const parentEmail = studentUser?.email || null;
 
       // 6. Send Email via Nodemailer
       const mailOptions = {
@@ -305,7 +321,15 @@ router.post('/trigger-progress-report', protect, authorize('SuperAdmin'), async 
         `
       };
 
-      await sendEmail(mailOptions);
+      if (parentEmail) {
+        try {
+          await sendEmail(mailOptions);
+        } catch (mailErr) {
+          console.error(`[Progress Report] Failed sending email to ${parentEmail} for ${student.name}:`, mailErr.message);
+        }
+      } else {
+        console.warn(`[Progress Report] Skipping email for ${student.name}: no registered email.`);
+      }
 
       // 7. Simulate WhatsApp sending (print details into console log)
       const whatsappText = `📝 *Monthly Progress Report* 📝\n\nDear *${student.parent_name}*,\nHere is the academic progress report for *${student.name}* (Class *${student.class_level}*, Roll *${student.roll_number}*) for *${currentMonthName}*:\n\n📊 *Academic Performance:*\n- Tests Conducted: *${testCount}*\n- Average Score: *${averagePercentage}%*\n\n📅 *Attendance Status:*\n- Attended: *${attended}* / *${totalClasses}* classes (${attendanceRate}%)\n- Compliance: *${attendanceRate >= 75 ? 'Yes' : 'Low Attendance Alert' }*\n\nPlease log in to the student portal to view detailed gradebooks and schedules.\nBest regards,\n*EduStride Academic Center*`;
@@ -389,42 +413,50 @@ router.post('/send-custom-email', protect, authorize('SuperAdmin'), async (req, 
 
     for (const student of recipients) {
       const studentUser = await User.findOne({ studentProfile: student._id });
-      const parentEmail = studentUser ? studentUser.email : `${student.parent_name.toLowerCase().replace(/\s+/g, '')}@example.com`;
+      if (!studentUser?.email) {
+        console.warn(`[Custom Email] Skipping ${student.name}: no registered email.`);
+        continue;
+      }
+      const parentEmail = studentUser.email;
 
-      await sendEmail({
-        from: '"EduStride Admin" <admin@edustride.com>',
-        to: parentEmail,
-        subject: subject,
-        text: `Dear ${student.parent_name},\n\n${body}\n\nBest regards,\nEduStride Administration`,
-        html: `
-          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 12px; background-color: #ffffff; color: #1a202c;">
-            <div style="text-align: center; border-bottom: 2px solid #6366f1; padding-bottom: 15px; margin-bottom: 20px;">
-              <h2 style="color: #4f46e5; margin: 0; font-size: 22px;">EduStride Academic Announcement</h2>
+      try {
+        await sendEmail({
+          from: '"EduStride Admin" <admin@edustride.com>',
+          to: parentEmail,
+          subject: subject,
+          text: `Dear ${student.parent_name},\n\n${body}\n\nBest regards,\nEduStride Administration`,
+          html: `
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 12px; background-color: #ffffff; color: #1a202c;">
+              <div style="text-align: center; border-bottom: 2px solid #6366f1; padding-bottom: 15px; margin-bottom: 20px;">
+                <h2 style="color: #4f46e5; margin: 0; font-size: 22px;">EduStride Academic Announcement</h2>
+              </div>
+              
+              <p>Dear <strong>${student.parent_name}</strong> (Parent of ${student.name}),</p>
+              <div style="line-height: 1.6; margin: 20px 0; font-size: 14px; white-space: pre-line; color: #2d3748;">
+                ${body}
+              </div>
+              
+              <p style="font-size: 13px; color: #4a5568; line-height: 1.5; margin-top: 20px; margin-bottom: 20px;">
+                Please log in to the student portal (<a href="https://edustride.in" style="color: #4f46e5; text-decoration: none; font-weight: bold;">EduStride.in</a>) to view detailed gradebooks and schedules.
+              </p>
+              
+              <div style="font-size: 11px; color: #a0aec0; text-align: center; border-top: 1px solid #edf2f7; padding-top: 15px; margin-top: 30px;">
+                This is a direct administrative communication broadcasted from your school portal (<a href="https://edustride.in" style="color: #4f46e5; text-decoration: none; font-weight: bold;">edustride.in</a>).<br>
+                Please do not reply directly to this email. For any queries, contact the administration.
+              </div>
             </div>
-            
-            <p>Dear <strong>${student.parent_name}</strong> (Parent of ${student.name}),</p>
-            <div style="line-height: 1.6; margin: 20px 0; font-size: 14px; white-space: pre-line; color: #2d3748;">
-              ${body}
-            </div>
-            
-            <p style="font-size: 13px; color: #4a5568; line-height: 1.5; margin-top: 20px; margin-bottom: 20px;">
-              Please log in to the student portal (<a href="https://edustride.in" style="color: #4f46e5; text-decoration: none; font-weight: bold;">EduStride.in</a>) to view detailed gradebooks and schedules.
-            </p>
-            
-            <div style="font-size: 11px; color: #a0aec0; text-align: center; border-top: 1px solid #edf2f7; padding-top: 15px; margin-top: 30px;">
-              This is a direct administrative communication broadcasted from your school portal (<a href="https://edustride.in" style="color: #4f46e5; text-decoration: none; font-weight: bold;">edustride.in</a>).<br>
-              Please do not reply directly to this email. For any queries, contact the administration.
-            </div>
-          </div>
-        `
-      });
+          `
+        });
 
-      sentCount++;
-      sentList.push({
-        studentName: student.name,
-        parentName: student.parent_name,
-        email: parentEmail
-      });
+        sentCount++;
+        sentList.push({
+          studentName: student.name,
+          parentName: student.parent_name,
+          email: parentEmail
+        });
+      } catch (mailErr) {
+        console.error(`[Custom Email] Failed sending email to ${parentEmail} for ${student.name}:`, mailErr.message);
+      }
     }
 
     // Emit real-time notification socket event
@@ -439,8 +471,8 @@ router.post('/send-custom-email', protect, authorize('SuperAdmin'), async (req, 
       };
       if (target === 'class' && class_level) {
         io.to(class_level.trim().toUpperCase()).to(class_level.trim()).emit('new_notice', noticePayload);
-      } else {
-        io.emit('new_notice', noticePayload);
+      } else if (target === 'student' && recipients[0]) {
+        io.to(`USER_${recipients[0]._id}`).emit('new_notice', noticePayload);
       }
     }
 

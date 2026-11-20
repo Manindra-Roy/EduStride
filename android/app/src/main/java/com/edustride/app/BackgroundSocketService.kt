@@ -16,11 +16,15 @@ import io.socket.client.Socket
 import org.json.JSONObject
 import android.Manifest
 import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
 import androidx.core.app.ActivityCompat
+import androidx.core.app.ServiceCompat
 
 class BackgroundSocketService : Service() {
 
     private var socket: Socket? = null
+    private var currentSocketUrl: String? = null
+    private var currentClassRooms: String? = null
     private val CHANNEL_ID = "edustride_notifications"
     private val SYNC_CHANNEL_ID = "edustride_sync_channel"
 
@@ -68,7 +72,12 @@ class BackgroundSocketService : Service() {
                 .setOngoing(true)
                 .build()
 
-            startForeground(1001, notification)
+            val fgsType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            } else {
+                0
+            }
+            ServiceCompat.startForeground(this, 1001, notification, fgsType)
         }
     }
 
@@ -88,14 +97,24 @@ class BackgroundSocketService : Service() {
         }
 
         if (classLevel.isEmpty()) {
-            Log.d("BackgroundService", "No class registered yet. Stopping.")
+            Log.d("BackgroundService", "No class registered yet. Stopping service.")
+            stopSelf()
             return
         }
 
+        // Skip redundant teardown/reconnect when config is unchanged and socket is already active
+        if (socket != null && currentSocketUrl == socketUrl && currentClassRooms == classLevel && socket?.connected() == true) {
+            return
+        }
+
+        val roomList = classLevel.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+        val isStaffAll = roomList.any { it.equals("All", ignoreCase = true) }
+
         try {
-            if (socket?.connected() == true) {
-                socket?.disconnect()
-            }
+            // Unconditionally clean up any existing socket (even if still connecting/reconnecting)
+            socket?.off()
+            socket?.disconnect()
+            socket = null
 
             val opts = IO.Options().apply {
                 transports = arrayOf("websocket", "polling")
@@ -104,13 +123,19 @@ class BackgroundSocketService : Service() {
                 reconnectionDelayMax = 20000L
                 timeout = 15000L
             }
+            currentSocketUrl = socketUrl
+            currentClassRooms = classLevel
             socket = IO.socket(socketUrl, opts)
 
             socket?.on(Socket.EVENT_CONNECT) {
                 Log.d("BackgroundService", "Socket connected to $socketUrl")
-                // Join class rooms
-                socket?.emit("join_room", classLevel)
-                socket?.emit("join_room", classLevel.uppercase())
+                // Join all registered class, batch, and personal notice rooms
+                for (room in roomList) {
+                    socket?.emit("join_room", room)
+                    if (!room.startsWith("BATCH_") && !room.startsWith("USER_")) {
+                        socket?.emit("join_room", room.uppercase())
+                    }
+                }
                 socket?.emit("join_room", "ALL")
             }
 
@@ -144,8 +169,8 @@ class BackgroundSocketService : Service() {
                         val subject = data.optString("subject")
                         val chapterName = data.optString("chapter_name")
 
-                        // If student, filter by class (case-insensitive)
-                        if (classLevel != "All" && !classLevel.equals(msgClass, ignoreCase = true)) {
+                        // If student, filter by joined classes/batches (case-insensitive)
+                        if (!isStaffAll && roomList.none { it.equals(msgClass, ignoreCase = true) }) {
                             return@on
                         }
 
@@ -168,7 +193,7 @@ class BackgroundSocketService : Service() {
                         val body = data.optString("body")
                         val targetClass = data.optString("class_level")
 
-                        if (classLevel != "All" && targetClass != "All" && targetClass != "Personal" && !classLevel.equals(targetClass, ignoreCase = true)) {
+                        if (!isStaffAll && targetClass != "All" && targetClass != "Personal" && roomList.none { it.equals(targetClass, ignoreCase = true) }) {
                             return@on
                         }
 
@@ -248,9 +273,11 @@ class BackgroundSocketService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
-        socket?.disconnect()
         socket?.off()
+        socket?.disconnect()
         socket = null
+        currentSocketUrl = null
+        currentClassRooms = null
         Log.d("BackgroundService", "Service destroyed")
     }
 }

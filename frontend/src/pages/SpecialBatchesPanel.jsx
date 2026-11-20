@@ -322,15 +322,24 @@ const SpecialBatchesPanel = () => {
     return history.sort((a, b) => new Date(b.date) - new Date(a.date));
   }, [selectedBatchDetails, currentStudentId]);
 
+  // Grade badge calculator helper (defined before memos that reference it)
+  function getGradeBadge(pct) {
+    if (pct >= 90) return { label: 'A+', color: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30' };
+    if (pct >= 80) return { label: 'A', color: 'bg-indigo-500/20 text-indigo-400 border-indigo-500/30' };
+    if (pct >= 70) return { label: 'B', color: 'bg-primary-500/20 text-primary-400 border-primary-500/30' };
+    if (pct >= 60) return { label: 'C', color: 'bg-amber-500/20 text-amber-400 border-amber-500/30' };
+    return { label: 'F', color: 'bg-rose-500/20 text-rose-400 border-rose-500/30' };
+  }
+
   const myExamScores = useMemo(() => {
     if (!selectedBatchDetails || !selectedBatchDetails.test_scores || !currentStudentId) return [];
     const scores = [];
     selectedBatchDetails.test_scores.forEach(ts => {
       const sc = ts.scores?.find(s => s.student && ((s.student._id || s.student).toString() === currentStudentId.toString()));
       if (sc) {
-        const pct = ((sc.marks_obtained / ts.total_marks) * 100).toFixed(1);
+        const pct = ts.total_marks > 0 ? ((sc.marks_obtained / ts.total_marks) * 100).toFixed(1) : '0.0';
         let sumPct = 0;
-        ts.scores?.forEach(s => sumPct += (s.marks_obtained / ts.total_marks) * 100);
+        ts.scores?.forEach(s => { sumPct += ts.total_marks > 0 ? (s.marks_obtained / ts.total_marks) * 100 : 0; });
         const classAvg = ts.scores?.length > 0 ? (sumPct / ts.scores.length).toFixed(1) : 0;
         scores.push({
           test_id: ts._id,
@@ -383,7 +392,7 @@ const SpecialBatchesPanel = () => {
         schedule: batchToEdit.schedule && batchToEdit.schedule.length > 0 
           ? batchToEdit.schedule 
           : [{ day: 'Monday', period_name: 'Period 1', start_time: '16:00', end_time: '17:30', room: 'Extra Room 1', subject: '', instructor_name: '' }],
-        students: batchToEdit.students ? batchToEdit.students.map(s => s._id) : []
+        students: batchToEdit.students ? batchToEdit.students.map(s => (typeof s === 'string' ? s : s?._id)).filter(Boolean) : []
       });
     } else {
       setEditingBatch(null);
@@ -440,7 +449,10 @@ const SpecialBatchesPanel = () => {
       if (res.data.success) {
         setSuccessMsg('Special batch deleted.');
         fetchBatches();
-        if (selectedBatchId === batchId) setSelectedBatchId(null);
+        if (selectedBatchId === batchId) {
+          setSelectedBatchId(null);
+          setSelectedBatchDetails(null);
+        }
       }
     } catch (err) {
       setError(err.response?.data?.message || 'Failed to delete special batch');
@@ -682,16 +694,7 @@ const SpecialBatchesPanel = () => {
   // Open Chat Room for Special Batch
   const handleOpenBatchChat = () => {
     if (!selectedBatchDetails) return;
-    navigate('/chat', { state: { targetRoom: `BATCH_${selectedBatchDetails._id}` } });
-  };
-
-  // Grade badge calculator helper
-  const getGradeBadge = (pct) => {
-    if (pct >= 90) return { label: 'A+', color: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30' };
-    if (pct >= 80) return { label: 'A', color: 'bg-indigo-500/20 text-indigo-400 border-indigo-500/30' };
-    if (pct >= 70) return { label: 'B', color: 'bg-primary-500/20 text-primary-400 border-primary-500/30' };
-    if (pct >= 60) return { label: 'C', color: 'bg-amber-500/20 text-amber-400 border-amber-500/30' };
-    return { label: 'F', color: 'bg-rose-500/20 text-rose-400 border-rose-500/30' };
+    navigate('/chats', { state: { targetRoom: `BATCH_${selectedBatchDetails._id}` } });
   };
 
   // Filtered student list for Enrollment Picker modal

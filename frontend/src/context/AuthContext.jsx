@@ -30,7 +30,11 @@ export const AuthProvider = ({ children }) => {
     const interceptor = axios.interceptors.response.use(
       (response) => response,
       (error) => {
-        if (error.response && error.response.status === 401) {
+        const reqUrl = error.config?.url || '';
+        const isAuthCredentialCheck =
+          reqUrl.includes('/api/auth/change-password') ||
+          reqUrl.includes('/api/auth/login');
+        if (error.response && error.response.status === 401 && !isAuthCredentialCheck) {
           logout();
         }
         return Promise.reject(error);
@@ -75,6 +79,10 @@ export const AuthProvider = ({ children }) => {
         setUser(response.data.user);
         return { success: true };
       }
+      return {
+        success: false,
+        message: response.data?.message || 'Login failed. Please check credentials.'
+      };
     } catch (err) {
       return {
         success: false,
@@ -99,6 +107,10 @@ export const AuthProvider = ({ children }) => {
         setUser(response.data.user);
         return { success: true };
       }
+      return {
+        success: false,
+        message: response.data?.message || 'Registration failed.'
+      };
     } catch (err) {
       return {
         success: false,

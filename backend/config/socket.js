@@ -36,6 +36,9 @@ export const initSocket = (server) => {
       if (members.has(socketId)) {
         members.delete(socketId);
         sendMembersList(class_level);
+        if (members.size === 0) {
+          roomMembers.delete(class_level);
+        }
       }
     }
   };
@@ -81,8 +84,9 @@ export const initSocket = (server) => {
       sendMembersList(class_level);
 
       // Immediately notify active call
-      if (activeCalls.has(class_level)) {
-        socket.emit('incoming_call', activeCalls.get(class_level));
+      const upperLevel = typeof class_level === 'string' ? class_level.trim().toUpperCase() : class_level;
+      if (activeCalls.has(class_level) || activeCalls.has(upperLevel)) {
+        socket.emit('incoming_call', activeCalls.get(class_level) || activeCalls.get(upperLevel));
       }
     });
 

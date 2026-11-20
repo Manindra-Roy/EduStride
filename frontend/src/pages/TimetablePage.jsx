@@ -114,12 +114,10 @@ const TimetablePage = () => {
     setSavingTimetable(true);
 
     try {
-      const updatedTimetable = timetable.map(t => {
-        if (t.day === editingDay) {
-          return { ...t, slots: tempSlots };
-        }
-        return t;
-      });
+      const hasDay = timetable.some(t => t.day === editingDay);
+      const updatedTimetable = hasDay
+        ? timetable.map(t => (t.day === editingDay ? { ...t, slots: tempSlots } : t))
+        : [...timetable, { day: editingDay, slots: tempSlots }];
 
       const res = await axios.put('/api/timetable', { data: updatedTimetable });
       if (res.data.success) {

@@ -16,7 +16,8 @@ import {
   UserPlus,
   Palette,
   Calendar,
-  Zap
+  Zap,
+  Fingerprint
 } from 'lucide-react';
 
 import Logo from './Logo';
@@ -411,6 +412,12 @@ const Sidebar = ({ isOpen, setIsOpen }) => {
         name: 'LMS Center',
         path: '/lms',
         icon: BookOpen,
+        roles: ['SuperAdmin', 'Teacher', 'Student']
+      },
+      {
+        name: user?.role === 'Student' ? 'Gate Logs' : 'Gate Scanner',
+        path: '/biometric-gate',
+        icon: Fingerprint,
         roles: ['SuperAdmin', 'Teacher', 'Student']
       },
       {

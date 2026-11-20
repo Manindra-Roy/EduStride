@@ -102,6 +102,7 @@ const studentSchema = new mongoose.Schema({
     },
     attendance_history: [attendanceHistorySchema],
     test_scores: [testScoreSchema],
+    tuition_test_scores: [testScoreSchema],
     fee_ledger: [mongoose.Schema.Types.Mixed],
     promoted_at: {
       type: Date,

@@ -49,9 +49,10 @@ router.post('/', protect, authorize('SuperAdmin', 'Teacher'), async (req, res, n
     }
     
     // Check if subject already exists for this class
-    const exists = await Subject.findOne({ name: { $regex: new RegExp(`^${cleanName}$`, 'i') }, class_level: cleanClass });
+    const escapedName = cleanName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const exists = await Subject.findOne({ name: { $regex: new RegExp(`^${escapedName}$`, 'i') }, class_level: cleanClass });
     if (exists) {
-      res.status(450);
+      res.status(400);
       throw new Error(`Subject '${cleanName}' already exists for Class ${cleanClass}`);
     }
     
@@ -117,7 +118,10 @@ router.delete('/:id', protect, authorize('SuperAdmin', 'Teacher'), async (req, r
     // Safety check: Prevent deletion if any student has test scores for this subject
     const studentsWithScores = await Student.countDocuments({
       class_level: subject.class_level,
-      'test_scores.subject': subject.name
+      $or: [
+        { 'test_scores.subject': subject.name },
+        { 'tuition_test_scores.subject': subject.name }
+      ]
     });
     if (studentsWithScores > 0) {
       res.status(400);

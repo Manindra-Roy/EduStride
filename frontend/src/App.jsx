@@ -22,6 +22,7 @@ import ClassChat from './pages/ClassChat';
 import AutomationsPanel from './pages/AutomationsPanel';
 import TimetablePage from './pages/TimetablePage';
 import SpecialBatchesPanel from './pages/SpecialBatchesPanel';
+import BiometricGatePanel from './pages/BiometricGatePanel';
 
 const ProtectedRoute = ({ children, allowedRoles }) => {
   const { user, token, loading } = useAuth();
@@ -147,6 +148,7 @@ const Layout = () => {
               <Route path="/class/:class_level" element={<ClassGrid />} />
               <Route path="/fees" element={<FeeLedgerPanel />} />
               <Route path="/lms" element={<LmsDownload />} />
+              <Route path="/biometric-gate" element={<BiometricGatePanel />} />
               <Route path="/chats" element={<ClassChat setAppSidebarOpen={setSidebarOpen} />} />
               <Route path="/register" element={
                 <ProtectedRoute allowedRoles={['SuperAdmin', 'Teacher']}>

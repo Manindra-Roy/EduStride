@@ -11,10 +11,21 @@ const errorHandler = (err, req, res, next) => {
 
   // Mongoose duplicate key
   if (err.code === 11000) {
-    const field = Object.keys(err.keyValue)[0];
+    const field = err.keyValue ? Object.keys(err.keyValue)[0] : 'field';
     const message = `Duplicate field value entered for ${field}. Value must be unique.`;
     error = new Error(message);
     res.status(400);
+  }
+
+  // Multer upload errors
+  if (err.name === 'MulterError') {
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      error = new Error('Uploaded file exceeds maximum allowed size.');
+      res.status(413);
+    } else {
+      error = new Error(err.message || 'File upload failed.');
+      res.status(400);
+    }
   }
 
   // Mongoose validation error

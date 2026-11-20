@@ -355,6 +355,11 @@ const Register = () => {
           setEmail('');
           setPassword('');
           setRollNumber('');
+          if (role === 'Teacher' && user.role === 'SuperAdmin') {
+            fetchTeachers();
+          } else if (role === 'Student') {
+            fetchStudents();
+          }
         }
       } else {
         // Initial setup signup

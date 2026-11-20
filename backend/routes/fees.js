@@ -18,8 +18,10 @@ router.get('/stats', protect, authorize('SuperAdmin'), async (req, res, next) =>
 
     ledgers.forEach(ledger => {
       if (ledger.student_id && ledger.student_id.status === 'Active') {
+        const isFreeTier = Boolean(ledger.student_id.is_free_tier);
         ledger.months.forEach(m => {
           actualCollectedRevenue += m.amount_paid || 0;
+          if (isFreeTier) return;
           if (m.status === 'Paid') paidMonthsCount++;
           else if (m.status === 'Unpaid') unpaidMonthsCount++;
           else if (m.status === 'Partial/Pending') partialMonthsCount++;
@@ -94,15 +96,21 @@ router.put('/manual', protect, authorize('SuperAdmin', 'Teacher'), async (req, r
     }
 
     monthObj.status = status;
-    monthObj.amount_paid = Number(amount_paid) || 0;
-    if (status === 'Paid') {
-      monthObj.payment_date = new Date();
-    } else if (status === 'Unpaid' || status === 'Pending') {
+    if (status === 'Unpaid') {
       monthObj.payment_date = null;
       monthObj.amount_paid = 0;
+      monthObj.receipt_id = null;
+      monthObj.transaction_method = null;
+    } else {
+      monthObj.amount_paid = Number(amount_paid) || 0;
+      if (status === 'Paid') {
+        monthObj.payment_date = new Date();
+      } else if (status === 'Partial/Pending') {
+        monthObj.payment_date = monthObj.amount_paid > 0 ? new Date() : null;
+      }
+      monthObj.receipt_id = receipt_id || monthObj.receipt_id || `REC-${Date.now().toString().substring(6)}`;
+      monthObj.transaction_method = transaction_method || monthObj.transaction_method || 'Manual Cash/Bank';
     }
-    monthObj.receipt_id = receipt_id || monthObj.receipt_id || `REC-${Date.now().toString().substring(6)}`;
-    monthObj.transaction_method = transaction_method || monthObj.transaction_method || 'Manual Cash/Bank';
 
     await ledger.save();
 

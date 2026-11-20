@@ -425,6 +425,7 @@ const AutomationsPanel = () => {
         if (classesRes.data.success) {
           setClasses(classesRes.data.data);
         }
+        window.dispatchEvent(new Event('classesUpdated'));
       }
     } catch (err) {
       setClassError(err.response?.data?.message || 'Failed to add class level');
@@ -452,6 +453,7 @@ const AutomationsPanel = () => {
             setSyllabusClass(classesRes.data.data[0]);
           }
         }
+        window.dispatchEvent(new Event('classesUpdated'));
       }
     } catch (err) {
       setClassError(err.response?.data?.message || 'Failed to delete class level');
