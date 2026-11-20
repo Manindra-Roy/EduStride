@@ -129,8 +129,8 @@ const BiometricGatePanel = () => {
     }
   }, [isStaff, selectedDeviceId]);
 
-  const fetchLogs = useCallback(async () => {
-    setLoadingLogs(true);
+  const fetchLogs = useCallback(async (silent = false) => {
+    if (!silent) setLoadingLogs(true);
     try {
       const params = new URLSearchParams();
       if (selectedDate) params.append('date', selectedDate);
@@ -146,7 +146,7 @@ const BiometricGatePanel = () => {
     } catch (err) {
       console.error('Failed to fetch gate logs:', err);
     } finally {
-      setLoadingLogs(false);
+      if (!silent) setLoadingLogs(false);
     }
   }, [selectedDate, classFilter, eventFilter, searchQuery, isStaff]);
 
@@ -202,27 +202,40 @@ const BiometricGatePanel = () => {
     return () => clearInterval(interval);
   }, [isStaff, fetchDevices]);
 
-  // Subscribe to Socket.IO GATE_MONITOR for real-time scan & enrollment updates
+  // Subscribe to Socket.IO for live scan, attendance & enrollment updates (Staff + Students)
   useEffect(() => {
-    if (!isStaff) return;
+    if (!user) return;
     if (!socket.connected) socket.connect();
-    socket.emit('join_room', 'GATE_MONITOR');
+
+    const joinLiveRooms = () => {
+      if (isStaff) {
+        socket.emit('join_room', 'GATE_MONITOR');
+      } else {
+        const sid = user.studentProfile?._id || (typeof user.studentProfile === 'string' ? user.studentProfile : null);
+        if (sid) socket.emit('join_room', `USER_${sid}`);
+      }
+    };
+
+    joinLiveRooms();
 
     const handleScanEvent = (newLog) => {
-      if (newLog?.date === selectedDate) {
+      if (!newLog) return;
+      if (newLog.date === selectedDate) {
         setLogs(prev => {
           const withoutDup = prev.filter(item => item._id !== newLog._id);
           return [newLog, ...withoutDup];
         });
-        fetchLogs();
+        fetchLogs(true);
       }
     };
 
     const handleDeviceUpdated = (updatedDev) => {
+      if (!isStaff) return;
       setDevices(prev => prev.map(d => (d.device_id === updatedDev.device_id ? { ...d, ...updatedDev } : d)));
     };
 
     const handleCommandUpdate = (cmdData) => {
+      if (!isStaff) return;
       setLiveCommand(cmdData);
       if (cmdData.status === 'COMPLETED' || cmdData.status === 'FAILED') {
         fetchDevices(true);
@@ -230,16 +243,18 @@ const BiometricGatePanel = () => {
       }
     };
 
+    socket.on('connect', joinLiveRooms);
     socket.on('gate_scan_event', handleScanEvent);
     socket.on('gate_device_updated', handleDeviceUpdated);
     socket.on('gate_command_update', handleCommandUpdate);
 
     return () => {
+      socket.off('connect', joinLiveRooms);
       socket.off('gate_scan_event', handleScanEvent);
       socket.off('gate_device_updated', handleDeviceUpdated);
       socket.off('gate_command_update', handleCommandUpdate);
     };
-  }, [isStaff, selectedDate, activeTab, fetchLogs, fetchDevices, fetchEnrollmentData]);
+  }, [user, isStaff, selectedDate, activeTab, fetchLogs, fetchDevices, fetchEnrollmentData]);
 
   // Toggle Fingerprint Sensing ON / OFF remotely
   const handleToggleSensing = async () => {

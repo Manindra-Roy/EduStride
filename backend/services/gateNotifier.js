@@ -71,7 +71,7 @@ export const dispatchGateNotification = async ({ logDoc, student, time12Str, dat
     ).populate('student', 'name roll_number class_level parent_name primary_contact');
 
     if (io && pausedLog) {
-      io.to('GATE_MONITOR').emit('gate_scan_event', pausedLog);
+      io.to('GATE_MONITOR').to(`USER_${student._id}`).emit('gate_scan_event', pausedLog);
     }
     return pausedLog;
   }
@@ -198,7 +198,7 @@ export const dispatchGateNotification = async ({ logDoc, student, time12Str, dat
   ).populate('student', 'name roll_number class_level parent_name primary_contact');
 
   if (io && updatedLog) {
-    io.to('GATE_MONITOR').emit('gate_scan_event', updatedLog);
+    io.to('GATE_MONITOR').to(`USER_${student._id}`).emit('gate_scan_event', updatedLog);
   }
 
   return updatedLog;

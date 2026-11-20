@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import axios from 'axios';
 import { useAuth } from '../context/AuthContext';
+import { socket } from '../config/socket';
 import ClassTimetable from '../components/ClassTimetable';
 import { 
   Users, 
@@ -253,6 +254,57 @@ const Dashboard = () => {
     };
 
     fetchData();
+  }, [user]);
+
+  // Live Socket.IO attendance sync on Dashboard (updates Student gauge/logs & Admin low-attendance KPI live)
+  useEffect(() => {
+    if (!user) return;
+    if (!socket.connected) socket.connect();
+
+    const handleLiveAttendance = async (data) => {
+      try {
+        if (user.role === 'Student') {
+          const myId = user.studentProfile?._id || (typeof user.studentProfile === 'string' ? user.studentProfile : null);
+          if (!myId) return;
+          const myClass = user.studentProfile?.class_level;
+          if (data?.student_id && data.student_id !== String(myId)) return;
+          if (!data?.student_id && myClass && data?.class_level?.toUpperCase() !== myClass.toUpperCase()) return;
+
+          const [studentRes, attRes] = await Promise.all([
+            axios.get(`/api/students/${myId}`),
+            axios.get(`/api/students/${myId}/attendance`)
+          ]);
+          if (studentRes.data.success) setStudentDetails(studentRes.data.data);
+          if (attRes.data.success) setDailyAttendanceLogs(attRes.data.data);
+        } else {
+          const studentsRes = await axios.get('/api/students?limit=1000');
+          if (studentsRes.data.success) {
+            const studentsList = studentsRes.data.data || [];
+            const currentMonthStr = new Date().toISOString().substring(0, 7);
+            let lowAttendance = 0;
+            studentsList.forEach(s => {
+              const currentAttendance = s.attendance_history?.find(h => h.month === currentMonthStr);
+              if (currentAttendance && currentAttendance.total_classes > 0) {
+                const rate = (currentAttendance.attended / currentAttendance.total_classes) * 100;
+                if (rate < 75) lowAttendance++;
+              }
+            });
+            setStats(prev => ({
+              ...prev,
+              totalStudents: studentsList.length,
+              lowAttendanceCount: lowAttendance
+            }));
+          }
+        }
+      } catch (err) {
+        console.error('Failed live attendance refresh on dashboard:', err);
+      }
+    };
+
+    socket.on('attendance_updated', handleLiveAttendance);
+    return () => {
+      socket.off('attendance_updated', handleLiveAttendance);
+    };
   }, [user]);
 
   if (loading) {

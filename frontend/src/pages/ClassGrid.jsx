@@ -2,6 +2,7 @@ import React, { useEffect, useState, useMemo, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { useAuth } from '../context/AuthContext';
+import { socket } from '../config/socket';
 import { 
   Plus, 
   Search, 
@@ -176,22 +177,29 @@ const ClassGrid = () => {
   const [submitting, setSubmitting] = useState(false);
 
   // Fetch student listings for this class level
-  const fetchStudents = async () => {
-    setLoading(true);
+  const fetchStudents = async (silent = false) => {
+    if (!silent) setLoading(true);
     try {
       // Students request
       const res = await axios.get(`/api/students?class_level=${class_level}&limit=1000`);
       if (res.data.success) {
-        setStudents(res.data.data);
-        if (user && user.role === 'Student' && res.data.data.length > 0) {
-          const selfStudent = res.data.data.find(s => s._id === (user.studentProfile?._id || user.studentProfile));
-          setSelectedStudent(selfStudent || res.data.data[0]);
+        const list = res.data.data || [];
+        setStudents(list);
+        if (user && user.role === 'Student' && list.length > 0) {
+          const selfStudent = list.find(s => s._id === (user.studentProfile?._id || user.studentProfile));
+          setSelectedStudent(selfStudent || list[0]);
+        } else {
+          // Keep currently selected student in sync with live updates
+          setSelectedStudent(prev => (prev ? (list.find(s => s._id === prev._id) || prev) : null));
         }
+        return list;
       }
+      return [];
     } catch (err) {
       console.error('Failed to load class students:', err);
+      return [];
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   };
 
@@ -199,6 +207,72 @@ const ClassGrid = () => {
     fetchStudents();
     setSelectedStudent(null);
   }, [class_level]);
+
+  // Live Socket.IO attendance updates (no manual refresh needed on biometric or manual updates)
+  const selectedStudentRef = useRef(null);
+  const attendanceModalStateRef = useRef({ open: false, date: '', session: '' });
+
+  useEffect(() => {
+    selectedStudentRef.current = selectedStudent;
+  }, [selectedStudent]);
+
+  useEffect(() => {
+    attendanceModalStateRef.current = {
+      open: showAttendanceModal,
+      date: attendanceDate,
+      session: attendanceSession
+    };
+  }, [showAttendanceModal, attendanceDate, attendanceSession]);
+
+  useEffect(() => {
+    if (!class_level) return;
+    if (!socket.connected) socket.connect();
+
+    const joinClassRoom = () => {
+      socket.emit('join_room', class_level);
+      socket.emit('join_room', class_level.trim().toUpperCase());
+    };
+    joinClassRoom();
+
+    const handleLiveAttendance = async (data) => {
+      if (!data?.class_level) return;
+      if (data.class_level.trim().toUpperCase() !== class_level.trim().toUpperCase()) return;
+
+      // 1. Silently refresh class roster & attendance percentages / roll numbers
+      const freshList = await fetchStudents(true);
+
+      // 2. Refresh detailed daily attendance logs if a student detail panel is open
+      const currentSelected = selectedStudentRef.current;
+      if (currentSelected?._id) {
+        const isStudent = user?.role === 'Student';
+        const isSelf = isStudent && (user.studentProfile?._id || user.studentProfile) === currentSelected._id;
+        if (!isStudent || isSelf) {
+          try {
+            const attRes = await axios.get(`/api/students/${currentSelected._id}/attendance`);
+            if (attRes.data.success) {
+              setDetailedAttendance(attRes.data.data);
+            }
+          } catch {
+            // non-fatal
+          }
+        }
+      }
+
+      // 3. If the Bulk Attendance modal is open for the same date, sync live checkboxes
+      const modalState = attendanceModalStateRef.current;
+      if (modalState.open && data.date === modalState.date) {
+        fetchAttendanceForDate(modalState.date, modalState.session, freshList);
+      }
+    };
+
+    socket.on('connect', joinClassRoom);
+    socket.on('attendance_updated', handleLiveAttendance);
+
+    return () => {
+      socket.off('connect', joinClassRoom);
+      socket.off('attendance_updated', handleLiveAttendance);
+    };
+  }, [class_level, user]);
 
   useEffect(() => {
     const fetchDetailedAttendance = async () => {
@@ -388,11 +462,12 @@ const ClassGrid = () => {
   };
 
   // Fetch Saved Attendance for a Date & Session (Integrated with Timetable Schedule)
-  const fetchAttendanceForDate = async (targetDate, targetSession = attendanceSession) => {
+  const fetchAttendanceForDate = async (targetDate, targetSession = attendanceSession, studentsOverride = null) => {
     try {
       const sessNameParam = typeof targetSession === 'string' ? targetSession : (targetSession?.session_name || 'Session 1');
       const res = await axios.get(`/api/students/attendance/bulk?class_level=${class_level}&date=${targetDate}&session_name=${encodeURIComponent(sessNameParam)}`);
-      const activeStudents = students.filter(s => s.status === 'Active');
+      const sourceStudents = Array.isArray(studentsOverride) && studentsOverride.length > 0 ? studentsOverride : students;
+      const activeStudents = sourceStudents.filter(s => s.status === 'Active');
       if (res.data.success) {
         const returnedSessions = res.data.available_sessions || [];
         setAvailableSessions(returnedSessions);

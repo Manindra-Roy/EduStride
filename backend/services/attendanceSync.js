@@ -1,8 +1,38 @@
 import Student from '../models/Student.js';
 import Attendance from '../models/Attendance.js';
 import Timetable from '../models/Timetable.js';
+import { getIO } from '../config/socket.js';
 
 const DAYS_OF_WEEK_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+/**
+ * Broadcast real-time attendance update event over Socket.IO so ClassGrid,
+ * Dashboard (Admin/Teacher/Student), and Gate Scanner update live without refresh.
+ */
+export const emitAttendanceUpdated = ({ class_level, date, session_name, student_id = null, student_name = '', source = 'manual' }) => {
+  try {
+    const io = getIO();
+    if (!io || !class_level) return;
+    const cleanClass = String(class_level).trim();
+    const upperClass = cleanClass.toUpperCase();
+    const payload = {
+      class_level: cleanClass,
+      date,
+      session_name: session_name || 'Session 1',
+      student_id: student_id ? String(student_id) : null,
+      student_name,
+      source,
+      timestamp: new Date()
+    };
+    const emitter = io.to(cleanClass).to(upperClass).to('GATE_MONITOR');
+    if (student_id) {
+      emitter.to(`USER_${student_id}`);
+    }
+    emitter.emit('attendance_updated', payload);
+  } catch (err) {
+    console.error('[Socket Attendance Emit Error]:', err.message);
+  }
+};
 
 /**
  * Get current date/time parts in IST (Asia/Kolkata, UTC+5:30).
@@ -325,6 +355,15 @@ export const markBiometricAttendancePresent = async (student, dateStr, time12Str
   }
 
   await recalculateMonthlyAttendance(class_level, trackingMonth);
+
+  emitAttendanceUpdated({
+    class_level,
+    date: dateStr,
+    session_name,
+    student_id: student._id,
+    student_name: student.name,
+    source: 'biometric'
+  });
 
   return { session_name, marked: true };
 };

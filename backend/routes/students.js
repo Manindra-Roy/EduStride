@@ -6,7 +6,7 @@ import Attendance from '../models/Attendance.js';
 import Timetable from '../models/Timetable.js';
 import { protect, authorize } from '../middleware/auth.js';
 import { deleteFromCloud } from '../services/cloudStorage.js';
-import { recalculateRollNumbers, recalculateMonthlyAttendance } from '../services/attendanceSync.js';
+import { recalculateRollNumbers, recalculateMonthlyAttendance, emitAttendanceUpdated } from '../services/attendanceSync.js';
 
 const router = express.Router();
 const DAYS_OF_WEEK_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -511,6 +511,13 @@ router.post('/attendance/bulk', protect, authorize('SuperAdmin', 'Teacher'), asy
 
     // Recalculate monthly attendance & dynamic roll numbers for all active students in the class
     await recalculateMonthlyAttendance(class_level, trackingMonth);
+
+    emitAttendanceUpdated({
+      class_level,
+      date: cleanDateStr,
+      session_name: cleanSession,
+      source: 'manual'
+    });
 
     res.json({
       success: true,
