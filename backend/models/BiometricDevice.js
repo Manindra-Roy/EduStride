@@ -65,6 +65,10 @@ const biometricDeviceSchema = new mongoose.Schema({
     type: Boolean,
     default: true
   },
+  parent_alerts_enabled: {
+    type: Boolean,
+    default: true
+  },
   cooldown_seconds: {
     type: Number,
     default: 120,

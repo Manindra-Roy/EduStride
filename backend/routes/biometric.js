@@ -228,13 +228,13 @@ router.post('/device/scan', authenticateDevice, async (req, res, next) => {
       attendance_session: attendanceSession
     });
 
-    // Dispatch parent notifications (Push + Email + optional SMS/WA) asynchronously
-    // so ESP32 updates OLED and beeps immediately (<300ms)
+    // Dispatch parent notifications (Push + Email + optional SMS/WA) asynchronously unless paused
     dispatchGateNotification({
       logDoc,
       student,
       time12Str: ist.time12Str,
-      dateStr: ist.dateStr
+      dateStr: ist.dateStr,
+      sendParentAlerts: device.parent_alerts_enabled !== false
     }).catch(err => {
       console.error('[Biometric Gate Notification Dispatch Error]:', err.message);
     });
@@ -401,10 +401,11 @@ router.put('/devices/:deviceId/toggle', protect, authorize('SuperAdmin', 'Teache
       return res.status(404).json({ success: false, message: 'Biometric device not found' });
     }
 
-    const { sensing_enabled, auto_mark_attendance, cooldown_seconds, name, pinned_session_name, regenerate_key } = req.body;
+    const { sensing_enabled, auto_mark_attendance, parent_alerts_enabled, cooldown_seconds, name, pinned_session_name, regenerate_key } = req.body;
 
     if (sensing_enabled !== undefined) device.sensing_enabled = Boolean(sensing_enabled);
     if (auto_mark_attendance !== undefined) device.auto_mark_attendance = Boolean(auto_mark_attendance);
+    if (parent_alerts_enabled !== undefined) device.parent_alerts_enabled = Boolean(parent_alerts_enabled);
     if (cooldown_seconds !== undefined) {
       const cd = Number(cooldown_seconds);
       if (Number.isFinite(cd) && cd >= 5 && cd <= 3600) {

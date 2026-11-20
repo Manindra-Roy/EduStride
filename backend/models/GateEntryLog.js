@@ -46,6 +46,7 @@ const gateEntryLogSchema = new mongoose.Schema({
     default: ''
   },
   notification: {
+    paused: { type: Boolean, default: false },
     email_sent: { type: Boolean, default: false },
     email_to: { type: String, default: '' },
     email_error: { type: String, default: '' },

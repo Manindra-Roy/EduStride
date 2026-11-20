@@ -16,7 +16,7 @@ const formatDuration = (mins) => {
  * Parent Email via Brevo/SMTP, WhatsApp quick-send URL, and optional SMS/WA webhook).
  * Updates the GateEntryLog notification status in DB and emits live gate_scan_event to GATE_MONITOR.
  */
-export const dispatchGateNotification = async ({ logDoc, student, time12Str, dateStr }) => {
+export const dispatchGateNotification = async ({ logDoc, student, time12Str, dateStr, sendParentAlerts = true }) => {
   const isEntry = logDoc.event_type === 'ENTRY';
   const actionWord = isEntry ? 'Entered' : 'Exited';
   const durationLabel = !isEntry && logDoc.duration_minutes !== null
@@ -32,7 +32,7 @@ export const dispatchGateNotification = async ({ logDoc, student, time12Str, dat
     ? `Dear ${parentName}, your ward ${student.name} (Class ${student.class_level}, Roll ${student.roll_number}) ENTERED the institute at ${time12Str} on ${dateStr}.`
     : `Dear ${parentName}, your ward ${student.name} (Class ${student.class_level}, Roll ${student.roll_number}) EXITED the institute at ${time12Str} on ${dateStr}${durationLabel}.`;
 
-  // 1. Build 1-tap WhatsApp URL for primary_contact
+  // 1. Build 1-tap WhatsApp URL for primary_contact (always available for manual follow-up)
   let whatsappLink = '';
   if (student.primary_contact) {
     const numericPhone = String(student.primary_contact).replace(/\D/g, '');
@@ -50,8 +50,33 @@ export const dispatchGateNotification = async ({ logDoc, student, time12Str, dat
   let emailError = '';
   let smsSent = false;
 
-  // 2. Instant Mobile App / Web Push Notification via Socket.IO
   const io = getIO();
+
+  // If parent alerts are paused in the app, skip Push/Email/SMS dispatch but still update live admin feed
+  if (!sendParentAlerts) {
+    const pausedLog = await GateEntryLog.findByIdAndUpdate(
+      logDoc._id,
+      {
+        notification: {
+          paused: true,
+          email_sent: false,
+          email_to: '',
+          email_error: 'Parent alerts paused',
+          push_sent: false,
+          sms_sent: false,
+          whatsapp_link: whatsappLink
+        }
+      },
+      { new: true }
+    ).populate('student', 'name roll_number class_level parent_name primary_contact');
+
+    if (io && pausedLog) {
+      io.to('GATE_MONITOR').emit('gate_scan_event', pausedLog);
+    }
+    return pausedLog;
+  }
+
+  // 2. Instant Mobile App / Web Push Notification via Socket.IO
   if (io) {
     const noticePayload = {
       subject,
@@ -160,6 +185,7 @@ export const dispatchGateNotification = async ({ logDoc, student, time12Str, dat
     logDoc._id,
     {
       notification: {
+        paused: false,
         email_sent: emailSent,
         email_to: emailTo,
         email_error: emailError,

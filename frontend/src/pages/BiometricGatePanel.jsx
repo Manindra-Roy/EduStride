@@ -22,6 +22,7 @@ import {
   Check,
   Mail,
   Bell,
+  BellOff,
   MessageCircle,
   ShieldCheck,
   AlertCircle,
@@ -479,16 +480,16 @@ const BiometricGatePanel = () => {
               </div>
 
               {/* Quick Settings Row */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-3 border-t border-dark-800/80">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 pt-3 border-t border-dark-800/80">
                 {/* Auto-Mark Attendance Switch */}
                 <div className="p-3.5 rounded-xl bg-dark-950/60 border border-dark-800/80 flex items-center justify-between gap-3">
                   <div className="min-w-0">
                     <div className="flex items-center gap-1.5 text-xs font-bold text-white">
                       <ShieldCheck size={14} className="text-primary-400 shrink-0" />
-                      <span>Auto-Mark Class Attendance on Entry</span>
+                      <span>Auto-Mark Attendance</span>
                     </div>
                     <p className="text-[11px] text-slate-400 mt-0.5">
-                      Marks scanned students Present in ClassGrid automatically; manual attendance stays editable.
+                      Marks scanned students Present in ClassGrid automatically; manual edits still work.
                     </p>
                   </div>
                   <button
@@ -503,6 +504,49 @@ const BiometricGatePanel = () => {
                     <span
                       className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
                         activeDevice.auto_mark_attendance ? 'translate-x-6' : 'translate-x-1'
+                      }`}
+                    />
+                  </button>
+                </div>
+
+                {/* Pause / Resume Parent Entry & Exit Messages Switch */}
+                <div className="p-3.5 rounded-xl bg-dark-950/60 border border-dark-800/80 flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1.5 text-xs font-bold text-white">
+                      {activeDevice.parent_alerts_enabled !== false ? (
+                        <Bell size={14} className="text-emerald-400 shrink-0" />
+                      ) : (
+                        <BellOff size={14} className="text-amber-400 shrink-0" />
+                      )}
+                      <span>
+                        Parent Messages:{' '}
+                        <span className={activeDevice.parent_alerts_enabled !== false ? 'text-emerald-400' : 'text-amber-400'}>
+                          {activeDevice.parent_alerts_enabled !== false ? 'ON' : 'PAUSED'}
+                        </span>
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-400 mt-0.5">
+                      {activeDevice.parent_alerts_enabled !== false
+                        ? 'Sends instant Entry/Exit email & app push alerts to parents.'
+                        : 'Entry/Exit parent alerts are paused; scans & attendance still log.'}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={savingSettings}
+                    onClick={() =>
+                      handleUpdateSetting({
+                        parent_alerts_enabled: !(activeDevice.parent_alerts_enabled !== false)
+                      })
+                    }
+                    className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
+                      activeDevice.parent_alerts_enabled !== false ? 'bg-emerald-600' : 'bg-amber-600/40 border border-amber-500/40'
+                    }`}
+                    aria-label="Toggle Parent Entry and Exit Messages"
+                  >
+                    <span
+                      className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                        activeDevice.parent_alerts_enabled !== false ? 'translate-x-6' : 'translate-x-1'
                       }`}
                     />
                   </button>
@@ -806,29 +850,41 @@ const BiometricGatePanel = () => {
 
                     {/* Parent Notification Badges + 1-Tap WhatsApp */}
                     <div className="flex items-center gap-2 flex-wrap sm:justify-end shrink-0">
-                      <span
-                        className={`inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-1 rounded-lg border ${
-                          log.notification?.push_sent
-                            ? 'bg-indigo-500/10 text-indigo-300 border-indigo-500/20'
-                            : 'bg-dark-950 text-slate-500 border-dark-800'
-                        }`}
-                        title="Mobile App Push Notification"
-                      >
-                        <Bell size={11} />
-                        Push
-                      </span>
+                      {log.notification?.paused ? (
+                        <span
+                          className="inline-flex items-center gap-1 text-[10px] font-semibold px-2.5 py-1 rounded-lg border bg-amber-500/10 text-amber-300 border-amber-500/25"
+                          title="Parent Entry/Exit messages were paused during this scan"
+                        >
+                          <BellOff size={11} />
+                          Alerts Paused
+                        </span>
+                      ) : (
+                        <>
+                          <span
+                            className={`inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-1 rounded-lg border ${
+                              log.notification?.push_sent
+                                ? 'bg-indigo-500/10 text-indigo-300 border-indigo-500/20'
+                                : 'bg-dark-950 text-slate-500 border-dark-800'
+                            }`}
+                            title="Mobile App Push Notification"
+                          >
+                            <Bell size={11} />
+                            Push
+                          </span>
 
-                      <span
-                        className={`inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-1 rounded-lg border ${
-                          log.notification?.email_sent
-                            ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20'
-                            : 'bg-dark-950 text-slate-500 border-dark-800'
-                        }`}
-                        title={log.notification?.email_sent ? `Emailed ${log.notification.email_to}` : (log.notification?.email_error || 'Email not sent')}
-                      >
-                        <Mail size={11} />
-                        {log.notification?.email_sent ? 'Emailed' : 'No Email'}
-                      </span>
+                          <span
+                            className={`inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-1 rounded-lg border ${
+                              log.notification?.email_sent
+                                ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20'
+                                : 'bg-dark-950 text-slate-500 border-dark-800'
+                            }`}
+                            title={log.notification?.email_sent ? `Emailed ${log.notification.email_to}` : (log.notification?.email_error || 'Email not sent')}
+                          >
+                            <Mail size={11} />
+                            {log.notification?.email_sent ? 'Emailed' : 'No Email'}
+                          </span>
+                        </>
+                      )}
 
                       {isStaff && log.notification?.whatsapp_link && (
                         <a
