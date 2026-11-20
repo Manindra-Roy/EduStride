@@ -467,9 +467,13 @@ void animateIdleFace(unsigned long now) {
 
 void setSensorLed(bool on) {
   if (!sensorReady) return;
-  if (ledCurrentlyOn != on) {
-    finger.LEDcontrol(on);
-    ledCurrentlyOn = on;
+  // Let R307S auto-strobe its optical LED cleanly during getImage() for sharp ridge contrast;
+  // only explicitly force LED OFF when sensing is paused from the mobile app.
+  if (!on && ledCurrentlyOn) {
+    finger.LEDcontrol(false);
+    ledCurrentlyOn = false;
+  } else if (on && !ledCurrentlyOn) {
+    ledCurrentlyOn = true;
   }
 }
 
@@ -531,27 +535,37 @@ int performHttpRequest(const String& method, const String& path, const String& j
 }
 
 // ============================================================================
-// R307S SETTLED CAPTURE HELPER (Eliminates partial first-touch smudges!)
+// R307S SETTLED CAPTURE HELPER (220ms flat-press settle + UART flush!)
 // ============================================================================
+uint8_t lastCaptureErrCode = 0;
+
 bool captureCleanFingerToSlot(uint8_t tzSlot, unsigned long timeoutMs) {
+  while (fpSerial.available()) fpSerial.read(); // flush any stray UART bytes
   unsigned long startWait = millis();
+  lastCaptureErrCode = 0;
+
   while (millis() - startWait < timeoutMs) {
     uint8_t p = finger.getImage();
     if (p == FINGERPRINT_OK) {
-      // Wait 85ms for finger to settle flat on the optical prism, then re-capture crisp frame
-      delay(85);
-      for (int attempt = 0; attempt < 3; attempt++) {
+      // Give human finger 220ms to press flat and evenly onto the optical glass
+      delay(220);
+      for (int attempt = 0; attempt < 4; attempt++) {
         uint8_t p2 = finger.getImage();
         if (p2 == FINGERPRINT_OK) {
-          if (finger.image2Tz(tzSlot) == FINGERPRINT_OK) {
+          uint8_t tz = finger.image2Tz(tzSlot);
+          if (tz == FINGERPRINT_OK) {
             return true;
           }
+          lastCaptureErrCode = tz;
+          Serial.printf("[R307S] image2Tz(%d) err=0x%02X\n", tzSlot, tz);
+        } else {
+          lastCaptureErrCode = p2;
         }
-        delay(80);
+        delay(100);
       }
     }
     if (otaInitialized && WiFi.status() == WL_CONNECTED) ArduinoOTA.handle();
-    delay(35);
+    delay(40);
   }
   return false;
 }
@@ -570,62 +584,79 @@ void sendCommandAck(const String& action, const String& status, int slotId, cons
 }
 
 // ============================================================================
-// REMOTE FINGERPRINT ENROLLMENT & DELETION (Triggered from Mobile App)
+// REMOTE FINGERPRINT ENROLLMENT & DELETION (Auto-retries Step 2 up to 4 times!)
 // ============================================================================
 void executeRemoteEnroll(int slotId, const String& studentName) {
   commandInProgress = true;
   Serial.printf("[ENROLL] Starting slot #%d for %s\n", slotId, studentName.c_str());
-  setSensorLed(true);
-  sendCommandAck("ENROLL", "IN_PROGRESS", slotId, "Place finger flat on sensor (Step 1/2)...");
-  showOledStatus("ENROLL SLOT #" + String(slotId), studentName, "Place Finger (1/2)", "Hold flat & steady");
+  sendCommandAck("ENROLL", "IN_PROGRESS", slotId, "Press finger firmly & flat on glass (Step 1/2)...");
+  showOledStatus("ENROLL SLOT #" + String(slotId), studentName, "Press Finger FLAT", "Step 1 of 2...");
   beepNotice();
 
-  // Step 1: Wait for first crisp settled finger capture
+  // Step 1: Wait for first crisp settled finger capture into Buffer 1
   if (!captureCleanFingerToSlot(1, ENROLL_STEP_TIMEOUT_MS)) {
-    showOledStatus("ENROLL TIMEOUT", studentName, "No clear print", "Try again in App");
+    String errHex = String(lastCaptureErrCode, HEX);
+    showOledStatus("ENROLL FAILED", studentName, "Step 1 err: 0x" + errHex, "Press flat & retry");
     beepError();
-    sendCommandAck("ENROLL", "FAILED", slotId, "Timed out waiting for clear first finger placement.");
+    sendCommandAck("ENROLL", "FAILED", slotId, "Step 1 failed (R307S code 0x" + errHex + "). Check glass/power & press flat.");
     messageHoldUntilMs = millis() + 3000;
     commandInProgress = false;
     return;
   }
 
-  // Ask student to lift finger
-  beepEntry();
-  showOledStatus("ENROLL SLOT #" + String(slotId), "Step 1 Captured!", "REMOVE FINGER", "Wait a moment...");
-  sendCommandAck("ENROLL", "IN_PROGRESS", slotId, "First scan captured! Lift finger, then place again (Step 2/2)...");
+  // Try Step 2 + createModel() up to 4 times without throwing away Step 1!
+  bool modelCreated = false;
+  uint8_t lastModelErr = 0;
 
-  delay(900);
-  unsigned long startWait = millis();
-  while (finger.getImage() != FINGERPRINT_NOFINGER) {
-    if (millis() - startWait > 10000) break;
-    delay(50);
+  for (int tryIdx = 1; tryIdx <= 4; tryIdx++) {
+    beepEntry();
+    showOledStatus("ENROLL SLOT #" + String(slotId), "LIFT FINGER NOW", tryIdx == 1 ? "Step 1 OK!" : ("Adjust & retry " + String(tryIdx) + "/4"), "");
+    if (tryIdx == 1) {
+      sendCommandAck("ENROLL", "IN_PROGRESS", slotId, "Step 1 OK! Lift finger, then press same spot flat (Step 2/2)...");
+    } else {
+      sendCommandAck("ENROLL", "IN_PROGRESS", slotId, "Slight mismatch — lift & press SAME finger center again (Try " + String(tryIdx) + "/4)...");
+    }
+
+    delay(700);
+    unsigned long liftStart = millis();
+    while (finger.getImage() != FINGERPRINT_NOFINGER) {
+      if (millis() - liftStart > 8000) break;
+      delay(50);
+    }
+
+    showOledStatus("ENROLL SLOT #" + String(slotId), studentName, "Press SAME Finger", "Step 2/2 (Try " + String(tryIdx) + "/4)");
+    if (!captureCleanFingerToSlot(2, ENROLL_STEP_TIMEOUT_MS)) {
+      lastModelErr = lastCaptureErrCode;
+      continue;
+    }
+
+    lastModelErr = finger.createModel();
+    Serial.printf("[ENROLL] createModel() try %d -> 0x%02X\n", tryIdx, lastModelErr);
+    if (lastModelErr == FINGERPRINT_OK) {
+      modelCreated = true;
+      break;
+    }
+
+    beepError();
+    delay(400);
   }
 
-  // Step 2: Wait for second crisp settled placement of same finger
-  showOledStatus("ENROLL SLOT #" + String(slotId), studentName, "Place SAME Finger", "Step 2 of 2...");
-  if (!captureCleanFingerToSlot(2, ENROLL_STEP_TIMEOUT_MS)) {
-    showOledStatus("ENROLL TIMEOUT", studentName, "Step 2 timed out", "Retry from App");
+  if (!modelCreated) {
+    String errHex = String(lastModelErr, HEX);
+    showOledStatus("NO MATCH (0x" + errHex + ")", "Clean prism & press", "same center firmly", "Retry from App");
     beepError();
-    sendCommandAck("ENROLL", "FAILED", slotId, "Timed out waiting for second finger placement.");
-    messageHoldUntilMs = millis() + 3000;
+    sendCommandAck("ENROLL", "FAILED", slotId, "Finger mismatch after 4 tries (R307S code 0x" + errHex + "). Ensure clean glass & firm flat press (check R307S power brightness).");
+    messageHoldUntilMs = millis() + 3500;
     commandInProgress = false;
     return;
   }
 
-  if (finger.createModel() != FINGERPRINT_OK) {
-    showOledStatus("NO MATCH", "Fingers did not", "match! Retry", "");
+  uint8_t storeErr = finger.storeModel(slotId);
+  if (storeErr != FINGERPRINT_OK) {
+    String errHex = String(storeErr, HEX);
+    showOledStatus("STORAGE ERROR", "Slot #" + String(slotId), "Code: 0x" + errHex, "");
     beepError();
-    sendCommandAck("ENROLL", "FAILED", slotId, "Two finger scans did not match. Please retry.");
-    messageHoldUntilMs = millis() + 3000;
-    commandInProgress = false;
-    return;
-  }
-
-  if (finger.storeModel(slotId) != FINGERPRINT_OK) {
-    showOledStatus("STORAGE ERROR", "Could not save", "Slot #" + String(slotId), "");
-    beepError();
-    sendCommandAck("ENROLL", "FAILED", slotId, "Failed writing fingerprint model to R307S flash.");
+    sendCommandAck("ENROLL", "FAILED", slotId, "Failed writing fingerprint to R307S flash (code 0x" + errHex + ").");
     messageHoldUntilMs = millis() + 3000;
     commandInProgress = false;
     return;
@@ -734,14 +765,14 @@ void scanAndSubmitFingerprint() {
   scanInProgress = true;
   drawCuteFace(FACE_FOCUSED, "Reading Finger...");
 
-  // Let finger settle flat on prism (70ms), then try up to 3 crisp frames with full fingerSearch()
-  delay(70);
+  // Let finger settle flat on prism (160ms), then try up to 4 crisp frames with full fingerSearch()
+  delay(160);
   int matchedSlot = -1;
   int confidence = 0;
   bool fingerPresent = false;
   uint8_t lastSearchCode = FINGERPRINT_NOTFOUND;
 
-  for (int attempt = 0; attempt < 3; attempt++) {
+  for (int attempt = 0; attempt < 4; attempt++) {
     uint8_t imgCode = finger.getImage();
     if (imgCode == FINGERPRINT_NOFINGER) {
       // Student lifted finger too quickly before capture finished
@@ -973,7 +1004,7 @@ void setup() {
 
   if (finger.verifyPassword()) {
     sensorReady = true;
-    finger.setSecurityLevel(2); // Optimal sensitivity & accuracy for student fingers
+    finger.setSecurityLevel(1); // Most forgiving accuracy level for student & dry fingers
     finger.getTemplateCount();
     Serial.printf("[R307S] Sensor OK! Security=2 | Stored templates: %d\n", finger.templateCount);
     setSensorLed(true);
@@ -1030,7 +1061,7 @@ void loop() {
     lastSensorRetryMs = now;
     if (finger.verifyPassword()) {
       sensorReady = true;
-      finger.setSecurityLevel(2);
+      finger.setSecurityLevel(1);
       finger.getTemplateCount();
       setSensorLed(sensingEnabled);
       Serial.printf("[R307S] Recovered! Templates: %d\n", finger.templateCount);
