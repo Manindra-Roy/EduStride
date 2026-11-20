@@ -15,7 +15,7 @@ import { dispatchGateNotification } from '../services/gateNotifier.js';
 
 const router = express.Router();
 
-const ONLINE_THRESHOLD_MS = 12000; // 12 seconds (device polls every 2s)
+const ONLINE_THRESHOLD_MS = 20000; // 20 seconds (device polls every ~5.5s to keep 3.3V rail quiet for R307S)
 
 const formatDevice = (device, enrolledCount = null) => {
   const obj = typeof device.toObject === 'function' ? device.toObject() : { ...device };

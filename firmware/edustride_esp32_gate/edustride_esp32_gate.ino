@@ -40,6 +40,7 @@ bool otaInitialized = false;
 volatile bool otaInProgress = false;
 volatile bool scanInProgress = false;
 volatile bool commandInProgress = false;
+volatile bool wifiBusy = false;
 String lastServerTime = "--:--";
 unsigned long lastHeartbeatMs = 0;
 unsigned long messageHoldUntilMs = 0;
@@ -67,13 +68,19 @@ enum FaceMood {
   FACE_ERROR
 };
 
-// Smooth physics-interpolated eye parameters
+// Smooth physics-interpolated eye parameters (sleek 30x30 keeps 3.3V OLED current low!)
 float eyeCurX = 0.0f, eyeTargetX = 0.0f;
 float eyeCurY = 0.0f, eyeTargetY = 0.0f;
-float eyeLeftH = 36.0f, eyeTargetLeftH = 36.0f;
-float eyeRightH = 36.0f, eyeTargetRightH = 36.0f;
-float eyeLeftW = 36.0f, eyeTargetLeftW = 36.0f;
-float eyeRightW = 36.0f, eyeTargetRightW = 36.0f;
+float eyeLeftH = 30.0f, eyeTargetLeftH = 30.0f;
+float eyeRightH = 30.0f, eyeTargetRightH = 30.0f;
+float eyeLeftW = 30.0f, eyeTargetLeftW = 30.0f;
+float eyeRightW = 30.0f, eyeTargetRightW = 30.0f;
+
+// Dirty-frame tracker: ONLY push I2C OLED updates when pixels actually change!
+int lastDrawnX = 999, lastDrawnY = 999;
+int lastDrawnLH = -1, lastDrawnRH = -1, lastDrawnLW = -1, lastDrawnRW = -1;
+bool lastDrawnHappy = false;
+bool lastDrawnWifi = false;
 
 // Idle personality timers
 unsigned long lastFrameMs = 0;
@@ -340,6 +347,7 @@ void showOledStatus(const String& header, const String& line1, const String& lin
 
 void showIdleScreen() {
   activeEventCaption = "";
+  lastDrawnX = 999; // Force next dirty check to sync cleanly
   if (WiFi.status() != WL_CONNECTED) {
     renderRoboEyes(FACE_FOCUSED, "Wi-Fi Reconnecting...", millis());
     return;
@@ -355,9 +363,9 @@ void showIdleScreen() {
 void animateIdleFace(unsigned long now) {
   if (otaInProgress) return;
 
-  // Keep event moods (bounce on Happy / shake on Error) smoothly animated during hold window
+  // Keep event moods (bounce on Happy / shake on Error) animated during hold window
   if (messageHoldUntilMs > 0) {
-    if (now - lastFrameMs >= 45) {
+    if (now - lastFrameMs >= 90) {
       lastFrameMs = now;
       renderRoboEyes(activeEventMood, activeEventCaption, now);
     }
@@ -368,7 +376,7 @@ void animateIdleFace(unsigned long now) {
 
   // Sleepy Paused Mode (when turned OFF from EduStride mobile app)
   if (!sensingEnabled) {
-    if (now - lastSleepZMs >= 550) {
+    if (now - lastSleepZMs >= 650) {
       lastSleepZMs = now;
       sleepZFrame = (sleepZFrame + 1) % 8;
       renderRoboEyes(FACE_SLEEPY, "PAUSED IN APP", now);
@@ -376,45 +384,47 @@ void animateIdleFace(unsigned long now) {
     return;
   }
 
-  // Smooth ~18 FPS physics frame tick for Vector / EMO idle personality (gentle on I2C & 3.3V rail)
+  // Smooth ~18 FPS physics tick, BUT only sends I2C to OLED when eyes actually move/blink!
   if (now - lastFrameMs < 55) return;
   lastFrameMs = now;
 
-  // 1. Trigger natural single or double blinks every 2.5 - 5.5s
+  // 1. Trigger natural single or double blinks every 3.0 - 6.0s
   if (blinkPhase == 0 && now >= nextBlinkMs) {
     blinkPhase = 1; // start closing
     eyeTargetLeftH = 3.0f;
     eyeTargetRightH = 3.0f;
-    eyeTargetLeftW = 42.0f;  // Pixar squash-and-stretch width pop!
-    eyeTargetRightW = 42.0f;
+    eyeTargetLeftW = 35.0f;  // Pixar squash-and-stretch width pop!
+    eyeTargetRightW = 35.0f;
     if ((now % 4) == 0) pendingDoubleBlink = 1;
   }
 
   if (blinkPhase == 1 && eyeLeftH <= 6.0f && eyeRightH <= 6.0f) {
     blinkPhase = 2; // snap open
-    eyeTargetLeftH = 36.0f;
-    eyeTargetRightH = 36.0f;
-    eyeTargetLeftW = 36.0f;
-    eyeTargetRightW = 36.0f;
-  } else if (blinkPhase == 2 && eyeLeftH >= 33.0f && eyeRightH >= 33.0f) {
+    eyeTargetLeftH = 30.0f;
+    eyeTargetRightH = 30.0f;
+    eyeTargetLeftW = 30.0f;
+    eyeTargetRightW = 30.0f;
+  } else if (blinkPhase == 2 && eyeLeftH >= 28.0f && eyeRightH >= 28.0f) {
     blinkPhase = 0;
+    eyeLeftH = 30.0f; eyeRightH = 30.0f;
+    eyeLeftW = 30.0f; eyeRightW = 30.0f;
     if (pendingDoubleBlink > 0) {
       pendingDoubleBlink = 0;
       nextBlinkMs = now + 180; // quick cute double blink!
     } else {
-      nextBlinkMs = now + 2600 + (now % 3200);
+      nextBlinkMs = now + 3000 + (now % 3200);
     }
   }
 
-  // 2. Random lively Vector / EMO curiosity & glance behaviors every 2.5 - 5.0s
+  // 2. Random lively Vector / EMO curiosity & glance behaviors every 3.0 - 6.0s
   if (blinkPhase == 0 && now >= nextBehaviorMs) {
-    nextBehaviorMs = now + 2400 + (now % 2800);
+    nextBehaviorMs = now + 3000 + (now % 3000);
     uint8_t pick = (now / 37) % 10;
 
-    eyeTargetLeftW = 36.0f;
-    eyeTargetRightW = 36.0f;
-    eyeTargetLeftH = 36.0f;
-    eyeTargetRightH = 36.0f;
+    eyeTargetLeftW = 30.0f;
+    eyeTargetRightW = 30.0f;
+    eyeTargetLeftH = 30.0f;
+    eyeTargetRightH = 30.0f;
 
     switch (pick) {
       case 0: // Center calm
@@ -422,27 +432,27 @@ void animateIdleFace(unsigned long now) {
         eyeTargetX = 0.0f; eyeTargetY = 0.0f;
         break;
       case 2: // Glance left
-        eyeTargetX = -13.0f; eyeTargetY = -1.0f;
+        eyeTargetX = -12.0f; eyeTargetY = -1.0f;
         break;
       case 3: // Glance right
-        eyeTargetX = 13.0f; eyeTargetY = -1.0f;
+        eyeTargetX = 12.0f; eyeTargetY = -1.0f;
         break;
       case 4: // Curious look up-left
-        eyeTargetX = -10.0f; eyeTargetY = -7.0f;
+        eyeTargetX = -9.0f; eyeTargetY = -6.0f;
         break;
       case 5: // Curious look up-right
-        eyeTargetX = 10.0f; eyeTargetY = -7.0f;
+        eyeTargetX = 9.0f; eyeTargetY = -6.0f;
         break;
       case 6: // Glance down toward sensor
-        eyeTargetX = 0.0f; eyeTargetY = 7.0f;
+        eyeTargetX = 0.0f; eyeTargetY = 6.0f;
         break;
-      case 7: // Curious inquisitive asymmetric eyes (left big, right smaller!)
+      case 7: // Curious inquisitive asymmetric eyes
         eyeTargetX = -4.0f; eyeTargetY = -2.0f;
-        eyeTargetLeftH = 42.0f; eyeTargetRightH = 26.0f;
+        eyeTargetLeftH = 35.0f; eyeTargetRightH = 22.0f;
         break;
       case 8: // Curious asymmetric right!
         eyeTargetX = 4.0f; eyeTargetY = -2.0f;
-        eyeTargetLeftH = 26.0f; eyeTargetRightH = 42.0f;
+        eyeTargetLeftH = 22.0f; eyeTargetRightH = 35.0f;
         break;
       case 9: // Brief sweet happy-squint moment!
         eyeTargetX = 0.0f; eyeTargetY = -2.0f;
@@ -451,9 +461,9 @@ void animateIdleFace(unsigned long now) {
     }
   }
 
-  // 3. Smooth exponential easing interpolation
-  const float posEase = 0.34f;
-  const float sizeEase = (blinkPhase > 0) ? 0.58f : 0.30f;
+  // 3. Smooth exponential easing interpolation (snap when close so I2C sleeps cleanly!)
+  const float posEase = 0.36f;
+  const float sizeEase = (blinkPhase > 0) ? 0.60f : 0.34f;
 
   eyeCurX   += (eyeTargetX - eyeCurX) * posEase;
   eyeCurY   += (eyeTargetY - eyeCurY) * posEase;
@@ -461,6 +471,35 @@ void animateIdleFace(unsigned long now) {
   eyeRightH += (eyeTargetRightH - eyeRightH) * sizeEase;
   eyeLeftW  += (eyeTargetLeftW - eyeLeftW) * sizeEase;
   eyeRightW += (eyeTargetRightW - eyeRightW) * sizeEase;
+
+  if (fabsf(eyeTargetX - eyeCurX) < 0.4f) eyeCurX = eyeTargetX;
+  if (fabsf(eyeTargetY - eyeCurY) < 0.4f) eyeCurY = eyeTargetY;
+  if (fabsf(eyeTargetLeftH - eyeLeftH) < 0.4f) eyeLeftH = eyeTargetLeftH;
+  if (fabsf(eyeTargetRightH - eyeRightH) < 0.4f) eyeRightH = eyeTargetRightH;
+  if (fabsf(eyeTargetLeftW - eyeLeftW) < 0.4f) eyeLeftW = eyeTargetLeftW;
+  if (fabsf(eyeTargetRightW - eyeRightW) < 0.4f) eyeRightW = eyeTargetRightW;
+
+  int curX = (int)roundf(eyeCurX);
+  int curY = (int)roundf(eyeCurY);
+  int curLH = (int)roundf(eyeLeftH);
+  int curRH = (int)roundf(eyeRightH);
+  int curLW = (int)roundf(eyeLeftW);
+  int curRW = (int)roundf(eyeRightW);
+  bool curHappy = (idleHappyUntilMs > now && blinkPhase == 0 && curLH > 18);
+  bool curWifi = (WiFi.status() == WL_CONNECTED);
+
+  // Dirty-frame check: SKIP I2C display.display() completely when eyes are resting!
+  if (curX == lastDrawnX && curY == lastDrawnY &&
+      curLH == lastDrawnLH && curRH == lastDrawnRH &&
+      curLW == lastDrawnLW && curRW == lastDrawnRW &&
+      curHappy == lastDrawnHappy && curWifi == lastDrawnWifi) {
+    return;
+  }
+
+  lastDrawnX = curX; lastDrawnY = curY;
+  lastDrawnLH = curLH; lastDrawnRH = curRH;
+  lastDrawnLW = curLW; lastDrawnRW = curRW;
+  lastDrawnHappy = curHappy; lastDrawnWifi = curWifi;
 
   renderRoboEyes(FACE_IDLE, "", now);
 }
@@ -487,6 +526,7 @@ int performHttpRequest(const String& method, const String& path, const String& j
     return -3;
   }
 
+  wifiBusy = true;
   String baseUrl = String(SERVER_BASE_URL);
   while (baseUrl.endsWith("/")) {
     baseUrl.remove(baseUrl.length() - 1);
@@ -524,6 +564,7 @@ int performHttpRequest(const String& method, const String& path, const String& j
     http.end();
   }
 
+  wifiBusy = false;
   if (netMutex) {
     xSemaphoreGive(netMutex);
   }
@@ -737,8 +778,16 @@ void heartbeatTask(void* param) {
     if (!otaInProgress && !scanInProgress && !commandInProgress && WiFi.status() == WL_CONNECTED) {
       pollServerStatus();
     }
-    vTaskDelay(pdMS_TO_TICKS(3500)); // Every 3.5s on Core 0 (well inside 12s online threshold)
+    vTaskDelay(pdMS_TO_TICKS(5500)); // Calm 5.5s poll (inside 20s online threshold; keeps 3.3V rail quiet!)
   }
+}
+
+uint8_t searchStoredTemplates() {
+  // Exact Step 1 (ae961db) fast search for up to 160 students; automatic full search beyond 160
+  if (finger.templateCount <= 160) {
+    return finger.fingerFastSearch();
+  }
+  return finger.fingerSearch();
 }
 
 // ============================================================================
@@ -746,26 +795,29 @@ void heartbeatTask(void* param) {
 // ============================================================================
 void scanAndSubmitFingerprint() {
   if (!sensorReady || !sensingEnabled || WiFi.status() != WL_CONNECTED) return;
-
-  // Step 1: Non-blocking check for finger on R307S glass
-  uint8_t p = finger.getImage();
-  if (p == FINGERPRINT_NOFINGER) return;
-  if (p != FINGERPRINT_OK) return;
-
-  // Step 2: Convert that EXACT captured frame immediately (proven Adafruit R307S flow!)
-  p = finger.image2Tz();
-  if (p != FINGERPRINT_OK) {
-    // Partial touch / edge brush — wait silently for the next 40ms poll
-    return;
-  }
+  if (wifiBusy) return; // Never capture optical image during a 300mA Wi-Fi TLS burst!
 
   scanInProgress = true;
 
-  // Step 3: Search all stored templates (using real capacity from getParameters())
+  // Step 1: Non-blocking check for finger on R307S glass (3.3V rail completely quiet!)
+  uint8_t p = finger.getImage();
+  if (p == FINGERPRINT_NOFINGER || p != FINGERPRINT_OK) {
+    scanInProgress = false;
+    return;
+  }
+
+  // Step 2: Convert that EXACT captured frame immediately (proven Step 1 ae961db flow!)
+  p = finger.image2Tz();
+  if (p != FINGERPRINT_OK) {
+    scanInProgress = false;
+    return;
+  }
+
+  // Step 3: Match using proven fingerFastSearch()
   int matchedSlot = -1;
   int confidence = 0;
 
-  p = finger.fingerSearch();
+  p = searchStoredTemplates();
   if (p == FINGERPRINT_OK) {
     matchedSlot = finger.fingerID;
     confidence = finger.confidence;
@@ -773,13 +825,12 @@ void scanAndSubmitFingerprint() {
     // One fast 90ms second-chance read in case the first frame caught the finger mid-press
     delay(90);
     if (finger.getImage() == FINGERPRINT_OK && finger.image2Tz() == FINGERPRINT_OK) {
-      if (finger.fingerSearch() == FINGERPRINT_OK) {
+      if (searchStoredTemplates() == FINGERPRINT_OK) {
         matchedSlot = finger.fingerID;
         confidence = finger.confidence;
       }
     }
   } else {
-    // UART hiccup — silently ignore rather than flashing Unknown
     scanInProgress = false;
     return;
   }
@@ -962,6 +1013,9 @@ void setup() {
   if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_I2C_ADDR)) {
     Serial.println("[OLED] SSD1306 allocation failed! Check SDA=21, SCL=22, 3V3, GND.");
   } else {
+    // Balanced 50% OLED contrast cuts 3.3V current draw in half to keep R307S optical rail rock-solid!
+    display.ssd1306_command(SSD1306_SETCONTRAST);
+    display.ssd1306_command(0x55);
     showOledStatus("EDUSTRIDE GATE", "Booting v" + String(FIRMWARE_VERSION), "Init R307S Sensor...", "");
   }
 
