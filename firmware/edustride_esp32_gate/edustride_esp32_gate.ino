@@ -722,40 +722,41 @@ void heartbeatTask(void* param) {
 // ============================================================================
 void scanAndSubmitFingerprint() {
   if (!sensorReady || !sensingEnabled || WiFi.status() != WL_CONNECTED) return;
-  if (wifiBusy) return; // Never read R307S during a Wi-Fi TX burst
+  // Wait briefly if a background heartbeat Wi-Fi burst is finishing
+  unsigned long waitWifiStart = millis();
+  while (wifiBusy && millis() - waitWifiStart < 700) {
+    delay(15);
+  }
+  if (wifiBusy) return;
 
   scanInProgress = true;
+  drawCuteFace(FACE_FOCUSED, "Reading Finger...");
 
-  uint8_t p = finger.getImage();
-  if (p != FINGERPRINT_OK) {
-    scanInProgress = false;
-    return;
-  }
-
-  p = finger.image2Tz();
-  if (p != FINGERPRINT_OK) {
-    scanInProgress = false;
-    return;
-  }
-
+  // Give finger 90ms to flatten on prism, then try up to 3 clean frames while touching
+  delay(90);
   int matchedSlot = -1;
   int confidence = 0;
+  bool capturedAny = false;
 
-  p = searchStoredTemplates();
-  if (p == FINGERPRINT_OK) {
-    matchedSlot = finger.fingerID;
-    confidence = finger.confidence;
-  } else if (p == FINGERPRINT_NOTFOUND) {
-    // 1 quick retry 110ms later in case first touch was still settling
-    delay(110);
-    if (finger.getImage() == FINGERPRINT_OK && finger.image2Tz() == FINGERPRINT_OK) {
-      if (searchStoredTemplates() == FINGERPRINT_OK) {
-        matchedSlot = finger.fingerID;
-        confidence = finger.confidence;
+  for (int attempt = 0; attempt < 3; attempt++) {
+    uint8_t p = finger.getImage();
+    if (p == FINGERPRINT_OK) {
+      capturedAny = true;
+      if (finger.image2Tz() == FINGERPRINT_OK) {
+        if (searchStoredTemplates() == FINGERPRINT_OK) {
+          matchedSlot = finger.fingerID;
+          confidence = finger.confidence;
+          break;
+        }
       }
     }
-  } else {
+    if (!touchPinTriggered()) break;
+    delay(90);
+  }
+
+  if (!capturedAny && matchedSlot < 0) {
     scanInProgress = false;
+    showIdleScreen();
     return;
   }
 
@@ -764,7 +765,7 @@ void scanAndSubmitFingerprint() {
     beepError();
     messageHoldUntilMs = millis() + 1800;
     unsigned long lw = millis();
-    while (finger.getImage() != FINGERPRINT_NOFINGER && millis() - lw < 1500) delay(50);
+    while (touchPinTriggered() && millis() - lw < 2500) delay(40);
     scanInProgress = false;
     return;
   }
@@ -825,10 +826,10 @@ void scanAndSubmitFingerprint() {
     messageHoldUntilMs = millis() + 2400;
   }
 
-  // Wait for finger lift so same press doesn't re-trigger
+  // Wait for finger lift via Touch pin so LED does NOT blink again while waiting!
   unsigned long liftWait = millis();
-  while (finger.getImage() != FINGERPRINT_NOFINGER && millis() - liftWait < 2000) {
-    delay(50);
+  while (touchPinTriggered() && millis() - liftWait < 3000) {
+    delay(40);
   }
   scanInProgress = false;
 }
@@ -1010,12 +1011,14 @@ void loop() {
 
   animateIdleFace(now);
 
-  // Hybrid Scan Trigger: instant wake if GPIO 4 Touch triggers OR calm 160ms cool polling!
-  if (messageHoldUntilMs == 0) {
-    bool touchWake = touchPinTriggered();
-    if (touchWake || (now - lastFpPollMs >= 160)) {
-      lastFpPollMs = now;
-      scanAndSubmitFingerprint();
+  // Pure 6-Wire Touch Trigger: LED stays 100% DARK & cool while idle, flashes ONLY when finger touches!
+  if (messageHoldUntilMs == 0 && now - lastFpPollMs >= 20) {
+    lastFpPollMs = now;
+    if (touchPinTriggered()) {
+      delay(25); // 25ms hardware debounce
+      if (touchPinTriggered()) {
+        scanAndSubmitFingerprint();
+      }
     }
   }
 
