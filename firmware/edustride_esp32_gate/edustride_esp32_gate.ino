@@ -32,15 +32,27 @@ HardwareSerial fpSerial(2); // ESP32 Hardware UART2
 Adafruit_Fingerprint finger = Adafruit_Fingerprint(&fpSerial);
 
 // Runtime state synced wirelessly with EduStride backend
-bool sensingEnabled = true;
+volatile bool sensingEnabled = true;
+volatile bool prevSensingObserved = true;
 bool sensorReady = false;
 bool ledCurrentlyOn = false;
 bool otaInitialized = false;
-bool otaInProgress = false;
+volatile bool otaInProgress = false;
+volatile bool scanInProgress = false;
+volatile bool commandInProgress = false;
 String lastServerTime = "--:--";
 unsigned long lastHeartbeatMs = 0;
 unsigned long messageHoldUntilMs = 0;
 unsigned long lastWifiCheckMs = 0;
+unsigned long lastSensorRetryMs = 0;
+
+// Dual-core FreeRTOS synchronization (Core 0 = HTTPS Heartbeat, Core 1 = R307S + 30 FPS OLED + OTA)
+SemaphoreHandle_t netMutex = nullptr;
+SemaphoreHandle_t stateMutex = nullptr;
+bool hasQueuedCommand = false;
+String queuedCmdAction = "NONE";
+int queuedCmdSlot = 0;
+String queuedCmdStudent = "";
 
 // ============================================================================
 // VECTOR / COZMO / EMO STYLE DESK-ROBOT EYE ENGINE (128x64 OLED, ~33 FPS)
@@ -471,6 +483,10 @@ bool isHttpsUrl(const String& url) {
 int performHttpRequest(const String& method, const String& path, const String& jsonBody, String& responseOut) {
   if (WiFi.status() != WL_CONNECTED) return -1;
 
+  if (netMutex && xSemaphoreTake(netMutex, pdMS_TO_TICKS(9000)) != pdTRUE) {
+    return -3;
+  }
+
   String baseUrl = String(SERVER_BASE_URL);
   while (baseUrl.endsWith("/")) {
     baseUrl.remove(baseUrl.length() - 1);
@@ -490,24 +506,54 @@ int performHttpRequest(const String& method, const String& path, const String& j
     began = http.begin(plainClient, fullUrl);
   }
 
-  if (!began) return -2;
+  int httpCode = -2;
+  if (began) {
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader("x-device-id", DEVICE_ID);
+    http.addHeader("x-device-key", DEVICE_API_KEY);
 
-  http.addHeader("Content-Type", "application/json");
-  http.addHeader("x-device-id", DEVICE_ID);
-  http.addHeader("x-device-key", DEVICE_API_KEY);
+    if (method == "GET") {
+      httpCode = http.GET();
+    } else if (method == "POST") {
+      httpCode = http.POST(jsonBody);
+    }
 
-  int httpCode = -1;
-  if (method == "GET") {
-    httpCode = http.GET();
-  } else if (method == "POST") {
-    httpCode = http.POST(jsonBody);
+    if (httpCode > 0) {
+      responseOut = http.getString();
+    }
+    http.end();
   }
 
-  if (httpCode > 0) {
-    responseOut = http.getString();
+  if (netMutex) {
+    xSemaphoreGive(netMutex);
   }
-  http.end();
   return httpCode;
+}
+
+// ============================================================================
+// R307S SETTLED CAPTURE HELPER (Eliminates partial first-touch smudges!)
+// ============================================================================
+bool captureCleanFingerToSlot(uint8_t tzSlot, unsigned long timeoutMs) {
+  unsigned long startWait = millis();
+  while (millis() - startWait < timeoutMs) {
+    uint8_t p = finger.getImage();
+    if (p == FINGERPRINT_OK) {
+      // Wait 85ms for finger to settle flat on the optical prism, then re-capture crisp frame
+      delay(85);
+      for (int attempt = 0; attempt < 3; attempt++) {
+        uint8_t p2 = finger.getImage();
+        if (p2 == FINGERPRINT_OK) {
+          if (finger.image2Tz(tzSlot) == FINGERPRINT_OK) {
+            return true;
+          }
+        }
+        delay(80);
+      }
+    }
+    if (otaInitialized && WiFi.status() == WL_CONNECTED) ArduinoOTA.handle();
+    delay(35);
+  }
+  return false;
 }
 
 void sendCommandAck(const String& action, const String& status, int slotId, const String& message) {
@@ -527,32 +573,20 @@ void sendCommandAck(const String& action, const String& status, int slotId, cons
 // REMOTE FINGERPRINT ENROLLMENT & DELETION (Triggered from Mobile App)
 // ============================================================================
 void executeRemoteEnroll(int slotId, const String& studentName) {
+  commandInProgress = true;
   Serial.printf("[ENROLL] Starting slot #%d for %s\n", slotId, studentName.c_str());
   setSensorLed(true);
-  sendCommandAck("ENROLL", "IN_PROGRESS", slotId, "Place finger on sensor (Step 1/2)...");
-  showOledStatus("ENROLL SLOT #" + String(slotId), studentName, "Place Finger (1/2)", "Hold steady...");
+  sendCommandAck("ENROLL", "IN_PROGRESS", slotId, "Place finger flat on sensor (Step 1/2)...");
+  showOledStatus("ENROLL SLOT #" + String(slotId), studentName, "Place Finger (1/2)", "Hold flat & steady");
   beepNotice();
 
-  // Step 1: Wait for first finger placement
-  unsigned long startWait = millis();
-  int p = -1;
-  while (p != FINGERPRINT_OK) {
-    p = finger.getImage();
-    if (millis() - startWait > ENROLL_STEP_TIMEOUT_MS) {
-      showOledStatus("ENROLL TIMEOUT", studentName, "No finger detected", "Try again in App");
-      beepError();
-      sendCommandAck("ENROLL", "FAILED", slotId, "Timed out waiting for first finger placement.");
-      messageHoldUntilMs = millis() + 3000;
-      return;
-    }
-    delay(60);
-  }
-
-  if (finger.image2Tz(1) != FINGERPRINT_OK) {
-    showOledStatus("ENROLL FAILED", "Poor finger image", "Clean & retry", "");
+  // Step 1: Wait for first crisp settled finger capture
+  if (!captureCleanFingerToSlot(1, ENROLL_STEP_TIMEOUT_MS)) {
+    showOledStatus("ENROLL TIMEOUT", studentName, "No clear print", "Try again in App");
     beepError();
-    sendCommandAck("ENROLL", "FAILED", slotId, "Could not capture clear first fingerprint image.");
+    sendCommandAck("ENROLL", "FAILED", slotId, "Timed out waiting for clear first finger placement.");
     messageHoldUntilMs = millis() + 3000;
+    commandInProgress = false;
     return;
   }
 
@@ -561,34 +595,21 @@ void executeRemoteEnroll(int slotId, const String& studentName) {
   showOledStatus("ENROLL SLOT #" + String(slotId), "Step 1 Captured!", "REMOVE FINGER", "Wait a moment...");
   sendCommandAck("ENROLL", "IN_PROGRESS", slotId, "First scan captured! Lift finger, then place again (Step 2/2)...");
 
-  delay(1200);
-  startWait = millis();
+  delay(900);
+  unsigned long startWait = millis();
   while (finger.getImage() != FINGERPRINT_NOFINGER) {
     if (millis() - startWait > 10000) break;
-    delay(60);
+    delay(50);
   }
 
-  // Step 2: Wait for second placement of same finger
+  // Step 2: Wait for second crisp settled placement of same finger
   showOledStatus("ENROLL SLOT #" + String(slotId), studentName, "Place SAME Finger", "Step 2 of 2...");
-  startWait = millis();
-  p = -1;
-  while (p != FINGERPRINT_OK) {
-    p = finger.getImage();
-    if (millis() - startWait > ENROLL_STEP_TIMEOUT_MS) {
-      showOledStatus("ENROLL TIMEOUT", studentName, "Step 2 timed out", "Retry from App");
-      beepError();
-      sendCommandAck("ENROLL", "FAILED", slotId, "Timed out waiting for second finger placement.");
-      messageHoldUntilMs = millis() + 3000;
-      return;
-    }
-    delay(60);
-  }
-
-  if (finger.image2Tz(2) != FINGERPRINT_OK) {
-    showOledStatus("ENROLL FAILED", "Step 2 image error", "Retry from App", "");
+  if (!captureCleanFingerToSlot(2, ENROLL_STEP_TIMEOUT_MS)) {
+    showOledStatus("ENROLL TIMEOUT", studentName, "Step 2 timed out", "Retry from App");
     beepError();
-    sendCommandAck("ENROLL", "FAILED", slotId, "Could not capture clear second fingerprint image.");
+    sendCommandAck("ENROLL", "FAILED", slotId, "Timed out waiting for second finger placement.");
     messageHoldUntilMs = millis() + 3000;
+    commandInProgress = false;
     return;
   }
 
@@ -597,6 +618,7 @@ void executeRemoteEnroll(int slotId, const String& studentName) {
     beepError();
     sendCommandAck("ENROLL", "FAILED", slotId, "Two finger scans did not match. Please retry.");
     messageHoldUntilMs = millis() + 3000;
+    commandInProgress = false;
     return;
   }
 
@@ -605,17 +627,20 @@ void executeRemoteEnroll(int slotId, const String& studentName) {
     beepError();
     sendCommandAck("ENROLL", "FAILED", slotId, "Failed writing fingerprint model to R307S flash.");
     messageHoldUntilMs = millis() + 3000;
+    commandInProgress = false;
     return;
   }
 
   finger.getTemplateCount();
-  showOledStatus("ENROLLED OK!", studentName, "Saved in Slot #" + String(slotId), "Ready to scan");
+  drawCuteFace(FACE_HAPPY, "Enrolled #" + String(slotId) + "!");
   beepEnrollOk();
   sendCommandAck("ENROLL", "COMPLETED", slotId, "Successfully enrolled " + studentName + " in Slot #" + String(slotId) + "!");
-  messageHoldUntilMs = millis() + 3500;
+  messageHoldUntilMs = millis() + 3000;
+  commandInProgress = false;
 }
 
 void executeRemoteDelete(int slotId, const String& studentName) {
+  commandInProgress = true;
   Serial.printf("[DELETE] Removing slot #%d (%s)\n", slotId, studentName.c_str());
   showOledStatus("REMOVING PRINT", studentName, "Clearing Slot #" + String(slotId), "");
   uint8_t p = finger.deleteModel(slotId);
@@ -629,13 +654,15 @@ void executeRemoteDelete(int slotId, const String& studentName) {
     beepError();
   }
   messageHoldUntilMs = millis() + 2500;
+  commandInProgress = false;
 }
 
 // ============================================================================
-// HEARTBEAT SYNC WITH BACKEND (Polls every 2s)
+// HEARTBEAT SYNC WITH BACKEND (Runs on Core 0 — NEVER blocks R307S or OLED!)
 // ============================================================================
 void pollServerStatus() {
   if (WiFi.status() != WL_CONNECTED) return;
+  if (otaInProgress || scanInProgress || commandInProgress) return;
 
   String path = "/api/biometric/device/status?firmware=" + String(FIRMWARE_VERSION)
               + "&templates=" + String(finger.templateCount)
@@ -655,72 +682,116 @@ void pollServerStatus() {
     return;
   }
 
-  bool prevSensing = sensingEnabled;
-  sensingEnabled = doc["sensing_enabled"] | true;
-  if (doc["server_time_ist"].is<const char*>()) {
-    lastServerTime = doc["server_time_ist"].as<String>();
-  }
+  bool newSensing = doc["sensing_enabled"] | true;
+  String newTime = doc["server_time_ist"].is<const char*>() ? doc["server_time_ist"].as<String>() : "";
 
-  // Hardware LED safety: immediately power off optical LED when paused from mobile app
-  setSensorLed(sensingEnabled);
-
-  if (prevSensing != sensingEnabled) {
-    beepNotice();
-    messageHoldUntilMs = 0; // Immediately update OLED
-    showIdleScreen();
-  }
-
-  // Check for remote ENROLL / DELETE / CLEAR_ALL command from mobile app
   JsonObject cmd = doc["pending_command"];
+  String cmdAction = "NONE";
+  String cmdStatus = "IDLE";
+  int cmdSlot = 0;
+  String cmdStudent = "Student";
   if (!cmd.isNull()) {
-    String action = cmd["action"] | "NONE";
-    String status = cmd["status"] | "IDLE";
-    int slotId = cmd["slot_id"] | 0;
-    String studentName = cmd["student_name"] | "Student";
+    cmdAction = cmd["action"] | "NONE";
+    cmdStatus = cmd["status"] | "IDLE";
+    cmdSlot = cmd["slot_id"] | 0;
+    cmdStudent = cmd["student_name"] | "Student";
+  }
 
-    if (status == "PENDING" && sensorReady) {
-      if (action == "ENROLL" && slotId >= 1 && slotId <= 1000) {
-        executeRemoteEnroll(slotId, studentName);
-        setSensorLed(sensingEnabled);
-      } else if (action == "DELETE" && slotId >= 1 && slotId <= 1000) {
-        executeRemoteDelete(slotId, studentName);
-        setSensorLed(sensingEnabled);
-      } else if (action == "CLEAR_ALL") {
-        finger.emptyDatabase();
-        finger.getTemplateCount();
-        sendCommandAck("CLEAR_ALL", "COMPLETED", 0, "Sensor memory cleared.");
-      }
+  if (stateMutex && xSemaphoreTake(stateMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+    sensingEnabled = newSensing;
+    if (newTime.length() > 0) lastServerTime = newTime;
+    if (cmdStatus == "PENDING" && cmdAction != "NONE" && !hasQueuedCommand) {
+      queuedCmdAction = cmdAction;
+      queuedCmdSlot = cmdSlot;
+      queuedCmdStudent = cmdStudent;
+      hasQueuedCommand = true;
     }
+    xSemaphoreGive(stateMutex);
+  }
+}
+
+void heartbeatTask(void* param) {
+  (void)param;
+  for (;;) {
+    if (!otaInProgress && !scanInProgress && !commandInProgress && WiFi.status() == WL_CONNECTED) {
+      pollServerStatus();
+    }
+    vTaskDelay(pdMS_TO_TICKS(3500)); // Every 3.5s on Core 0 (well inside 12s online threshold)
   }
 }
 
 // ============================================================================
-// FINGERPRINT SCAN & SERVER SUBMISSION
+// FAST, HIGH-ACCURACY FINGERPRINT SCAN & SERVER SUBMISSION (Core 1)
 // ============================================================================
 void scanAndSubmitFingerprint() {
   if (!sensorReady || !sensingEnabled || WiFi.status() != WL_CONNECTED) return;
 
+  // Quick non-blocking check if a finger has touched the R307S glass
   uint8_t p = finger.getImage();
   if (p == FINGERPRINT_NOFINGER) return;
   if (p != FINGERPRINT_OK) return;
 
-  p = finger.image2Tz();
-  if (p != FINGERPRINT_OK) return;
+  scanInProgress = true;
+  drawCuteFace(FACE_FOCUSED, "Reading Finger...");
 
-  p = finger.fingerFastSearch();
-  if (p == FINGERPRINT_NOTFOUND) {
-    drawCuteFace(FACE_ERROR, "Unknown! Try Again");
-    beepError();
-    messageHoldUntilMs = millis() + 2200;
+  // Let finger settle flat on prism (70ms), then try up to 3 crisp frames with full fingerSearch()
+  delay(70);
+  int matchedSlot = -1;
+  int confidence = 0;
+  bool fingerPresent = false;
+  uint8_t lastSearchCode = FINGERPRINT_NOTFOUND;
+
+  for (int attempt = 0; attempt < 3; attempt++) {
+    uint8_t imgCode = finger.getImage();
+    if (imgCode == FINGERPRINT_NOFINGER) {
+      // Student lifted finger too quickly before capture finished
+      if (attempt == 0) {
+        delay(60);
+        continue;
+      }
+      break;
+    }
+    if (imgCode != FINGERPRINT_OK) {
+      delay(60);
+      continue;
+    }
+
+    fingerPresent = true;
+    uint8_t tzCode = finger.image2Tz();
+    if (tzCode != FINGERPRINT_OK) {
+      Serial.printf("[SCAN] Attempt %d image2Tz err=%d\n", attempt + 1, tzCode);
+      delay(80);
+      continue;
+    }
+
+    // Use full fingerSearch() (far more accurate than fingerFastSearch for rotated/dry student fingers!)
+    lastSearchCode = finger.fingerSearch();
+    if (lastSearchCode == FINGERPRINT_OK) {
+      matchedSlot = finger.fingerID;
+      confidence = finger.confidence;
+      break;
+    }
+    Serial.printf("[SCAN] Attempt %d search code=%d\n", attempt + 1, lastSearchCode);
+    delay(90);
+  }
+
+  if (!fingerPresent && matchedSlot < 0) {
+    // Brief accidental brush — quietly return to cute idle eyes
+    scanInProgress = false;
+    showIdleScreen();
     return;
   }
-  if (p != FINGERPRINT_OK) return;
 
-  int matchedSlot = finger.fingerID;
-  int confidence = finger.confidence;
+  if (matchedSlot < 0) {
+    drawCuteFace(FACE_ERROR, "Unknown! Try Again");
+    beepError();
+    messageHoldUntilMs = millis() + 1800;
+    scanInProgress = false;
+    return;
+  }
+
   Serial.printf("[SCAN] Matched Slot #%d (confidence %d)\n", matchedSlot, confidence);
-
-  drawCuteFace(FACE_FOCUSED, "Verifying Slot #" + String(matchedSlot));
+  drawCuteFace(FACE_FOCUSED, "Syncing Slot #" + String(matchedSlot));
 
   StaticJsonDocument<128> reqDoc;
   reqDoc["slot_id"] = matchedSlot;
@@ -735,7 +806,8 @@ void scanAndSubmitFingerprint() {
   if (httpCode <= 0) {
     drawCuteFace(FACE_ERROR, "Server Unreachable");
     beepError();
-    messageHoldUntilMs = millis() + 2800;
+    messageHoldUntilMs = millis() + 2400;
+    scanInProgress = false;
     return;
   }
 
@@ -743,15 +815,14 @@ void scanAndSubmitFingerprint() {
   if (deserializeJson(respDoc, respStr)) {
     drawCuteFace(FACE_ERROR, "Server Error " + String(httpCode));
     beepError();
-    messageHoldUntilMs = millis() + 2500;
+    messageHoldUntilMs = millis() + 2200;
+    scanInProgress = false;
     return;
   }
 
   String status = respDoc["status"] | "ERROR";
   String studentName = respDoc["student_name"] | "";
-  String classLevel = respDoc["class_level"] | "";
   String eventType = respDoc["event_type"] | "";
-  String timeStr = respDoc["time_str"] | lastServerTime;
 
   if (status == "OK") {
     if (eventType == "ENTRY") {
@@ -761,12 +832,12 @@ void scanAndSubmitFingerprint() {
       drawCuteFace(FACE_WINK, "OUT: " + studentName.substring(0, 16));
       beepExit();
     }
-    messageHoldUntilMs = millis() + 3500;
+    messageHoldUntilMs = millis() + 3000;
   } else if (status == "COOLDOWN") {
     int waitSec = respDoc["wait_seconds"] | 0;
     drawCuteFace(FACE_CHEEKY, "Scanned! Wait " + String(waitSec) + "s");
     beepNotice();
-    messageHoldUntilMs = millis() + 2500;
+    messageHoldUntilMs = millis() + 2200;
   } else if (status == "PAUSED") {
     sensingEnabled = false;
     setSensorLed(false);
@@ -776,14 +847,15 @@ void scanAndSubmitFingerprint() {
     String msg = respDoc["message"] | "Unassigned Slot";
     drawCuteFace(FACE_ERROR, msg.substring(0, 21));
     beepError();
-    messageHoldUntilMs = millis() + 2800;
+    messageHoldUntilMs = millis() + 2400;
   }
 
-  // Wait briefly until finger is removed so the same placement doesn't immediately re-trigger
+  // Wait briefly until finger is lifted so the same touch doesn't immediately re-trigger
   unsigned long liftWait = millis();
-  while (finger.getImage() != FINGERPRINT_NOFINGER && millis() - liftWait < 3000) {
-    delay(60);
+  while (finger.getImage() != FINGERPRINT_NOFINGER && millis() - liftWait < 2000) {
+    delay(45);
   }
+  scanInProgress = false;
 }
 
 // ============================================================================
@@ -890,6 +962,10 @@ void setup() {
     showOledStatus("EDUSTRIDE GATE", "Booting v" + String(FIRMWARE_VERSION), "Init R307S Sensor...", "");
   }
 
+  // Create FreeRTOS mutexes for dual-core safety
+  netMutex = xSemaphoreCreateMutex();
+  stateMutex = xSemaphoreCreateMutex();
+
   // 3. Init R307S Fingerprint Sensor on UART2 (GPIO16=RX2, GPIO17=TX2)
   fpSerial.begin(FP_BAUD_RATE, SERIAL_8N1, FP_RX_PIN, FP_TX_PIN);
   delay(250);
@@ -897,8 +973,9 @@ void setup() {
 
   if (finger.verifyPassword()) {
     sensorReady = true;
+    finger.setSecurityLevel(2); // Optimal sensitivity & accuracy for student fingers
     finger.getTemplateCount();
-    Serial.printf("[R307S] Sensor OK! Stored templates: %d\n", finger.templateCount);
+    Serial.printf("[R307S] Sensor OK! Security=2 | Stored templates: %d\n", finger.templateCount);
     setSensorLed(true);
   } else {
     sensorReady = false;
@@ -911,6 +988,20 @@ void setup() {
   // 4. Connect 2.4GHz Wi-Fi & Perform First Sync
   ensureWifiConnected();
   pollServerStatus();
+  prevSensingObserved = sensingEnabled;
+  setSensorLed(sensingEnabled);
+
+  // Start non-blocking HTTPS heartbeat task on Core 0 so Core 1 is 100% dedicated to fast finger scanning & 30 FPS OLED!
+  xTaskCreatePinnedToCore(
+    heartbeatTask,
+    "HeartbeatTask",
+    8192,
+    nullptr,
+    1,
+    nullptr,
+    0
+  );
+
   nextBlinkMs = millis() + 2000;
   nextBehaviorMs = millis() + 3000;
   showIdleScreen();
@@ -934,10 +1025,56 @@ void loop() {
     ensureWifiConnected();
   }
 
-  // Poll backend every 2 seconds for remote ON/OFF switch & enroll/delete commands
-  if (now - lastHeartbeatMs >= HEARTBEAT_INTERVAL_MS) {
-    lastHeartbeatMs = now;
-    pollServerStatus();
+  // Auto-recover R307S sensor if it wasn't ready during early power-up
+  if (!sensorReady && now - lastSensorRetryMs >= 5000) {
+    lastSensorRetryMs = now;
+    if (finger.verifyPassword()) {
+      sensorReady = true;
+      finger.setSecurityLevel(2);
+      finger.getTemplateCount();
+      setSensorLed(sensingEnabled);
+      Serial.printf("[R307S] Recovered! Templates: %d\n", finger.templateCount);
+    }
+  }
+
+  // React immediately on Core 1 if Core 0 heartbeat toggled sensing ON/OFF
+  if (prevSensingObserved != sensingEnabled) {
+    prevSensingObserved = sensingEnabled;
+    setSensorLed(sensingEnabled);
+    beepNotice();
+    messageHoldUntilMs = 0;
+    showIdleScreen();
+  }
+
+  // Execute any queued remote ENROLL / DELETE / CLEAR_ALL command safely on Core 1
+  String runAction = "NONE";
+  int runSlot = 0;
+  String runStudent = "";
+  if (stateMutex && xSemaphoreTake(stateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+    if (hasQueuedCommand) {
+      runAction = queuedCmdAction;
+      runSlot = queuedCmdSlot;
+      runStudent = queuedCmdStudent;
+      hasQueuedCommand = false;
+      queuedCmdAction = "NONE";
+    }
+    xSemaphoreGive(stateMutex);
+  }
+
+  if (runAction != "NONE" && sensorReady) {
+    if (runAction == "ENROLL" && runSlot >= 1 && runSlot <= 1000) {
+      executeRemoteEnroll(runSlot, runStudent);
+      setSensorLed(sensingEnabled);
+    } else if (runAction == "DELETE" && runSlot >= 1 && runSlot <= 1000) {
+      executeRemoteDelete(runSlot, runStudent);
+      setSensorLed(sensingEnabled);
+    } else if (runAction == "CLEAR_ALL") {
+      commandInProgress = true;
+      finger.emptyDatabase();
+      finger.getTemplateCount();
+      sendCommandAck("CLEAR_ALL", "COMPLETED", 0, "Sensor memory cleared.");
+      commandInProgress = false;
+    }
   }
 
   // Refresh idle OLED screen once any temporary scan/status message expires
@@ -946,14 +1083,14 @@ void loop() {
     showIdleScreen();
   }
 
-  // Smooth ~30 FPS Vector/EMO eye animation (non-blocking)
+  // Smooth ~30 FPS Vector/EMO eye animation (never freezes during heartbeats!)
   animateIdleFace(now);
 
-  // Scan R307S fingerprint every ~80ms when not showing a temporary message
-  if (messageHoldUntilMs == 0 && now - lastFpScanMs >= 80) {
+  // Instant R307S finger polling every 35ms on dedicated Core 1!
+  if (messageHoldUntilMs == 0 && now - lastFpScanMs >= 35) {
     lastFpScanMs = now;
     scanAndSubmitFingerprint();
   }
 
-  delay(10);
+  delay(8);
 }
