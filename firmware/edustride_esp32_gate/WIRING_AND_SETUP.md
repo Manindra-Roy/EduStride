@@ -20,10 +20,10 @@ Complete hardware guide for building the EduStride wireless fingerprint attendan
 3. **NEVER hot-plug wires:** Always unplug power before moving any jumper wire.
 4. **ESP32 GPIOs are STRICTLY 3.3V (NOT 5V tolerant):**
    - Power the **0.96" OLED strictly from `3V3`** (NEVER `5V`/`VIN` — its onboard I2C pull-ups would feed 5V into GPIO 21/22).
-   - Power the **R307S from `3V3`** first (official R307S operates at 3.3V and outputs safe 3.3V UART signals).
+   - Power **R307S Pin 1 (`5V`) from `VIN` (`5.00V` buck output)** so its internal onboard 3.3V regulator & optical LED get full steady voltage (`4.2V–6.0V` per datasheet). Its internal DSP outputs native **3.3V TTL** on `TXD` — verify `TXD ≈ 3.3V` with a multimeter once before connecting `GPIO 16` (only add the `1kΩ/2kΩ` divider below if a rare clone reads `>3.6V`).
 5. **NEVER trust R307S wire colors blindly:**
-   - Verify **Pin 1 (`VCC`)** and **Pin 2 (`GND`)** directly from the silkscreen / triangle arrow on the back of your R307S PCB before powering on. Reversing VCC & GND destroys the sensor immediately.
-6. **Insulate unused wires:** Tape or heat-shrink R307S Pin 5 (`TOUCH`) and Pin 6 (`3.3VT`) so bare tips cannot short against the board.
+   - Verify **Pin 1 (`5V`)** through **Pin 6 (`3.3VT`)** directly from the silkscreen / triangle arrow on the back of your R307S PCB before powering on. Reversing `5V` & `GND` destroys the sensor immediately.
+6. **Power off before moving wires:** Disconnect the 12V adapter before wiring `Pin 1`, `Pin 5`, and `Pin 6`, then power back on so `GPIO 4` auto-calibrates its idle touch polarity.
 
 ---
 
@@ -39,11 +39,12 @@ All pins below are **safe non-strapping GPIOs** (avoiding flash pins 6–11, boo
 | **0.96" OLED (I2C 4-Pin)** | `GND` | `GND` | Common ground |
 | **0.96" OLED (I2C 4-Pin)** | `SCL` | `GPIO 22` | Hardware I2C Clock |
 | **0.96" OLED (I2C 4-Pin)** | `SDA` | `GPIO 21` | Hardware I2C Data (`0x3C`) |
-| **R307S Fingerprint Sensor** | Pin 1 `VCC` | `3V3` *(Primary Safe)* | ~50mA typical; keeps UART TX at safe 3.3V |
+| **R307S Fingerprint Sensor** | Pin 1 `5V` (`VCC`) | `VIN` (**5.00V** Buck Rail) | Datasheet `4.2–6.0V` (`50–100mA` peak); feeds internal 3.3V reg + crisp optical LED |
 | **R307S Fingerprint Sensor** | Pin 2 `GND` | `GND` | Common ground |
-| **R307S Fingerprint Sensor** | Pin 3 `TXD` (Sensor Out) | `GPIO 16` (`RX2`) | UART2 RX (57600 baud). *Direct only if R307S VCC = 3.3V!* |
+| **R307S Fingerprint Sensor** | Pin 3 `TXD` (Sensor Out) | `GPIO 16` (`RX2`) | UART2 RX (57600 baud, native 3.3V TTL — verify with multimeter!) |
 | **R307S Fingerprint Sensor** | Pin 4 `RXD` (Sensor In) | `GPIO 17` (`TX2`) | UART2 TX (57600 baud) |
-| **R307S Fingerprint Sensor** | Pin 5 `TOUCH` / Pin 6 `3.3VT` | *Not connected* | Insulate ends with electrical tape |
+| **R307S Fingerprint Sensor** | Pin 5 `TOUCH` (`WAKEUP`) | `GPIO 4` | Instant hardware finger-touch trigger (zero-heat standby!) |
+| **R307S Fingerprint Sensor** | Pin 6 `3.3VT` | `3V3` | Powers internal capacitive touch IC (`<5µA`) |
 | **Buzzer** | `+` (or `I/O`) | `GPIO 25` | See protection circuit below |
 | **Buzzer** | `-` (`GND`) | `GND` | Common ground |
 

@@ -28,6 +28,8 @@
 
 #define FP_RX_PIN        16
 #define FP_TX_PIN        17
+#define FP_TOUCH_PIN     4      // R307S Pin 5 (TOUCH / WAKEUP) -> GPIO 4
+#define FP_USE_TOUCH_PIN true   // 6-Wire Pro Mode (zero heat, instant touch wake!)
 #define FP_BAUD_RATE     57600
 
 #define BUZZER_PIN       25

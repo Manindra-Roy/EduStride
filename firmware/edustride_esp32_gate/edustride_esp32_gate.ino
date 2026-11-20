@@ -3,7 +3,7 @@
  * Hardware:
  *   - ESP32-CP2102-TypeC-38Pins
  *   - 0.96" I2C 4-pin SSD1306 OLED (SDA=21, SCL=22, VCC=3V3)
- *   - R307S Optical Fingerprint Sensor (TXD->GPIO16, RXD->GPIO17, VCC=3V3)
+ *   - R307S Optical Fingerprint Sensor (6-Wire Pro Mode: 5V->VIN, GND->GND, TXD->GPIO16, RXD->GPIO17, TOUCH->GPIO4, 3.3VT->3V3)
  *   - Buzzer (GPIO 25)
  *
  * Required Arduino Libraries (install via Library Manager):
@@ -26,6 +26,14 @@
 #include <ArduinoJson.h>
 #include "config.h"
 
+// Backward-compatible defaults for 6-Wire Pro Mode (R307S Pin 5 TOUCH -> GPIO 4, Pin 6 3.3VT -> 3V3)
+#ifndef FP_TOUCH_PIN
+#define FP_TOUCH_PIN     4
+#endif
+#ifndef FP_USE_TOUCH_PIN
+#define FP_USE_TOUCH_PIN true
+#endif
+
 // Hardware objects
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 HardwareSerial fpSerial(2); // ESP32 Hardware UART2
@@ -36,6 +44,7 @@ volatile bool sensingEnabled = true;
 volatile bool prevSensingObserved = true;
 bool sensorReady = false;
 bool ledCurrentlyOn = false;
+int touchIdleLevel = HIGH; // Auto-calibrated at boot (works with both Active-LOW & Active-HIGH R307S!)
 bool otaInitialized = false;
 volatile bool otaInProgress = false;
 volatile bool scanInProgress = false;
@@ -512,6 +521,42 @@ void setSensorLed(bool on, bool force = false) {
   }
 }
 
+void setIdleSensorLed(bool force = false) {
+#if FP_USE_TOUCH_PIN
+  // 6-Wire Pro Mode: optical LED stays 100% OFF & ice-cool until Pin 5 TOUCH wakes it!
+  setSensorLed(false, force);
+#else
+  setSensorLed(sensingEnabled, force);
+#endif
+}
+
+void calibrateTouchPin() {
+#if FP_USE_TOUCH_PIN
+  pinMode(FP_TOUCH_PIN, INPUT_PULLUP);
+  delay(60);
+  int highCount = 0;
+  for (int i = 0; i < 15; i++) {
+    if (digitalRead(FP_TOUCH_PIN) == HIGH) highCount++;
+    delay(4);
+  }
+  touchIdleLevel = (highCount >= 8) ? HIGH : LOW;
+  Serial.printf("[R307S] 6-Wire Touch Wake READY on GPIO %d (idle=%s, active=%s)\n",
+                FP_TOUCH_PIN,
+                touchIdleLevel == HIGH ? "HIGH" : "LOW",
+                touchIdleLevel == HIGH ? "LOW" : "HIGH");
+#endif
+}
+
+bool isFingerTouchingSensor() {
+#if FP_USE_TOUCH_PIN
+  if (digitalRead(FP_TOUCH_PIN) == touchIdleLevel) return false;
+  delay(25); // 25ms debounce to reject electrical noise
+  return (digitalRead(FP_TOUCH_PIN) != touchIdleLevel);
+#else
+  return true;
+#endif
+}
+
 // ============================================================================
 // HTTP / HTTPS CLIENT HELPER (Works with both local HTTP and Render HTTPS)
 // ============================================================================
@@ -617,15 +662,18 @@ void sendCommandAck(const String& action, const String& status, int slotId, cons
 // ============================================================================
 void executeRemoteEnroll(int slotId, const String& studentName) {
   commandInProgress = true;
-  setSensorLed(true, true); // Explicitly ensure R307S optical LED is ON!
-  delay(80);
   Serial.printf("[ENROLL] Starting slot #%d for %s\n", slotId, studentName.c_str());
   sendCommandAck("ENROLL", "IN_PROGRESS", slotId, "Place finger on sensor (Step 1/2)...");
   showOledStatus("ENROLL SLOT #" + String(slotId), studentName, "Place Finger (1/2)", "Hold steady...");
   beepNotice();
 
+  // Wake R307S LED cleanly for Step 1 capture
+  setSensorLed(true, true);
+  delay(50);
+
   // Step 1: Wait for first finger placement into Buffer 1
   if (!captureCleanFingerToSlot(1, ENROLL_STEP_TIMEOUT_MS)) {
+    setIdleSensorLed(true);
     String errHex = String(lastCaptureErrCode, HEX);
     showOledStatus("ENROLL TIMEOUT", studentName, "Step 1 err: 0x" + errHex, "Try again in App");
     beepError();
@@ -640,6 +688,7 @@ void executeRemoteEnroll(int slotId, const String& studentName) {
   uint8_t lastModelErr = 0;
 
   for (int tryIdx = 1; tryIdx <= 3; tryIdx++) {
+    setSensorLed(false, true); // Turn LED OFF while waiting for finger lift (keeps prism cool!)
     beepEntry();
     showOledStatus("ENROLL SLOT #" + String(slotId), tryIdx == 1 ? "Step 1 Captured!" : ("Retry Step 2 (" + String(tryIdx) + "/3)"), "REMOVE FINGER", "Wait a moment...");
     if (tryIdx == 1) {
@@ -648,14 +697,20 @@ void executeRemoteEnroll(int slotId, const String& studentName) {
       sendCommandAck("ENROLL", "IN_PROGRESS", slotId, "Did not match — lift & place SAME finger again (Try " + String(tryIdx) + "/3)...");
     }
 
-    delay(1100);
+    delay(1000);
     unsigned long liftStart = millis();
-    while (finger.getImage() != FINGERPRINT_NOFINGER) {
-      if (millis() - liftStart > 9000) break;
-      delay(60);
+    while (millis() - liftStart < 9000) {
+#if FP_USE_TOUCH_PIN
+      if (digitalRead(FP_TOUCH_PIN) == touchIdleLevel) break;
+#else
+      if (finger.getImage() == FINGERPRINT_NOFINGER) break;
+#endif
+      delay(50);
     }
 
     showOledStatus("ENROLL SLOT #" + String(slotId), studentName, "Place SAME Finger", "Step 2 of 2...");
+    setSensorLed(true, true); // Wake LED crisp & cold for Step 2!
+    delay(50);
     if (!captureCleanFingerToSlot(2, ENROLL_STEP_TIMEOUT_MS)) {
       lastModelErr = lastCaptureErrCode;
       continue;
@@ -671,6 +726,8 @@ void executeRemoteEnroll(int slotId, const String& studentName) {
     beepError();
     delay(400);
   }
+
+  setIdleSensorLed(true); // Immediately back to cool idle!
 
   if (!modelCreated) {
     String errHex = String(lastModelErr, HEX);
@@ -791,29 +848,75 @@ uint8_t searchStoredTemplates() {
 }
 
 // ============================================================================
-// FAST, PROVEN FINGERPRINT SCAN & SERVER SUBMISSION (Core 1)
+// 6-WIRE ZERO-HEAT TOUCH WAKE & FINGERPRINT SCAN (Core 1)
 // ============================================================================
 void scanAndSubmitFingerprint() {
   if (!sensorReady || !sensingEnabled || WiFi.status() != WL_CONNECTED) return;
-  if (wifiBusy) return; // Never capture optical image during a 300mA Wi-Fi TLS burst!
+
+#if FP_USE_TOUCH_PIN
+  // 6-Wire Pro Mode: ZERO UART polling & ZERO LED heat until hardware TOUCH pin triggers!
+  if (!isFingerTouchingSensor()) return;
+
+  // Wait briefly if a background heartbeat Wi-Fi burst is finishing (<400ms)
+  unsigned long waitWifiStart = millis();
+  while (wifiBusy && millis() - waitWifiStart < 700) {
+    delay(15);
+  }
+  if (wifiBusy) return;
 
   scanInProgress = true;
+  drawCuteFace(FACE_FOCUSED, "Reading Finger...");
 
-  // Step 1: Non-blocking check for finger on R307S glass (3.3V rail completely quiet!)
+  // Wake optical LED crisp & cold ONLY while finger is pressed!
+  setSensorLed(true, true);
+  delay(55); // Let optical backlight hit 100% brightness & finger flatten on prism
+
+  int matchedSlot = -1;
+  int confidence = 0;
+  bool capturedAny = false;
+
+  for (int attempt = 0; attempt < 3; attempt++) {
+    if (digitalRead(FP_TOUCH_PIN) == touchIdleLevel) break; // User lifted finger early
+
+    uint8_t p = finger.getImage();
+    if (p == FINGERPRINT_OK) {
+      capturedAny = true;
+      if (finger.image2Tz() == FINGERPRINT_OK) {
+        if (searchStoredTemplates() == FINGERPRINT_OK) {
+          matchedSlot = finger.fingerID;
+          confidence = finger.confidence;
+          break;
+        }
+      }
+    }
+    delay(75);
+  }
+
+  // IMMEDIATELY extinguish optical LED after ~0.2s flash — ZERO heat build-up!
+  setSensorLed(false, true);
+
+  if (!capturedAny && matchedSlot < 0) {
+    // Accidental quick tap/brush — silently return to cute idle eyes
+    scanInProgress = false;
+    showIdleScreen();
+    return;
+  }
+#else
+  if (wifiBusy) return;
+  scanInProgress = true;
+
   uint8_t p = finger.getImage();
   if (p == FINGERPRINT_NOFINGER || p != FINGERPRINT_OK) {
     scanInProgress = false;
     return;
   }
 
-  // Step 2: Convert that EXACT captured frame immediately (proven Step 1 ae961db flow!)
   p = finger.image2Tz();
   if (p != FINGERPRINT_OK) {
     scanInProgress = false;
     return;
   }
 
-  // Step 3: Match using proven fingerFastSearch()
   int matchedSlot = -1;
   int confidence = 0;
 
@@ -822,7 +925,6 @@ void scanAndSubmitFingerprint() {
     matchedSlot = finger.fingerID;
     confidence = finger.confidence;
   } else if (p == FINGERPRINT_NOTFOUND) {
-    // One fast 90ms second-chance read in case the first frame caught the finger mid-press
     delay(90);
     if (finger.getImage() == FINGERPRINT_OK && finger.image2Tz() == FINGERPRINT_OK) {
       if (searchStoredTemplates() == FINGERPRINT_OK) {
@@ -834,11 +936,19 @@ void scanAndSubmitFingerprint() {
     scanInProgress = false;
     return;
   }
+#endif
 
   if (matchedSlot < 0) {
     drawCuteFace(FACE_ERROR, "Unknown! Try Again");
     beepError();
     messageHoldUntilMs = millis() + 1800;
+    // Wait until finger lifts so holding doesn't re-beep immediately
+#if FP_USE_TOUCH_PIN
+    unsigned long liftWaitErr = millis();
+    while (digitalRead(FP_TOUCH_PIN) != touchIdleLevel && millis() - liftWaitErr < 2500) {
+      delay(40);
+    }
+#endif
     scanInProgress = false;
     return;
   }
@@ -905,9 +1015,15 @@ void scanAndSubmitFingerprint() {
 
   // Wait briefly until finger is lifted so the same touch doesn't immediately re-trigger
   unsigned long liftWait = millis();
+#if FP_USE_TOUCH_PIN
+  while (digitalRead(FP_TOUCH_PIN) != touchIdleLevel && millis() - liftWait < 3000) {
+    delay(40);
+  }
+#else
   while (finger.getImage() != FINGERPRINT_NOFINGER && millis() - liftWait < 2000) {
     delay(45);
   }
+#endif
   scanInProgress = false;
 }
 
@@ -949,7 +1065,7 @@ void initOtaIfReady() {
 
   ArduinoOTA.onError([](ota_error_t error) {
     otaInProgress = false;
-    setSensorLed(sensingEnabled, true);
+    setIdleSensorLed(true);
     Serial.printf("[OTA] Error[%u]\n", error);
     showOledStatus("OTA FAILED", "Error code: " + String(error), "Resuming normal mode", "");
     beepError();
@@ -1023,7 +1139,8 @@ void setup() {
   netMutex = xSemaphoreCreateMutex();
   stateMutex = xSemaphoreCreateMutex();
 
-  // 3. Init R307S Fingerprint Sensor on UART2 (GPIO16=RX2, GPIO17=TX2)
+  // 3. Calibrate 6-Wire Touch Pin (GPIO 4) & Init R307S on UART2 (GPIO16=RX2, GPIO17=TX2)
+  calibrateTouchPin();
   fpSerial.begin(FP_BAUD_RATE, SERIAL_8N1, FP_RX_PIN, FP_TX_PIN);
   delay(250);
   finger.begin(FP_BAUD_RATE);
@@ -1040,11 +1157,11 @@ void setup() {
     finger.getTemplateCount();
     Serial.printf("[R307S] Sensor OK! Capacity=%d | Security=%d | Stored templates: %d\n",
                   finger.capacity, finger.security_level, finger.templateCount);
-    setSensorLed(true, true); // Force LED ON (recovers from OTA LED-OFF state!)
+    setIdleSensorLed(true); // In 6-Wire Pro Mode: keeps optical LED OFF & cool until finger touches!
   } else {
     sensorReady = false;
-    Serial.println("[R307S] Sensor NOT detected! Check VCC(3V3), GND, TXD->GPIO16, RXD->GPIO17.");
-    showOledStatus("R307S NOT FOUND", "Check sensor wires", "TXD->16  RXD->17", "VCC->3V3 GND->GND");
+    Serial.println("[R307S] Sensor NOT detected! Check 5V->VIN, GND, TXD->GPIO16, RXD->GPIO17.");
+    showOledStatus("R307S NOT FOUND", "Check sensor wires", "TXD->16  RXD->17", "5V->VIN  GND->GND");
     beepError();
     delay(2500);
   }
@@ -1053,7 +1170,7 @@ void setup() {
   ensureWifiConnected();
   pollServerStatus();
   prevSensingObserved = sensingEnabled;
-  setSensorLed(sensingEnabled);
+  setIdleSensorLed(true);
 
   // Start non-blocking HTTPS heartbeat task on Core 0 so Core 1 is 100% dedicated to fast finger scanning & 30 FPS OLED!
   xTaskCreatePinnedToCore(
@@ -1101,7 +1218,7 @@ void loop() {
         delay(50);
       }
       finger.getTemplateCount();
-      setSensorLed(sensingEnabled, true);
+      setIdleSensorLed(true);
       Serial.printf("[R307S] Recovered! Capacity=%d | Templates: %d\n", finger.capacity, finger.templateCount);
     }
   }
@@ -1109,7 +1226,7 @@ void loop() {
   // React immediately on Core 1 if Core 0 heartbeat toggled sensing ON/OFF
   if (prevSensingObserved != sensingEnabled) {
     prevSensingObserved = sensingEnabled;
-    setSensorLed(sensingEnabled);
+    setIdleSensorLed(true);
     beepNotice();
     messageHoldUntilMs = 0;
     showIdleScreen();
@@ -1133,10 +1250,10 @@ void loop() {
   if (runAction != "NONE" && sensorReady) {
     if (runAction == "ENROLL" && runSlot >= 1 && runSlot <= 1000) {
       executeRemoteEnroll(runSlot, runStudent);
-      setSensorLed(sensingEnabled);
+      setIdleSensorLed(true);
     } else if (runAction == "DELETE" && runSlot >= 1 && runSlot <= 1000) {
       executeRemoteDelete(runSlot, runStudent);
-      setSensorLed(sensingEnabled);
+      setIdleSensorLed(true);
     } else if (runAction == "CLEAR_ALL") {
       commandInProgress = true;
       finger.emptyDatabase();
@@ -1152,11 +1269,12 @@ void loop() {
     showIdleScreen();
   }
 
-  // Smooth ~30 FPS Vector/EMO eye animation (never freezes during heartbeats!)
+  // Smooth dirty-only Vector/EMO eye animation
   animateIdleFace(now);
 
-  // Instant R307S finger polling every 35ms on dedicated Core 1!
-  if (messageHoldUntilMs == 0 && now - lastFpScanMs >= 35) {
+  // 6-Wire Pro Mode: instant GPIO 4 touch check (2us, zero heat!); 4-Wire fallback: calm 180ms poll
+  unsigned long scanIntervalMs = FP_USE_TOUCH_PIN ? 20 : 180;
+  if (messageHoldUntilMs == 0 && now - lastFpScanMs >= scanIntervalMs) {
     lastFpScanMs = now;
     scanAndSubmitFingerprint();
   }
