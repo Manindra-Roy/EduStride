@@ -139,12 +139,12 @@ if ($OtaIp) {
 
   Write-Host "=== Flashing ESP32 WIRELESSLY over Wi-Fi OTA -> ${OtaIp}:${otaPort} ===" -ForegroundColor Cyan
 
-  # Locate espota.py shipped inside the installed esp32 Arduino core
-  $espota = Get-ChildItem -Path "$env:LOCALAPPDATA\Arduino15\packages\esp32" -Recurse -Filter "espota.py" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
-  if ($espota) {
-    $pyArgs = @($espota, "-i", $OtaIp, "-p", $otaPort, "-f", $binPath)
-    if ($pass) { $pyArgs += @("--auth=$pass") }
-    & python @pyArgs
+  # Prefer native espota.exe shipped inside the installed esp32 Arduino core (no Python required)
+  $espotaExe = Get-ChildItem -Path "$env:LOCALAPPDATA\Arduino15\packages\esp32" -Recurse -Filter "espota.exe" -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
+  if ($espotaExe) {
+    $otaArgs = @("-i", $OtaIp, "-p", $otaPort, "-f", $binPath, "-r")
+    if ($pass) { $otaArgs += @("--auth=$pass") }
+    & $espotaExe @otaArgs
     if ($LASTEXITCODE -ne 0) { throw "Wi-Fi OTA upload failed! Verify ESP32 is powered on, on the same Wi-Fi, and OTA_PASSWORD matches." }
   } else {
     # Fallback to arduino-cli network upload
