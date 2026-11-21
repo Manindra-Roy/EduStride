@@ -62,6 +62,12 @@ const studentSchema = new mongoose.Schema({
     type: String,
     required: true
   },
+  parent_email: {
+    type: String,
+    trim: true,
+    lowercase: true,
+    default: ''
+  },
   primary_contact: {
     type: String,
     required: true
@@ -120,5 +126,7 @@ const studentSchema = new mongoose.Schema({
 
 // Ensure roll number is unique per class
 studentSchema.index({ class_level: 1, roll_number: 1 }, { unique: true });
+// Speeds up active-class roster queries (attendance sync & roll recalculation)
+studentSchema.index({ class_level: 1, status: 1 });
 
 export default mongoose.model('Student', studentSchema);

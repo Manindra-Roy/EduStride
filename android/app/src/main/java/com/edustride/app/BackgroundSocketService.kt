@@ -25,6 +25,7 @@ class BackgroundSocketService : Service() {
     private var socket: Socket? = null
     private var currentSocketUrl: String? = null
     private var currentClassRooms: String? = null
+    private var currentAuthToken: String? = null
     private val CHANNEL_ID = "edustride_notifications"
     private val SYNC_CHANNEL_ID = "edustride_sync_channel"
 
@@ -86,6 +87,7 @@ class BackgroundSocketService : Service() {
         val email = prefs.getString("user_email", "") ?: ""
         val classLevel = prefs.getString("user_class", "") ?: ""
         val name = prefs.getString("user_name", "") ?: ""
+        val authToken = prefs.getString("auth_token", "") ?: ""
         val savedSocketUrl = prefs.getString("socket_url", "") ?: ""
         val webUrl = prefs.getString("web_url", "https://edustride.in") ?: "https://edustride.in"
 
@@ -96,14 +98,14 @@ class BackgroundSocketService : Service() {
             else -> webUrl
         }
 
-        if (classLevel.isEmpty()) {
-            Log.d("BackgroundService", "No class registered yet. Stopping service.")
+        if (classLevel.isEmpty() || authToken.isEmpty()) {
+            Log.d("BackgroundService", "No authenticated user session registered yet. Stopping service.")
             stopSelf()
             return
         }
 
         // Skip redundant teardown/reconnect when config is unchanged and socket is already active
-        if (socket != null && currentSocketUrl == socketUrl && currentClassRooms == classLevel && socket?.connected() == true) {
+        if (socket != null && currentSocketUrl == socketUrl && currentClassRooms == classLevel && currentAuthToken == authToken && socket?.connected() == true) {
             return
         }
 
@@ -122,9 +124,11 @@ class BackgroundSocketService : Service() {
                 reconnectionDelay = 4000L
                 reconnectionDelayMax = 20000L
                 timeout = 15000L
+                auth = mapOf("token" to authToken)
             }
             currentSocketUrl = socketUrl
             currentClassRooms = classLevel
+            currentAuthToken = authToken
             socket = IO.socket(socketUrl, opts)
 
             socket?.on(Socket.EVENT_CONNECT) {
@@ -278,6 +282,7 @@ class BackgroundSocketService : Service() {
         socket = null
         currentSocketUrl = null
         currentClassRooms = null
+        currentAuthToken = null
         Log.d("BackgroundService", "Service destroyed")
     }
 }

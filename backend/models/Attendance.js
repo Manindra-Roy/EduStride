@@ -40,6 +40,8 @@ const attendanceSchema = new mongoose.Schema({
 // Ensure a single class can log multiple sessions per day (e.g., Session 1, Session 2)
 // but prevents duplicate logging for the exact same session name on the same day
 attendanceSchema.index({ class_level: 1, date: 1, session_name: 1 }, { unique: true });
+// Speeds up per-student daily attendance history lookups
+attendanceSchema.index({ 'records.student': 1, date: -1 });
 
 const Attendance = mongoose.model('Attendance', attendanceSchema);
 

@@ -73,6 +73,7 @@ const ClassGrid = () => {
     name: '',
     roll_number: '(Auto-ranked)',
     parent_name: '',
+    parent_email: '',
     primary_contact: '',
     secondary_contact: '',
     status: 'Active',
@@ -234,41 +235,47 @@ const ClassGrid = () => {
     };
     joinClassRoom();
 
-    const handleLiveAttendance = async (data) => {
+    let liveRefreshTimer = null;
+    const handleLiveAttendance = (data) => {
       if (!data?.class_level) return;
       if (data.class_level.trim().toUpperCase() !== class_level.trim().toUpperCase()) return;
 
-      // 1. Silently refresh class roster & attendance percentages / roll numbers
-      const freshList = await fetchStudents(true);
+      if (liveRefreshTimer) clearTimeout(liveRefreshTimer);
+      liveRefreshTimer = setTimeout(async () => {
+        liveRefreshTimer = null;
+        // 1. Silently refresh class roster & attendance percentages / roll numbers
+        const freshList = await fetchStudents(true);
 
-      // 2. Refresh detailed daily attendance logs if a student detail panel is open
-      const currentSelected = selectedStudentRef.current;
-      if (currentSelected?._id) {
-        const isStudent = user?.role === 'Student';
-        const isSelf = isStudent && (user.studentProfile?._id || user.studentProfile) === currentSelected._id;
-        if (!isStudent || isSelf) {
-          try {
-            const attRes = await axios.get(`/api/students/${currentSelected._id}/attendance`);
-            if (attRes.data.success) {
-              setDetailedAttendance(attRes.data.data);
+        // 2. Refresh detailed daily attendance logs if a student detail panel is open
+        const currentSelected = selectedStudentRef.current;
+        if (currentSelected?._id) {
+          const isStudent = user?.role === 'Student';
+          const isSelf = isStudent && (user.studentProfile?._id || user.studentProfile) === currentSelected._id;
+          if (!isStudent || isSelf) {
+            try {
+              const attRes = await axios.get(`/api/students/${currentSelected._id}/attendance`);
+              if (attRes.data.success) {
+                setDetailedAttendance(attRes.data.data);
+              }
+            } catch {
+              // non-fatal
             }
-          } catch {
-            // non-fatal
           }
         }
-      }
 
-      // 3. If the Bulk Attendance modal is open for the same date, sync live checkboxes
-      const modalState = attendanceModalStateRef.current;
-      if (modalState.open && data.date === modalState.date) {
-        fetchAttendanceForDate(modalState.date, modalState.session, freshList);
-      }
+        // 3. If the Bulk Attendance modal is open for the same date, sync live checkboxes
+        const modalState = attendanceModalStateRef.current;
+        if (modalState.open && data.date === modalState.date) {
+          fetchAttendanceForDate(modalState.date, modalState.session, freshList);
+        }
+      }, 700);
     };
 
     socket.on('connect', joinClassRoom);
     socket.on('attendance_updated', handleLiveAttendance);
 
     return () => {
+      if (liveRefreshTimer) clearTimeout(liveRefreshTimer);
       socket.off('connect', joinClassRoom);
       socket.off('attendance_updated', handleLiveAttendance);
     };
@@ -341,6 +348,7 @@ const ClassGrid = () => {
           name: '',
           roll_number: '(Auto-ranked)',
           parent_name: '',
+          parent_email: '',
           primary_contact: '',
           secondary_contact: '',
           status: 'Active',
@@ -362,6 +370,7 @@ const ClassGrid = () => {
       name: student.name,
       roll_number: student.roll_number,
       parent_name: student.parent_name,
+      parent_email: student.parent_email || '',
       primary_contact: student.primary_contact,
       secondary_contact: student.secondary_contact,
       status: student.status,
@@ -718,6 +727,12 @@ const ClassGrid = () => {
                         <span className="text-slate-500">Parent / Guardian</span>
                         <span className="font-semibold text-white">{selectedStudent.parent_name}</span>
                       </div>
+                      {selectedStudent.parent_email && (
+                        <div className="flex justify-between">
+                          <span className="text-slate-500">Parent Email</span>
+                          <span className="font-mono text-slate-200 truncate max-w-[60%]">{selectedStudent.parent_email}</span>
+                        </div>
+                      )}
                       <div className="flex justify-between">
                         <span className="text-slate-500">Contact Number</span>
                         <span className="font-mono text-white">{selectedStudent.primary_contact}</span>
@@ -1031,6 +1046,7 @@ const ClassGrid = () => {
                   name: '',
                   roll_number: '(Auto-ranked)',
                   parent_name: '',
+                  parent_email: '',
                   primary_contact: '',
                   secondary_contact: '',
                   status: 'Active',
@@ -1343,6 +1359,12 @@ const ClassGrid = () => {
                   <span className="text-slate-500">Parent / Guardian</span>
                   <span className="font-semibold text-white">{selectedStudent.parent_name}</span>
                 </div>
+                {selectedStudent.parent_email && (
+                  <div className="flex justify-between">
+                    <span className="text-slate-500">Parent Email</span>
+                    <span className="font-mono text-slate-200 truncate max-w-[60%]">{selectedStudent.parent_email}</span>
+                  </div>
+                )}
                 <div className="flex justify-between">
                   <span className="text-slate-500">Contact Number</span>
                   <span className="font-mono text-white">{selectedStudent.primary_contact}</span>
@@ -1611,16 +1633,29 @@ const ClassGrid = () => {
                 </div>
               </div>
 
-              <div>
-                <label className="block text-xs font-semibold text-slate-400 mb-1.5">Parent / Guardian Name</label>
-                <input
-                  type="text"
-                  name="parent_name"
-                  required
-                  value={studentForm.parent_name}
-                  onChange={handleStudentFormChange}
-                  className="w-full px-3.5 py-2.5 rounded-lg bg-dark-900 border border-dark-850 text-white text-xs outline-none focus:border-primary-500"
-                />
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-400 mb-1.5">Parent / Guardian Name</label>
+                  <input
+                    type="text"
+                    name="parent_name"
+                    required
+                    value={studentForm.parent_name}
+                    onChange={handleStudentFormChange}
+                    className="w-full px-3.5 py-2.5 rounded-lg bg-dark-900 border border-dark-850 text-white text-xs outline-none focus:border-primary-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-400 mb-1.5">Parent Email (Gate Alerts)</label>
+                  <input
+                    type="email"
+                    name="parent_email"
+                    placeholder="parent@example.com (optional)"
+                    value={studentForm.parent_email || ''}
+                    onChange={handleStudentFormChange}
+                    className="w-full px-3.5 py-2.5 rounded-lg bg-dark-900 border border-dark-850 text-white text-xs outline-none focus:border-primary-500"
+                  />
+                </div>
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -1743,16 +1778,29 @@ const ClassGrid = () => {
                 </div>
               </div>
 
-              <div>
-                <label className="block text-xs font-semibold text-slate-400 mb-1.5">Parent / Guardian Name</label>
-                <input
-                  type="text"
-                  name="parent_name"
-                  required
-                  value={studentForm.parent_name}
-                  onChange={handleStudentFormChange}
-                  className="w-full px-3.5 py-2.5 rounded-lg bg-dark-900 border border-dark-850 text-white text-xs outline-none focus:border-primary-500"
-                />
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-400 mb-1.5">Parent / Guardian Name</label>
+                  <input
+                    type="text"
+                    name="parent_name"
+                    required
+                    value={studentForm.parent_name}
+                    onChange={handleStudentFormChange}
+                    className="w-full px-3.5 py-2.5 rounded-lg bg-dark-900 border border-dark-850 text-white text-xs outline-none focus:border-primary-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-400 mb-1.5">Parent Email (Gate Alerts)</label>
+                  <input
+                    type="email"
+                    name="parent_email"
+                    placeholder="parent@example.com (optional)"
+                    value={studentForm.parent_email || ''}
+                    onChange={handleStudentFormChange}
+                    className="w-full px-3.5 py-2.5 rounded-lg bg-dark-900 border border-dark-850 text-white text-xs outline-none focus:border-primary-500"
+                  />
+                </div>
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">

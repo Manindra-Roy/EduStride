@@ -220,7 +220,8 @@ const Dashboard = () => {
             counts[c] = 0;
           });
           let lowAttendance = 0;
-          const currentMonthStr = new Date().toISOString().substring(0, 7);
+          const istNowInit = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
+          const currentMonthStr = istNowInit.toISOString().substring(0, 7);
 
           studentsList.forEach(s => {
             counts[s.class_level] = (counts[s.class_level] || 0) + 1;
@@ -277,49 +278,56 @@ const Dashboard = () => {
 
     joinDashboardRooms();
 
-    const handleLiveAttendance = async (data) => {
-      try {
-        if (user.role === 'Student') {
-          const myId = user.studentProfile?._id || (typeof user.studentProfile === 'string' ? user.studentProfile : null);
-          if (!myId) return;
-          const myClass = user.studentProfile?.class_level;
-          if (data?.student_id && data.student_id !== String(myId)) return;
-          if (!data?.student_id && myClass && data?.class_level?.toUpperCase() !== myClass.toUpperCase()) return;
+    let debounceTimer = null;
+    const handleLiveAttendance = (data) => {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(async () => {
+        debounceTimer = null;
+        try {
+          if (user.role === 'Student') {
+            const myId = user.studentProfile?._id || (typeof user.studentProfile === 'string' ? user.studentProfile : null);
+            if (!myId) return;
+            const myClass = user.studentProfile?.class_level;
+            if (data?.student_id && data.student_id !== String(myId)) return;
+            if (!data?.student_id && myClass && data?.class_level?.toUpperCase() !== myClass.toUpperCase()) return;
 
-          const [studentRes, attRes] = await Promise.all([
-            axios.get(`/api/students/${myId}`),
-            axios.get(`/api/students/${myId}/attendance`)
-          ]);
-          if (studentRes.data.success) setStudentDetails(studentRes.data.data);
-          if (attRes.data.success) setDailyAttendanceLogs(attRes.data.data);
-        } else {
-          const studentsRes = await axios.get('/api/students?limit=1000');
-          if (studentsRes.data.success) {
-            const studentsList = studentsRes.data.data || [];
-            const currentMonthStr = new Date().toISOString().substring(0, 7);
-            let lowAttendance = 0;
-            studentsList.forEach(s => {
-              const currentAttendance = s.attendance_history?.find(h => h.month === currentMonthStr);
-              if (currentAttendance && currentAttendance.total_classes > 0) {
-                const rate = (currentAttendance.attended / currentAttendance.total_classes) * 100;
-                if (rate < 75) lowAttendance++;
-              }
-            });
-            setStats(prev => ({
-              ...prev,
-              totalStudents: studentsList.length,
-              lowAttendanceCount: lowAttendance
-            }));
+            const [studentRes, attRes] = await Promise.all([
+              axios.get(`/api/students/${myId}`),
+              axios.get(`/api/students/${myId}/attendance`)
+            ]);
+            if (studentRes.data.success) setStudentDetails(studentRes.data.data);
+            if (attRes.data.success) setDailyAttendanceLogs(attRes.data.data);
+          } else {
+            const studentsRes = await axios.get('/api/students?limit=1000');
+            if (studentsRes.data.success) {
+              const studentsList = studentsRes.data.data || [];
+              const istNow = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
+              const currentMonthStr = istNow.toISOString().substring(0, 7);
+              let lowAttendance = 0;
+              studentsList.forEach(s => {
+                const currentAttendance = s.attendance_history?.find(h => h.month === currentMonthStr);
+                if (currentAttendance && currentAttendance.total_classes > 0) {
+                  const rate = (currentAttendance.attended / currentAttendance.total_classes) * 100;
+                  if (rate < 75) lowAttendance++;
+                }
+              });
+              setStats(prev => ({
+                ...prev,
+                totalStudents: studentsList.length,
+                lowAttendanceCount: lowAttendance
+              }));
+            }
           }
+        } catch (err) {
+          console.error('Failed live attendance refresh on dashboard:', err);
         }
-      } catch (err) {
-        console.error('Failed live attendance refresh on dashboard:', err);
-      }
+      }, 1200);
     };
 
     socket.on('connect', joinDashboardRooms);
     socket.on('attendance_updated', handleLiveAttendance);
     return () => {
+      if (debounceTimer) clearTimeout(debounceTimer);
       socket.off('connect', joinDashboardRooms);
       socket.off('attendance_updated', handleLiveAttendance);
     };

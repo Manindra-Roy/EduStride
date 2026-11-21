@@ -4,10 +4,10 @@ import FeeLedger from '../models/FeeLedger.js';
 import User from '../models/User.js';
 import Attendance from '../models/Attendance.js';
 import Timetable from '../models/Timetable.js';
-import FingerprintTemplate from '../models/FingerprintTemplate.js';
 import { protect, authorize } from '../middleware/auth.js';
 import { deleteFromCloud } from '../services/cloudStorage.js';
 import { recalculateRollNumbers, recalculateMonthlyAttendance, emitAttendanceUpdated } from '../services/attendanceSync.js';
+import { enqueueHardwareDeletesForStudent } from './biometric.js';
 
 const router = express.Router();
 const DAYS_OF_WEEK_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -140,12 +140,27 @@ router.get('/', protect, async (req, res, next) => {
     const students = await Student.find(query)
       .sort({ class_level: 1, roll_number: 1 })
       .skip(skip)
-      .limit(limitNum);
+      .limit(limitNum)
+      .lean();
+
+    // Batch-fetch all required FeeLedgers in ONE MongoDB query (eliminates N+1 query storm)
+    const isStudent = req.user.role === 'Student';
+    const selfIdStr = req.user.studentProfile?.toString() || '';
+    const ledgerTargetIds = students
+      .filter(s => !s.is_free_tier && (!isStudent || s._id.toString() === selfIdStr))
+      .map(s => s._id);
+
+    const ledgerMap = new Map();
+    if (ledgerTargetIds.length > 0) {
+      const ledgers = await FeeLedger.find({ student_id: { $in: ledgerTargetIds } }).lean();
+      ledgers.forEach(l => ledgerMap.set(l.student_id.toString(), l));
+    }
+
+    const currentMonthIndex = new Date().getMonth();
 
     // Attach fee status to results for tables, with role-based redactions
-    const studentDataWithFees = await Promise.all(students.map(async (student) => {
-      const isStudent = req.user.role === 'Student';
-      const isSelf = isStudent && req.user.studentProfile?.toString() === student._id.toString();
+    const studentDataWithFees = students.map((student) => {
+      const isSelf = isStudent && selfIdStr === student._id.toString();
 
       let ledger = null;
       let currentFeeStatus = 'Hidden';
@@ -153,18 +168,18 @@ router.get('/', protect, async (req, res, next) => {
       if (student.is_free_tier) {
         currentFeeStatus = 'Exempt';
       } else if (!isStudent || isSelf) {
-        ledger = await FeeLedger.findOne({ student_id: student._id });
-        const currentMonthIndex = new Date().getMonth();
-        currentFeeStatus = ledger?.months[currentMonthIndex]?.status || 'Unpaid';
+        ledger = ledgerMap.get(student._id.toString()) || null;
+        currentFeeStatus = ledger?.months?.[currentMonthIndex]?.status || 'Unpaid';
       }
 
-      const studentObj = student.toObject();
+      const studentObj = { ...student };
 
       if (isStudent && !isSelf) {
         // Redact classmate sensitive data
         studentObj.primary_contact = 'Private';
         studentObj.secondary_contact = 'Private';
         studentObj.parent_name = 'Private';
+        studentObj.parent_email = 'Private';
         studentObj.monthly_fee = 0;
         studentObj.test_scores = [];
         studentObj.tuition_test_scores = [];
@@ -175,9 +190,9 @@ router.get('/', protect, async (req, res, next) => {
       return {
         ...studentObj,
         fee_status: currentFeeStatus,
-        ledger: ledger
+        ledger
       };
-    }));
+    });
 
     res.json({
       success: true,
@@ -226,7 +241,7 @@ router.get('/:id', protect, async (req, res, next) => {
 // @access  Private (Admin/Teacher)
 router.post('/', protect, authorize('SuperAdmin', 'Teacher'), async (req, res, next) => {
   try {
-    const { name, class_level, parent_name, primary_contact, secondary_contact, status, joining_date, monthly_fee, is_free_tier } = req.body;
+    const { name, class_level, parent_name, parent_email, primary_contact, secondary_contact, status, joining_date, monthly_fee, is_free_tier } = req.body;
 
     // Generate a temporary unique roll number since it will be auto-recalculated
     const uniqueTempRoll = `NEW_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
@@ -239,6 +254,7 @@ router.post('/', protect, authorize('SuperAdmin', 'Teacher'), async (req, res, n
       roll_number: uniqueTempRoll,
       class_level,
       parent_name,
+      parent_email: parent_email ? String(parent_email).trim().toLowerCase() : '',
       primary_contact,
       secondary_contact,
       status: status || 'Active',
@@ -340,9 +356,9 @@ router.delete('/:id', protect, authorize('SuperAdmin', 'Teacher'), async (req, r
     const classLevel = student.class_level;
 
     await Student.findByIdAndDelete(req.params.id);
-    // Delete their Fee Ledger & any linked biometric fingerprint templates
+    // Delete their Fee Ledger, remove biometric mappings, AND queue hardware R307S slot deletions
     await FeeLedger.deleteOne({ student_id: req.params.id });
-    await FingerprintTemplate.deleteMany({ student: req.params.id });
+    await enqueueHardwareDeletesForStudent(req.params.id, student.name);
 
     // Delete associated User accounts if any
     const associatedUsers = await User.find({ studentProfile: req.params.id });
@@ -497,11 +513,28 @@ router.post('/attendance/bulk', protect, authorize('SuperAdmin', 'Teacher'), asy
     const trackingMonth = cleanDateStr.substring(0, 7); // format: YYYY-MM
     const cleanSession = session_name?.trim() || 'Session 1';
 
+    // Preserve any existing biometric entry/exit remarks when teachers save manual attendance
+    const existingSheet = await Attendance.findOne({
+      class_level,
+      date: normalizedDate,
+      session_name: cleanSession
+    });
+    const existingRemarksByStudent = new Map();
+    if (existingSheet && Array.isArray(existingSheet.records)) {
+      existingSheet.records.forEach(r => {
+        if (r.student && r.remarks) {
+          existingRemarksByStudent.set(r.student.toString(), r.remarks);
+        }
+      });
+    }
+
     // Prepare records for the Attendance model
     const records = attendance_list.map(record => ({
       student: record.student_id,
       status: record.attended ? 'Present' : 'Absent',
-      remarks: ''
+      remarks: record.remarks !== undefined
+        ? String(record.remarks)
+        : (existingRemarksByStudent.get(String(record.student_id)) || '')
     }));
 
     // Upsert attendance sheet for this specific session

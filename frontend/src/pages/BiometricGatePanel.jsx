@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import axios from 'axios';
 import { useAuth } from '../context/AuthContext';
 import { socket } from '../config/socket';
@@ -29,7 +29,16 @@ import {
   Sliders,
   ChevronDown,
   ChevronUp,
-  Cpu
+  Cpu,
+  Plus,
+  RotateCcw,
+  Bookmark,
+  AlertTriangle,
+  ArrowRight,
+  Sparkles,
+  X,
+  Activity,
+  Radio
 } from 'lucide-react';
 
 const getTodayIST = () => {
@@ -62,6 +71,7 @@ const formatDuration = (mins) => {
 const BiometricGatePanel = () => {
   const { user } = useAuth();
   const isStaff = user?.role === 'SuperAdmin' || user?.role === 'Teacher';
+  const isSuperAdmin = user?.role === 'SuperAdmin';
 
   const [activeTab, setActiveTab] = useState('feed'); // 'feed' | 'enroll'
   const [devices, setDevices] = useState([]);
@@ -70,9 +80,16 @@ const BiometricGatePanel = () => {
   const [togglingSensing, setTogglingSensing] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
 
-  // Setup credentials drawer
+  // Setup credentials drawer & device management
+  const [showSettingsDrawer, setShowSettingsDrawer] = useState(false);
   const [showCredentials, setShowCredentials] = useState(false);
   const [copiedField, setCopiedField] = useState('');
+  const [pinnedSessionInput, setPinnedSessionInput] = useState('');
+  const [showAddDeviceModal, setShowAddDeviceModal] = useState(false);
+  const [newDeviceId, setNewDeviceId] = useState('');
+  const [newDeviceName, setNewDeviceName] = useState('');
+  const [creatingDevice, setCreatingDevice] = useState(false);
+  const [clearingAll, setClearingAll] = useState(false);
 
   // Live logs & stats
   const [selectedDate, setSelectedDate] = useState(getTodayIST());
@@ -82,15 +99,27 @@ const BiometricGatePanel = () => {
   const [classFilter, setClassFilter] = useState('All');
   const [eventFilter, setEventFilter] = useState('All');
   const [searchQuery, setSearchQuery] = useState('');
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState('');
   const [classes, setClasses] = useState([]);
+  const liveLogSyncTimerRef = useRef(null);
+
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearchQuery(searchQuery.trim()), 300);
+    return () => clearTimeout(t);
+  }, [searchQuery]);
 
   // Enrollment state
   const [allStudents, setAllStudents] = useState([]);
   const [templates, setTemplates] = useState([]);
   const [loadingEnrollData, setLoadingEnrollData] = useState(false);
   const [enrollClassFilter, setEnrollClassFilter] = useState('All');
+  const [enrollStatusFilter, setEnrollStatusFilter] = useState('all'); // 'all' | 'unenrolled' | 'enrolled'
   const [enrollSearch, setEnrollSearch] = useState('');
   const [liveCommand, setLiveCommand] = useState(null);
+  const [enrollWizardStudent, setEnrollWizardStudent] = useState(null);
+  const [enrollWizardFingerIndex, setEnrollWizardFingerIndex] = useState(1);
+  const [showEnrollWizard, setShowEnrollWizard] = useState(false);
+  const [syncingSlots, setSyncingSlots] = useState(false);
 
   // Feedback banners
   const [feedback, setFeedback] = useState({ type: '', text: '' });
@@ -99,6 +128,10 @@ const BiometricGatePanel = () => {
     () => devices.find(d => d.device_id === selectedDeviceId) || devices[0] || null,
     [devices, selectedDeviceId]
   );
+
+  useEffect(() => {
+    setPinnedSessionInput(activeDevice?.pinned_session_name || '');
+  }, [activeDevice?.device_id, activeDevice?.pinned_session_name]);
 
   const showToastBanner = (type, text) => {
     setFeedback({ type, text });
@@ -118,8 +151,17 @@ const BiometricGatePanel = () => {
           setSelectedDeviceId(res.data.data[0].device_id);
         }
         const current = res.data.data.find(d => d.device_id === selectedDeviceId) || res.data.data[0];
-        if (current?.pending_command && current.pending_command.action !== 'NONE') {
-          setLiveCommand(current.pending_command);
+        if (current?.pending_command) {
+          const pCmd = current.pending_command;
+          setLiveCommand(prev => {
+            // Sync active commands OR final COMPLETED/FAILED transitions for the currently tracked command_id
+            // (prevents UI staying stuck on "Waiting for ESP32" if a Socket.IO event was missed!)
+            if (pCmd.action && pCmd.action !== 'NONE') return pCmd;
+            if (prev?.command_id && pCmd.command_id === prev.command_id && (pCmd.status === 'COMPLETED' || pCmd.status === 'FAILED')) {
+              return { ...prev, ...pCmd, action: prev.action };
+            }
+            return prev;
+          });
         }
       }
     } catch (err) {
@@ -136,7 +178,7 @@ const BiometricGatePanel = () => {
       if (selectedDate) params.append('date', selectedDate);
       if (isStaff && classFilter !== 'All') params.append('class_level', classFilter);
       if (isStaff && eventFilter !== 'All') params.append('event_type', eventFilter);
-      if (isStaff && searchQuery.trim()) params.append('search', searchQuery.trim());
+      if (isStaff && debouncedSearchQuery) params.append('search', debouncedSearchQuery);
 
       const res = await axios.get(`/api/biometric/logs?${params.toString()}`);
       if (res.data.success) {
@@ -148,7 +190,7 @@ const BiometricGatePanel = () => {
     } finally {
       if (!silent) setLoadingLogs(false);
     }
-  }, [selectedDate, classFilter, eventFilter, searchQuery, isStaff]);
+  }, [selectedDate, classFilter, eventFilter, debouncedSearchQuery, isStaff]);
 
   const fetchEnrollmentData = useCallback(async () => {
     if (!isStaff || !selectedDeviceId) return;
@@ -193,14 +235,24 @@ const BiometricGatePanel = () => {
     }
   }, [isStaff, activeTab, fetchEnrollmentData]);
 
-  // Poll device heartbeat status every 6 seconds while panel is open
+  // Adaptive polling: fast 2s fallback while an enrollment/sync is in-flight so UI never gets stuck;
+  // calm 12s heartbeat refresh when idle (paused while tab is hidden).
+  const isCommandInFlight = liveCommand?.status === 'PENDING' || liveCommand?.status === 'IN_PROGRESS';
   useEffect(() => {
     if (!isStaff) return;
+    const pollMs = isCommandInFlight ? 2000 : 12000;
     const interval = setInterval(() => {
-      fetchDevices(true);
-    }, 6000);
-    return () => clearInterval(interval);
-  }, [isStaff, fetchDevices]);
+      if (!document.hidden) fetchDevices(true);
+    }, pollMs);
+    const handleVisibility = () => {
+      if (!document.hidden) fetchDevices(true);
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, [isStaff, isCommandInFlight, fetchDevices]);
 
   // Subscribe to Socket.IO for live scan, attendance & enrollment updates (Staff + Students)
   useEffect(() => {
@@ -235,7 +287,12 @@ const BiometricGatePanel = () => {
             return [newLog, ...withoutDup];
           });
         }
-        fetchLogs(true);
+        // Debounce KPI stats sync so rush-hour burst scans coalesce into 1 REST call instead of N
+        if (liveLogSyncTimerRef.current) clearTimeout(liveLogSyncTimerRef.current);
+        liveLogSyncTimerRef.current = setTimeout(() => {
+          liveLogSyncTimerRef.current = null;
+          fetchLogs(true);
+        }, 1200);
       }
     };
 
@@ -263,6 +320,10 @@ const BiometricGatePanel = () => {
     socket.on('gate_command_update', handleCommandUpdate);
 
     return () => {
+      if (liveLogSyncTimerRef.current) {
+        clearTimeout(liveLogSyncTimerRef.current);
+        liveLogSyncTimerRef.current = null;
+      }
       socket.off('connect', joinLiveRooms);
       socket.off('gate_scan_event', handleScanEvent);
       socket.off('gate_device_updated', handleDeviceUpdated);
@@ -312,30 +373,39 @@ const BiometricGatePanel = () => {
     }
   };
 
-  // Queue remote fingerprint enrollment on ESP32
-  const handleStartEnroll = async (student) => {
-    if (!activeDevice) return;
+  // Queue remote fingerprint enrollment on ESP32 (fingerIndex: 1=Primary, 2=Backup) & open interactive wizard
+  const handleStartEnroll = async (student, fingerIndex = 1) => {
+    if (!activeDevice || !student) return;
+    const fingerLabel = fingerIndex === 2 ? 'Backup Finger' : 'Primary Finger';
+    setEnrollWizardStudent(student);
+    setEnrollWizardFingerIndex(fingerIndex);
+    setShowEnrollWizard(true);
     try {
       const res = await axios.post(`/api/biometric/devices/${activeDevice.device_id}/enroll`, {
-        student_id: student._id
+        student_id: student._id,
+        finger_index: fingerIndex,
+        finger_label: fingerLabel
       });
       if (res.data.success) {
         setLiveCommand(res.data.data.pending_command);
         showToastBanner('success', res.data.message);
       }
     } catch (err) {
+      setShowEnrollWizard(false);
       showToastBanner('error', err.response?.data?.message || 'Failed to queue fingerprint enrollment');
     }
   };
 
-  // Delete student fingerprint from DB & ESP32 R307S
-  const handleRemoveTemplate = async (student) => {
+  // Delete one specific finger template (or all fingers if template omitted) from DB & ESP32 R307S
+  const handleRemoveTemplate = async (student, tmpl = null) => {
     if (!activeDevice) return;
-    if (!window.confirm(`Remove fingerprint for ${student.name}? They will need to re-enroll to use the scanner.`)) {
+    const label = tmpl ? `${tmpl.finger_label || (tmpl.finger_index === 2 ? 'Backup Finger' : 'Primary Finger')} (Slot #${tmpl.slot_id})` : 'all fingerprints';
+    if (!window.confirm(`Remove ${label} for ${student.name}?`)) {
       return;
     }
     try {
-      const res = await axios.delete(`/api/biometric/devices/${activeDevice.device_id}/templates/${student._id}`);
+      const qs = tmpl?.slot_id ? `?slot_id=${tmpl.slot_id}` : '';
+      const res = await axios.delete(`/api/biometric/devices/${activeDevice.device_id}/templates/${student._id}${qs}`);
       if (res.data.success) {
         showToastBanner('success', res.data.message);
         fetchEnrollmentData();
@@ -346,14 +416,88 @@ const BiometricGatePanel = () => {
     }
   };
 
+  // Trigger hardware-to-DB 1000-slot audit & repair (erases orphan R307S prints & cleans ghost DB records)
+  const handleSyncSensorSlots = async () => {
+    if (!activeDevice || syncingSlots) return;
+    setSyncingSlots(true);
+    try {
+      const res = await axios.post(`/api/biometric/devices/${activeDevice.device_id}/sync-slots`);
+      if (res.data.success) {
+        setLiveCommand(res.data.data?.pending_command || null);
+        showToastBanner('success', res.data.message);
+      }
+    } catch (err) {
+      showToastBanner('error', err.response?.data?.message || 'Failed to start Sensor Sync & Repair');
+    } finally {
+      setSyncingSlots(false);
+    }
+  };
+
   const handleCancelCommand = async () => {
     if (!activeDevice) return;
     try {
       await axios.post(`/api/biometric/devices/${activeDevice.device_id}/cancel-command`);
       setLiveCommand(null);
+      setShowEnrollWizard(false);
       fetchDevices(true);
     } catch {
       // ignore
+    }
+  };
+
+  const handleCreateDevice = async (e) => {
+    e.preventDefault();
+    if (!newDeviceId.trim() || creatingDevice) return;
+    setCreatingDevice(true);
+    try {
+      const res = await axios.post('/api/biometric/devices', {
+        device_id: newDeviceId.trim(),
+        name: newDeviceName.trim()
+      });
+      if (res.data.success && res.data.data) {
+        setDevices(prev => [...prev, res.data.data]);
+        setSelectedDeviceId(res.data.data.device_id);
+        setNewDeviceId('');
+        setNewDeviceName('');
+        setShowAddDeviceModal(false);
+        setShowCredentials(true);
+        showToastBanner('success', `Device ${res.data.data.device_id} registered! Copy its credentials into config.h.`);
+      }
+    } catch (err) {
+      showToastBanner('error', err.response?.data?.message || 'Failed to register new gate scanner');
+    } finally {
+      setCreatingDevice(false);
+    }
+  };
+
+  const handleRegenerateKey = async () => {
+    if (!activeDevice || !isSuperAdmin || savingSettings) return;
+    if (!window.confirm(`Regenerate API key for ${activeDevice.device_id}? The ESP32 will disconnect until you flash the new key in config.h.`)) {
+      return;
+    }
+    await handleUpdateSetting({ regenerate_key: true });
+  };
+
+  const handleClearAllTemplates = async () => {
+    if (!activeDevice || !isSuperAdmin || clearingAll) return;
+    const confirmed = window.prompt(
+      `DANGER: This will erase ALL fingerprints from ${activeDevice.device_id} (${activeDevice.enrolled_count ?? templates.length} enrolled) and reset its R307S flash memory.\n\nType CLEAR to confirm:`
+    );
+    if (confirmed !== 'CLEAR') return;
+
+    setClearingAll(true);
+    try {
+      const res = await axios.post(`/api/biometric/devices/${activeDevice.device_id}/clear-all`);
+      if (res.data.success) {
+        setLiveCommand(res.data.data?.pending_command || null);
+        showToastBanner('success', res.data.message);
+        fetchEnrollmentData();
+        fetchDevices(true);
+      }
+    } catch (err) {
+      showToastBanner('error', err.response?.data?.message || 'Failed to queue CLEAR_ALL command');
+    } finally {
+      setClearingAll(false);
     }
   };
 
@@ -364,297 +508,577 @@ const BiometricGatePanel = () => {
     setTimeout(() => setCopiedField(''), 2000);
   };
 
-  // Map studentId -> template for Enrollment tab
-  const templateByStudentId = useMemo(() => {
+  // Map studentId -> array of enrolled templates (Primary=1, Backup=2) for Multi-Finger support
+  const templatesByStudentId = useMemo(() => {
     const map = new Map();
     templates.forEach(t => {
       const sid = t.student?._id || t.student;
-      if (sid) map.set(String(sid), t);
+      if (!sid) return;
+      const key = String(sid);
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(t);
     });
+    map.forEach(list => list.sort((a, b) => (a.finger_index || 1) - (b.finger_index || 1)));
     return map;
   }, [templates]);
 
   const filteredEnrollStudents = useMemo(() => {
     return allStudents.filter(s => {
       const matchClass = enrollClassFilter === 'All' || s.class_level === enrollClassFilter;
+      const isEnrolled = (templatesByStudentId.get(String(s._id))?.length || 0) > 0;
+      const matchStatus = enrollStatusFilter === 'all'
+        || (enrollStatusFilter === 'enrolled' && isEnrolled)
+        || (enrollStatusFilter === 'unenrolled' && !isEnrolled);
       const q = enrollSearch.trim().toLowerCase();
       const matchQuery = !q || s.name?.toLowerCase().includes(q) || s.roll_number?.toLowerCase().includes(q);
-      return matchClass && matchQuery;
+      return matchClass && matchStatus && matchQuery;
     });
-  }, [allStudents, enrollClassFilter, enrollSearch]);
+  }, [allStudents, enrollClassFilter, enrollStatusFilter, enrollSearch, templatesByStudentId]);
+
+  const enrollProgressStats = useMemo(() => {
+    const classScoped = enrollClassFilter === 'All'
+      ? allStudents
+      : allStudents.filter(s => s.class_level === enrollClassFilter);
+    const total = classScoped.length;
+    const enrolled = classScoped.filter(s => (templatesByStudentId.get(String(s._id))?.length || 0) > 0).length;
+    const withBackup = classScoped.filter(s => (templatesByStudentId.get(String(s._id))?.length || 0) >= 2).length;
+    const pct = total > 0 ? Math.round((enrolled / total) * 100) : 0;
+    return { total, enrolled, withBackup, pct };
+  }, [allStudents, enrollClassFilter, templatesByStudentId]);
+
+  const nextUnenrolledStudent = useMemo(() => {
+    const classScoped = enrollClassFilter === 'All'
+      ? allStudents
+      : allStudents.filter(s => s.class_level === enrollClassFilter);
+    const currentId = enrollWizardStudent?._id ? String(enrollWizardStudent._id) : '';
+    return classScoped.find(s => (templatesByStudentId.get(String(s._id))?.length || 0) === 0 && String(s._id) !== currentId) || null;
+  }, [allStudents, enrollClassFilter, templatesByStudentId, enrollWizardStudent]);
+
+  const firstUnenrolledInScope = useMemo(() => {
+    const classScoped = enrollClassFilter === 'All'
+      ? allStudents
+      : allStudents.filter(s => s.class_level === enrollClassFilter);
+    return classScoped.find(s => (templatesByStudentId.get(String(s._id))?.length || 0) === 0) || null;
+  }, [allStudents, enrollClassFilter, templatesByStudentId]);
+
+  const sensorDriftDetected = Boolean(
+    activeDevice?.is_online &&
+    typeof activeDevice.total_templates === 'number' &&
+    typeof activeDevice.enrolled_count === 'number' &&
+    activeDevice.total_templates !== activeDevice.enrolled_count
+  );
+
+  // Derive visual 4-stage stepper index from ESP32 liveCommand step/status
+  const enrollStageInfo = useMemo(() => {
+    const status = liveCommand?.status || 'PENDING';
+    const step = liveCommand?.step || '';
+    const msg = (liveCommand?.message || '').toLowerCase();
+    const rawPct = typeof liveCommand?.progress === 'number' ? liveCommand.progress : null;
+
+    if (status === 'COMPLETED') return { stage: 4, pct: 100 };
+    if (status === 'FAILED') return { stage: -1, pct: 0 };
+    if (step === 'SCAN_2' || msg.includes('step 2') || msg.includes('same finger')) return { stage: 3, pct: rawPct ?? 75 };
+    if (step === 'LIFT_FINGER' || msg.includes('lift finger')) return { stage: 2.5, pct: rawPct ?? 52 };
+    if (step === 'SCAN_1' || status === 'IN_PROGRESS' || msg.includes('step 1')) return { stage: 2, pct: rawPct ?? 28 };
+    return { stage: 1, pct: rawPct ?? 12 };
+  }, [liveCommand]);
 
   const serverUrlForConfig = import.meta.env.VITE_API_URL || window.location.origin;
 
+  const getInitials = (name = '') => {
+    const parts = String(name).trim().split(/\s+/).filter(Boolean);
+    if (parts.length === 0) return '?';
+    if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+    return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+  };
+
+  const getYesterdayIST = () => {
+    const ist = new Date(Date.now() + 5.5 * 60 * 60 * 1000 - 86400000);
+    return ist.toISOString().split('T')[0];
+  };
+
+  const formatCooldownShort = (sec = 120) => (sec < 60 ? `${sec}s` : `${Math.round(sec / 60)}m`);
+
   return (
-    <div className="space-y-6 animate-fadeIn">
-      {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div>
-          <div className="flex items-center gap-2.5">
-            <div className="p-2.5 rounded-xl bg-primary-600/15 border border-primary-500/30 text-primary-400">
-              <Fingerprint size={22} />
-            </div>
-            <div>
-              <h1 className="text-xl sm:text-2xl font-bold text-white font-outfit tracking-tight">
-                {isStaff ? 'Biometric Gate Scanner' : 'My Gate Entry & Exit Logs'}
+    <div className="space-y-5 sm:space-y-6 animate-fadeIn">
+      {/* HEADER BAR */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3.5">
+        <div className="flex items-center gap-3">
+          <div className="relative p-2.5 sm:p-3 rounded-2xl bg-gradient-to-br from-primary-500/20 to-indigo-600/10 border border-primary-500/30 text-primary-400 shadow-lg shadow-primary-500/10">
+            <Fingerprint size={22} />
+            {isStaff && activeDevice?.is_online && (
+              <span className="absolute -top-1 -right-1 flex h-3 w-3">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500 border-2 border-dark-950" />
+              </span>
+            )}
+          </div>
+          <div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <h1 className="text-xl sm:text-2xl font-extrabold text-white font-outfit tracking-tight">
+                {isStaff ? 'Biometric Gate Control' : 'My Campus Gate Logs'}
               </h1>
-              <p className="text-xs text-slate-400 mt-0.5">
-                {isStaff
-                  ? 'ESP32 R307S remote sensing control, automatic attendance sync & instant parent alerts'
-                  : 'Your real-time campus arrival and departure timestamps'}
-              </p>
+              {isStaff && (
+                <span className="hidden sm:inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full bg-primary-500/10 text-primary-300 border border-primary-500/25">
+                  <Radio size={10} className="animate-pulse" />
+                  Live
+                </span>
+              )}
             </div>
+            <p className="text-xs text-slate-400 mt-0.5">
+              {isStaff
+                ? 'ESP32 R307S remote gate scanner, auto-attendance sync & parent alerts'
+                : 'Your verified campus entry & exit timestamps in IST'}
+            </p>
           </div>
         </div>
 
-        <button
-          onClick={() => {
-            fetchLogs();
-            if (isStaff) fetchDevices();
-            if (isStaff && activeTab === 'enroll') fetchEnrollmentData();
-          }}
-          className="self-start sm:self-auto px-3.5 py-2 rounded-xl bg-dark-900 hover:bg-dark-800 border border-dark-800 text-xs font-semibold text-slate-200 transition flex items-center gap-2"
-        >
-          <RefreshCw size={14} />
-          <span>Refresh</span>
-        </button>
+        <div className="flex items-center gap-2 self-start sm:self-auto flex-wrap">
+          {isStaff && devices.length > 1 && (
+            <select
+              value={selectedDeviceId}
+              onChange={(e) => setSelectedDeviceId(e.target.value)}
+              className="px-3 py-2 rounded-xl bg-dark-900/90 border border-dark-800 hover:border-dark-700 text-xs font-semibold text-white transition"
+            >
+              {devices.map(d => (
+                <option key={d.device_id} value={d.device_id}>
+                  {d.name} ({d.device_id})
+                </option>
+              ))}
+            </select>
+          )}
+
+          {isSuperAdmin && (
+            <button
+              type="button"
+              onClick={() => setShowAddDeviceModal(true)}
+              className="px-3.5 py-2 rounded-xl bg-primary-600 hover:bg-primary-500 active:scale-[0.98] text-xs font-bold text-white transition flex items-center gap-1.5 shadow-lg shadow-primary-600/20"
+            >
+              <Plus size={14} />
+              <span>Add Scanner</span>
+            </button>
+          )}
+
+          <button
+            type="button"
+            onClick={() => {
+              fetchLogs();
+              if (isStaff) fetchDevices();
+              if (isStaff && activeTab === 'enroll') fetchEnrollmentData();
+            }}
+            className="px-3.5 py-2 rounded-xl bg-dark-900/90 hover:bg-dark-800 active:scale-[0.98] border border-dark-800 text-xs font-semibold text-slate-200 transition flex items-center gap-1.5"
+          >
+            <RefreshCw size={13} className={loadingLogs || loadingDevices ? 'animate-spin' : ''} />
+            <span>Refresh</span>
+          </button>
+        </div>
       </div>
 
-      {/* Feedback Banner */}
+      {/* TOAST FEEDBACK BANNER */}
       {feedback.text && (
         <div
-          className={`p-3.5 rounded-xl border text-xs font-medium flex items-center gap-2.5 ${
+          className={`p-3.5 rounded-2xl border text-xs font-medium flex items-center justify-between gap-3 animate-slideUp shadow-lg ${
             feedback.type === 'error'
-              ? 'bg-rose-500/10 border-rose-500/30 text-rose-300'
-              : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+              ? 'bg-rose-500/10 border-rose-500/30 text-rose-200'
+              : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-200'
           }`}
         >
-          {feedback.type === 'error' ? <AlertCircle size={16} className="shrink-0" /> : <CheckCircle2 size={16} className="shrink-0" />}
-          <span>{feedback.text}</span>
+          <div className="flex items-center gap-2.5 min-w-0">
+            {feedback.type === 'error' ? <AlertCircle size={16} className="text-rose-400 shrink-0" /> : <CheckCircle2 size={16} className="text-emerald-400 shrink-0" />}
+            <span className="leading-snug">{feedback.text}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setFeedback({ type: '', text: '' })}
+            className="p-1 rounded-lg hover:bg-white/10 text-slate-400 hover:text-white transition shrink-0"
+            aria-label="Dismiss notification"
+          >
+            <X size={14} />
+          </button>
         </div>
       )}
 
-      {/* STAFF REMOTE CONTROL CARD */}
+      {/* HERO HARDWARE COMMAND CARD (Staff Only) */}
       {isStaff && (
-        <div className="glass-panel p-4 sm:p-6 rounded-2xl border border-dark-800 space-y-5">
-          {loadingDevices && !activeDevice ? (
-            <div className="py-6 text-center text-xs text-slate-400">Loading ESP32 scanner status...</div>
-          ) : activeDevice ? (
-            <>
-              <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-                {/* Device Identity & Live Connection */}
-                <div className="flex items-start sm:items-center gap-3.5">
-                  <div
-                    className={`w-12 h-12 rounded-2xl flex items-center justify-center border shrink-0 ${
-                      activeDevice.sensing_enabled
-                        ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400'
-                        : 'bg-rose-500/15 border-rose-500/30 text-rose-400'
-                    }`}
-                  >
-                    <Cpu size={24} />
-                  </div>
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <h2 className="text-base sm:text-lg font-bold text-white font-outfit">{activeDevice.name}</h2>
-                      <span className="text-[10px] font-mono px-2 py-0.5 rounded-md bg-dark-900 border border-dark-800 text-slate-300">
-                        {activeDevice.device_id}
-                      </span>
-                      <span
-                        className={`inline-flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full border ${
-                          activeDevice.is_online
-                            ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
-                            : 'bg-slate-800/80 text-slate-400 border-dark-700'
-                        }`}
-                      >
-                        {activeDevice.is_online ? <Wifi size={11} /> : <WifiOff size={11} />}
-                        {activeDevice.is_online ? 'ESP32 Online' : 'ESP32 Offline'}
-                      </span>
-                    </div>
-                    <p className="text-[11px] text-slate-400 mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
-                      <span>Enrolled Prints: <strong className="text-slate-200">{activeDevice.enrolled_count ?? 0} / 1000</strong></span>
-                      {activeDevice.last_heartbeat && (
-                        <span>Last Seen: <strong className="text-slate-200">{formatISTTime(activeDevice.last_heartbeat)}</strong></span>
-                      )}
-                      {activeDevice.ip_address && (
-                        <span className="font-mono text-[10px] text-slate-500">IP: {activeDevice.ip_address}</span>
-                      )}
-                    </p>
-                  </div>
-                </div>
+        <div className="relative overflow-hidden glass-panel rounded-2xl border border-white/[0.08] shadow-xl">
+          {/* Subtle Ambient Status Glow */}
+          <div
+            className={`pointer-events-none absolute -top-24 -right-24 w-72 h-72 rounded-full blur-3xl opacity-20 transition-colors duration-500 ${
+              !activeDevice?.is_online
+                ? 'bg-slate-500'
+                : activeDevice?.sensing_enabled
+                  ? 'bg-emerald-500'
+                  : 'bg-rose-500'
+            }`}
+          />
 
-                {/* Big Thumb-Friendly Sensing ON / OFF Remote Switch */}
-                <button
-                  onClick={handleToggleSensing}
-                  disabled={togglingSensing}
-                  className={`w-full lg:w-auto px-5 py-3.5 rounded-2xl font-bold text-sm transition flex items-center justify-center gap-3 shadow-lg active:scale-[0.98] disabled:opacity-60 ${
-                    activeDevice.sensing_enabled
-                      ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-600/20 border border-emerald-400/30'
-                      : 'bg-rose-600 hover:bg-rose-500 text-white shadow-rose-600/20 border border-rose-400/30'
-                  }`}
-                >
-                  <Power size={18} />
-                  <div className="text-left">
-                    <span className="block leading-tight">
-                      {togglingSensing
-                        ? 'Updating ESP32...'
-                        : activeDevice.sensing_enabled
-                          ? 'Fingerprint Sensing: ON'
-                          : 'Fingerprint Sensing: OFF'}
-                    </span>
-                    <span className="block text-[10px] font-medium opacity-85">
-                      {activeDevice.sensing_enabled ? 'Tap to Pause / Turn Off Scanner' : 'Tap to Resume / Turn On Scanner'}
-                    </span>
-                  </div>
-                </button>
+          <div className="relative p-4 sm:p-5 space-y-4">
+            {loadingDevices && !activeDevice ? (
+              <div className="flex items-center gap-4 animate-pulse py-2">
+                <div className="w-12 h-12 rounded-2xl bg-dark-800/80" />
+                <div className="flex-1 space-y-2">
+                  <div className="h-4 w-48 rounded bg-dark-800/80" />
+                  <div className="h-3 w-72 rounded bg-dark-800/60" />
+                </div>
               </div>
-
-              {/* Quick Settings Row */}
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 pt-3 border-t border-dark-800/80">
-                {/* Auto-Mark Attendance Switch */}
-                <div className="p-3.5 rounded-xl bg-dark-950/60 border border-dark-800/80 flex items-center justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-1.5 text-xs font-bold text-white">
-                      <ShieldCheck size={14} className="text-primary-400 shrink-0" />
-                      <span>Auto-Mark Attendance</span>
-                    </div>
-                    <p className="text-[11px] text-slate-400 mt-0.5">
-                      Marks scanned students Present in ClassGrid automatically; manual edits still work.
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    disabled={savingSettings}
-                    onClick={() => handleUpdateSetting({ auto_mark_attendance: !activeDevice.auto_mark_attendance })}
-                    className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
-                      activeDevice.auto_mark_attendance ? 'bg-primary-600' : 'bg-dark-800'
-                    }`}
-                    aria-label="Toggle Auto-Mark Attendance"
-                  >
-                    <span
-                      className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                        activeDevice.auto_mark_attendance ? 'translate-x-6' : 'translate-x-1'
+            ) : activeDevice ? (
+              <>
+                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                  {/* Left: Hardware Identity + Telemetry Pills */}
+                  <div className="flex items-start sm:items-center gap-3.5 min-w-0">
+                    <div
+                      className={`w-12 h-12 sm:w-14 sm:h-14 rounded-2xl flex items-center justify-center border shrink-0 transition-all ${
+                        activeDevice.sensing_enabled
+                          ? 'bg-gradient-to-br from-emerald-500/20 to-teal-500/5 border-emerald-500/35 text-emerald-400 shadow-lg shadow-emerald-500/10'
+                          : 'bg-gradient-to-br from-rose-500/20 to-orange-500/5 border-rose-500/35 text-rose-400 shadow-lg shadow-rose-500/10'
                       }`}
-                    />
-                  </button>
-                </div>
+                    >
+                      <Cpu size={24} />
+                    </div>
 
-                {/* Pause / Resume Parent Entry & Exit Messages Switch */}
-                <div className="p-3.5 rounded-xl bg-dark-950/60 border border-dark-800/80 flex items-center justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-1.5 text-xs font-bold text-white">
-                      {activeDevice.parent_alerts_enabled !== false ? (
-                        <Bell size={14} className="text-emerald-400 shrink-0" />
-                      ) : (
-                        <BellOff size={14} className="text-amber-400 shrink-0" />
-                      )}
-                      <span>
-                        Parent Messages:{' '}
-                        <span className={activeDevice.parent_alerts_enabled !== false ? 'text-emerald-400' : 'text-amber-400'}>
-                          {activeDevice.parent_alerts_enabled !== false ? 'ON' : 'PAUSED'}
+                    <div className="min-w-0 space-y-1.5">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <h2 className="text-base sm:text-lg font-bold text-white font-outfit truncate">
+                          {activeDevice.name}
+                        </h2>
+                        <span className="text-[10px] font-mono font-semibold px-2 py-0.5 rounded-md bg-dark-950/80 border border-dark-800 text-slate-300">
+                          {activeDevice.device_id}
                         </span>
-                      </span>
+                        <span
+                          className={`inline-flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full border ${
+                            activeDevice.is_online
+                              ? 'badge-glow-emerald'
+                              : 'bg-dark-900/90 text-slate-400 border-dark-700'
+                          }`}
+                        >
+                          {activeDevice.is_online ? <Wifi size={11} /> : <WifiOff size={11} />}
+                          {activeDevice.is_online ? 'Online' : 'Offline'}
+                        </span>
+                        {sensorDriftDetected && (
+                          <button
+                            type="button"
+                            onClick={() => { setActiveTab('enroll'); handleSyncSensorSlots(); }}
+                            className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full badge-glow-amber hover:brightness-110 transition"
+                            title="R307S flash count differs from database — tap to sync"
+                          >
+                            <AlertCircle size={10} />
+                            Sync Needed
+                          </button>
+                        )}
+                      </div>
+
+                      {/* Compact Telemetry Row */}
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-400">
+                        <span className="inline-flex items-center gap-1">
+                          <Fingerprint size={11} className="text-primary-400" />
+                          <strong className="text-slate-200 tabular-nums">{activeDevice.enrolled_count ?? 0}</strong>
+                          <span className="text-slate-500">/ 1000 prints</span>
+                        </span>
+                        {activeDevice.last_heartbeat && (
+                          <span className="inline-flex items-center gap-1">
+                            <Activity size={11} className="text-emerald-400" />
+                            <strong className="text-slate-200 font-mono text-[10px]">{formatISTTime(activeDevice.last_heartbeat)}</strong>
+                          </span>
+                        )}
+                        {activeDevice.ip_address && (
+                          <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-dark-950/70 border border-dark-800/80 text-slate-400">
+                            {activeDevice.ip_address}
+                          </span>
+                        )}
+                        {activeDevice.firmware_version && (
+                          <span className="font-mono text-[10px] text-slate-500">
+                            v{activeDevice.firmware_version}
+                          </span>
+                        )}
+                      </div>
                     </div>
-                    <p className="text-[11px] text-slate-400 mt-0.5">
-                      {activeDevice.parent_alerts_enabled !== false
-                        ? 'Sends instant Entry/Exit email & app push alerts to parents.'
-                        : 'Entry/Exit parent alerts are paused; scans & attendance still log.'}
-                    </p>
                   </div>
-                  <button
-                    type="button"
-                    disabled={savingSettings}
-                    onClick={() =>
-                      handleUpdateSetting({
-                        parent_alerts_enabled: !(activeDevice.parent_alerts_enabled !== false)
-                      })
-                    }
-                    className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
-                      activeDevice.parent_alerts_enabled !== false ? 'bg-emerald-600' : 'bg-amber-600/40 border border-amber-500/40'
-                    }`}
-                    aria-label="Toggle Parent Entry and Exit Messages"
-                  >
-                    <span
-                      className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                        activeDevice.parent_alerts_enabled !== false ? 'translate-x-6' : 'translate-x-1'
+
+                  {/* Right: Primary Power Switch + Collapsible Settings Toggle */}
+                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5 shrink-0">
+                    <button
+                      type="button"
+                      onClick={handleToggleSensing}
+                      disabled={togglingSensing}
+                      className={`px-5 py-3 rounded-2xl font-bold text-xs sm:text-sm transition-all flex items-center justify-center gap-3 shadow-lg active:scale-[0.98] disabled:opacity-60 ${
+                        activeDevice.sensing_enabled
+                          ? 'bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white shadow-emerald-600/25 border border-emerald-400/30'
+                          : 'bg-gradient-to-r from-rose-600 to-pink-600 hover:from-rose-500 hover:to-pink-500 text-white shadow-rose-600/25 border border-rose-400/30'
                       }`}
-                    />
-                  </button>
-                </div>
+                    >
+                      <div className="p-1.5 rounded-xl bg-white/15">
+                        <Power size={16} />
+                      </div>
+                      <div className="text-left">
+                        <span className="block leading-tight">
+                          {togglingSensing
+                            ? 'Updating ESP32...'
+                            : activeDevice.sensing_enabled
+                              ? 'Scanner Active'
+                              : 'Scanner Paused'}
+                        </span>
+                        <span className="block text-[10px] font-medium text-white/80">
+                          {activeDevice.sensing_enabled ? 'Tap to pause sensing' : 'Tap to resume sensing'}
+                        </span>
+                      </div>
+                    </button>
 
-                {/* Cooldown Selector */}
-                <div className="p-3.5 rounded-xl bg-dark-950/60 border border-dark-800/80 flex items-center justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-1.5 text-xs font-bold text-white">
-                      <Sliders size={14} className="text-amber-400 shrink-0" />
-                      <span>Double-Scan Cooldown</span>
-                    </div>
-                    <p className="text-[11px] text-slate-400 mt-0.5">
-                      Minimum gap before Entry can flip to Exit (avoids accidental double scans).
-                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setShowSettingsDrawer(prev => !prev)}
+                      className={`px-3.5 py-3 rounded-2xl text-xs font-bold border transition flex items-center justify-center gap-2 ${
+                        showSettingsDrawer
+                          ? 'bg-primary-600/20 border-primary-500/40 text-primary-200'
+                          : 'bg-dark-950/70 hover:bg-dark-900 border-dark-800 text-slate-300 hover:text-white'
+                      }`}
+                    >
+                      <Sliders size={14} />
+                      <span>Settings</span>
+                      {showSettingsDrawer ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                    </button>
                   </div>
-                  <select
-                    value={activeDevice.cooldown_seconds || 120}
-                    disabled={savingSettings}
-                    onChange={(e) => handleUpdateSetting({ cooldown_seconds: Number(e.target.value) })}
-                    className="px-3 py-1.5 rounded-lg bg-dark-900 border border-dark-700 text-xs font-semibold text-white outline-none focus:border-primary-500 shrink-0"
-                  >
-                    <option value={15}>15 sec (Test)</option>
-                    <option value={60}>1 min</option>
-                    <option value={120}>2 min</option>
-                    <option value={300}>5 min</option>
-                    <option value={600}>10 min</option>
-                  </select>
                 </div>
-              </div>
 
-              {/* Collapsible ESP32 Firmware Setup Credentials */}
-              <div className="rounded-xl bg-dark-950/70 border border-dark-800/80 overflow-hidden">
-                <button
-                  type="button"
-                  onClick={() => setShowCredentials(prev => !prev)}
-                  className="w-full px-4 py-2.5 flex items-center justify-between text-xs font-semibold text-slate-300 hover:text-white transition"
-                >
-                  <span className="flex items-center gap-2">
-                    <Key size={13} className="text-primary-400" />
-                    <span>ESP32 Setup Credentials (for firmware/edustride_esp32_gate/config.h)</span>
-                  </span>
-                  {showCredentials ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
-                </button>
+                {/* Compact Active Policy Summary Chips (visible when settings drawer is collapsed) */}
+                {!showSettingsDrawer && (
+                  <div className="flex flex-wrap items-center gap-2 pt-3 border-t border-white/[0.06] text-[11px]">
+                    <button
+                      type="button"
+                      onClick={() => setShowSettingsDrawer(true)}
+                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border transition hover:brightness-110 ${
+                        activeDevice.auto_mark_attendance
+                          ? 'bg-primary-500/10 border-primary-500/25 text-primary-300'
+                          : 'bg-dark-950/60 border-dark-800 text-slate-400'
+                      }`}
+                    >
+                      <ShieldCheck size={12} />
+                      <span>Auto-Attendance: <strong>{activeDevice.auto_mark_attendance ? 'ON' : 'OFF'}</strong></span>
+                    </button>
 
-                {showCredentials && (
-                  <div className="px-4 pb-4 pt-1 space-y-2.5 border-t border-dark-800/60 text-xs">
-                    {[
-                      { label: 'SERVER_BASE_URL', val: serverUrlForConfig },
-                      { label: 'DEVICE_ID', val: activeDevice.device_id },
-                      { label: 'DEVICE_API_KEY', val: activeDevice.api_key }
-                    ].map(item => (
-                      <div key={item.label} className="flex items-center justify-between gap-2 bg-dark-900/90 px-3 py-2 rounded-lg border border-dark-800">
+                    <button
+                      type="button"
+                      onClick={() => setShowSettingsDrawer(true)}
+                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border transition hover:brightness-110 ${
+                        activeDevice.parent_alerts_enabled !== false
+                          ? 'bg-emerald-500/10 border-emerald-500/25 text-emerald-300'
+                          : 'bg-amber-500/10 border-amber-500/25 text-amber-300'
+                      }`}
+                    >
+                      {activeDevice.parent_alerts_enabled !== false ? <Bell size={12} /> : <BellOff size={12} />}
+                      <span>Parent Alerts: <strong>{activeDevice.parent_alerts_enabled !== false ? 'ON' : 'PAUSED'}</strong></span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setShowSettingsDrawer(true)}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-dark-950/60 border border-dark-800 text-slate-300 hover:border-dark-700 transition"
+                    >
+                      <Clock size={12} className="text-amber-400" />
+                      <span>Cooldown: <strong className="font-mono">{formatCooldownShort(activeDevice.cooldown_seconds)}</strong></span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setShowSettingsDrawer(true)}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-dark-950/60 border border-dark-800 text-slate-300 hover:border-dark-700 transition"
+                    >
+                      <Bookmark size={12} className="text-cyan-400" />
+                      <span>Session: <strong>{activeDevice.pinned_session_name || 'Auto Timetable'}</strong></span>
+                    </button>
+                  </div>
+                )}
+
+                {/* Collapsible Scanner Settings & Firmware Credentials Drawer */}
+                {showSettingsDrawer && (
+                  <div className="space-y-3.5 pt-3.5 border-t border-white/[0.06] animate-fadeIn">
+                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
+                      {/* Auto-Mark Attendance Switch */}
+                      <div className="p-3.5 rounded-xl bg-dark-950/70 border border-dark-800/90 flex items-center justify-between gap-3">
                         <div className="min-w-0">
-                          <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 block">{item.label}</span>
-                          <code className="text-[11px] text-primary-300 break-all">{item.val}</code>
+                          <div className="flex items-center gap-1.5 text-xs font-bold text-white">
+                            <ShieldCheck size={14} className="text-primary-400 shrink-0" />
+                            <span>Auto-Mark Attendance</span>
+                          </div>
+                          <p className="text-[11px] text-slate-400 mt-0.5 leading-snug">
+                            Auto-marks Present in ClassGrid on entry; manual edits stay preserved.
+                          </p>
                         </div>
                         <button
                           type="button"
-                          onClick={() => handleCopy(item.label, item.val)}
-                          className="p-1.5 rounded-lg bg-dark-800 hover:bg-dark-700 text-slate-300 shrink-0"
-                          title={`Copy ${item.label}`}
+                          disabled={savingSettings}
+                          onClick={() => handleUpdateSetting({ auto_mark_attendance: !activeDevice.auto_mark_attendance })}
+                          className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
+                            activeDevice.auto_mark_attendance ? 'bg-primary-600' : 'bg-dark-800'
+                          }`}
+                          aria-label="Toggle Auto-Mark Attendance"
                         >
-                          {copiedField === item.label ? <Check size={14} className="text-emerald-400" /> : <Copy size={14} />}
+                          <span
+                            className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                              activeDevice.auto_mark_attendance ? 'translate-x-6' : 'translate-x-1'
+                            }`}
+                          />
                         </button>
                       </div>
-                    ))}
+
+                      {/* Parent Messages Switch */}
+                      <div className="p-3.5 rounded-xl bg-dark-950/70 border border-dark-800/90 flex items-center justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5 text-xs font-bold text-white">
+                            {activeDevice.parent_alerts_enabled !== false ? (
+                              <Bell size={14} className="text-emerald-400 shrink-0" />
+                            ) : (
+                              <BellOff size={14} className="text-amber-400 shrink-0" />
+                            )}
+                            <span>
+                              Parent Alerts:{' '}
+                              <span className={activeDevice.parent_alerts_enabled !== false ? 'text-emerald-400' : 'text-amber-400'}>
+                                {activeDevice.parent_alerts_enabled !== false ? 'ON' : 'PAUSED'}
+                              </span>
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-slate-400 mt-0.5 leading-snug">
+                            {activeDevice.parent_alerts_enabled !== false
+                              ? 'Sends instant Entry/Exit email & app push alerts.'
+                              : 'Alerts paused; gate logs & attendance continue.'}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          disabled={savingSettings}
+                          onClick={() =>
+                            handleUpdateSetting({
+                              parent_alerts_enabled: !(activeDevice.parent_alerts_enabled !== false)
+                            })
+                          }
+                          className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
+                            activeDevice.parent_alerts_enabled !== false ? 'bg-emerald-600' : 'bg-amber-600/40 border border-amber-500/40'
+                          }`}
+                          aria-label="Toggle Parent Entry and Exit Messages"
+                        >
+                          <span
+                            className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                              activeDevice.parent_alerts_enabled !== false ? 'translate-x-6' : 'translate-x-1'
+                            }`}
+                          />
+                        </button>
+                      </div>
+
+                      {/* Cooldown Selector */}
+                      <div className="p-3.5 rounded-xl bg-dark-950/70 border border-dark-800/90 flex items-center justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5 text-xs font-bold text-white">
+                            <Clock size={14} className="text-amber-400 shrink-0" />
+                            <span>Double-Scan Gap</span>
+                          </div>
+                          <p className="text-[11px] text-slate-400 mt-0.5 leading-snug">
+                            Min wait before Entry flips to Exit.
+                          </p>
+                        </div>
+                        <select
+                          value={activeDevice.cooldown_seconds || 120}
+                          disabled={savingSettings}
+                          onChange={(e) => handleUpdateSetting({ cooldown_seconds: Number(e.target.value) })}
+                          className="px-2.5 py-1.5 rounded-lg bg-dark-900 border border-dark-700 text-xs font-semibold text-white shrink-0"
+                        >
+                          <option value={15}>15s (Test)</option>
+                          <option value={60}>1 min</option>
+                          <option value={120}>2 min</option>
+                          <option value={300}>5 min</option>
+                          <option value={600}>10 min</option>
+                        </select>
+                      </div>
+
+                      {/* Pinned Session Name Override */}
+                      <div className="p-3.5 rounded-xl bg-dark-950/70 border border-dark-800/90 flex flex-col justify-between gap-2">
+                        <div className="flex items-center gap-1.5 text-xs font-bold text-white">
+                          <Bookmark size={14} className="text-cyan-400 shrink-0" />
+                          <span>Pinned Session</span>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <input
+                            type="text"
+                            value={pinnedSessionInput}
+                            onChange={(e) => setPinnedSessionInput(e.target.value)}
+                            placeholder="Auto (timetable)"
+                            className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-dark-900 border border-dark-700 text-xs text-white placeholder-slate-500"
+                          />
+                          <button
+                            type="button"
+                            disabled={savingSettings || pinnedSessionInput.trim() === (activeDevice.pinned_session_name || '')}
+                            onClick={() => handleUpdateSetting({ pinned_session_name: pinnedSessionInput.trim() })}
+                            className="px-2.5 py-1.5 rounded-lg bg-primary-600 hover:bg-primary-500 disabled:opacity-40 text-[11px] font-bold text-white transition shrink-0"
+                          >
+                            Save
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Collapsible ESP32 Firmware Setup Credentials (SuperAdmin Only) */}
+                    {isSuperAdmin && (
+                      <div className="rounded-xl bg-dark-950/75 border border-dark-800/90 overflow-hidden">
+                        <button
+                          type="button"
+                          onClick={() => setShowCredentials(prev => !prev)}
+                          className="w-full px-4 py-2.5 flex items-center justify-between text-xs font-semibold text-slate-300 hover:text-white transition"
+                        >
+                          <span className="flex items-center gap-2">
+                            <Key size={13} className="text-primary-400" />
+                            <span>ESP32 Setup Credentials (config.h)</span>
+                          </span>
+                          {showCredentials ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
+                        </button>
+
+                        {showCredentials && (
+                          <div className="px-4 pb-4 pt-2 space-y-2.5 border-t border-dark-800/70 text-xs">
+                            {[
+                              { label: 'SERVER_BASE_URL', val: serverUrlForConfig },
+                              { label: 'DEVICE_ID', val: activeDevice.device_id },
+                              { label: 'DEVICE_API_KEY', val: activeDevice.api_key }
+                            ].map(item => (
+                              <div key={item.label} className="flex items-center justify-between gap-2 bg-dark-900/90 px-3 py-2 rounded-lg border border-dark-800">
+                                <div className="min-w-0">
+                                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 block">{item.label}</span>
+                                  <code className="text-[11px] text-primary-300 break-all">{item.val}</code>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => handleCopy(item.label, item.val)}
+                                  className="p-1.5 rounded-lg bg-dark-800 hover:bg-dark-700 text-slate-300 shrink-0 transition"
+                                  title={`Copy ${item.label}`}
+                                >
+                                  {copiedField === item.label ? <Check size={14} className="text-emerald-400" /> : <Copy size={14} />}
+                                </button>
+                              </div>
+                            ))}
+
+                            <div className="flex items-center justify-end pt-1">
+                              <button
+                                type="button"
+                                disabled={savingSettings}
+                                onClick={handleRegenerateKey}
+                                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 text-[11px] font-semibold transition"
+                              >
+                                <RotateCcw size={12} />
+                                <span>Regenerate Device API Key</span>
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
-              </div>
-            </>
-          ) : null}
+              </>
+            ) : null}
+          </div>
         </div>
       )}
 
-      {/* LIVE ENROLLMENT / COMMAND STATUS BANNER */}
+      {/* LIVE COMMAND / SYNC STATUS BANNER */}
       {isStaff && liveCommand && liveCommand.status && liveCommand.status !== 'IDLE' && (
         <div
-          className={`p-4 rounded-2xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+          className={`p-3.5 sm:p-4 rounded-2xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 animate-slideUp shadow-lg ${
             liveCommand.status === 'COMPLETED'
               ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-200'
               : liveCommand.status === 'FAILED'
@@ -662,31 +1086,52 @@ const BiometricGatePanel = () => {
                 : 'bg-primary-500/10 border-primary-500/30 text-primary-200'
           }`}
         >
-          <div className="flex items-start gap-3">
-            <Fingerprint size={20} className="shrink-0 mt-0.5 animate-pulse" />
-            <div className="text-xs">
-              <p className="font-bold uppercase tracking-wider">
-                {liveCommand.action !== 'NONE' ? liveCommand.action : 'Device Command'} &bull; {liveCommand.status}
-                {liveCommand.slot_id ? ` (Slot #${liveCommand.slot_id})` : ''}
+          <div className="flex items-start gap-3 min-w-0">
+            <div className="p-2 rounded-xl bg-white/5 border border-white/10 shrink-0">
+              <Fingerprint size={18} className={isCommandInFlight ? 'animate-pulse' : ''} />
+            </div>
+            <div className="text-xs min-w-0">
+              <p className="font-bold uppercase tracking-wider flex items-center gap-2 flex-wrap">
+                <span>{liveCommand.action !== 'NONE' ? liveCommand.action.replace('_', ' ') : 'Device Command'}</span>
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-black/25 border border-white/10">
+                  {liveCommand.status}
+                </span>
+                {liveCommand.slot_id ? <span className="font-mono text-[11px] opacity-85">Slot #{liveCommand.slot_id}</span> : null}
+                {(liveCommand.queue_length > 0 || activeDevice?.queue_length > 0) && (
+                  <span className="px-1.5 py-0.5 rounded bg-dark-900/80 border border-dark-700 text-[10px] text-slate-300">
+                    +{liveCommand.queue_length ?? activeDevice?.queue_length} queued
+                  </span>
+                )}
               </p>
-              <p className="text-slate-200 mt-0.5">
-                {liveCommand.message || `Processing command for ${liveCommand.student_name || 'student'}...`}
+              <p className="text-slate-200 mt-1 leading-snug">
+                {liveCommand.message || `Processing command for ${liveCommand.student_name || 'device'}...`}
               </p>
             </div>
           </div>
 
-          <div className="flex items-center gap-2 self-end sm:self-auto">
-            {(liveCommand.status === 'PENDING' || liveCommand.status === 'IN_PROGRESS') ? (
+          <div className="flex items-center gap-2 self-end sm:self-auto shrink-0">
+            {liveCommand.action === 'ENROLL' && !showEnrollWizard && (
               <button
+                type="button"
+                onClick={() => setShowEnrollWizard(true)}
+                className="px-3 py-1.5 rounded-xl bg-primary-600 hover:bg-primary-500 text-[11px] font-bold text-white transition"
+              >
+                Open Wizard
+              </button>
+            )}
+            {isCommandInFlight ? (
+              <button
+                type="button"
                 onClick={handleCancelCommand}
-                className="px-3 py-1.5 rounded-lg bg-dark-900/90 hover:bg-dark-800 border border-dark-700 text-[11px] font-semibold text-slate-200"
+                className="px-3 py-1.5 rounded-xl bg-dark-950/80 hover:bg-dark-900 border border-dark-700 text-[11px] font-semibold text-slate-200 transition"
               >
                 Cancel
               </button>
             ) : (
               <button
+                type="button"
                 onClick={() => setLiveCommand(null)}
-                className="px-3 py-1.5 rounded-lg bg-dark-900/90 hover:bg-dark-800 border border-dark-700 text-[11px] font-semibold text-slate-200"
+                className="px-3 py-1.5 rounded-xl bg-dark-950/80 hover:bg-dark-900 border border-dark-700 text-[11px] font-semibold text-slate-200 transition"
               >
                 Dismiss
               </button>
@@ -695,81 +1140,125 @@ const BiometricGatePanel = () => {
         </div>
       )}
 
-      {/* KPI SUMMARY CARDS */}
+      {/* KPI SUMMARY STRIP */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
-        <div className="glass-panel p-4 rounded-2xl border border-dark-800">
-          <div className="flex items-center justify-between text-slate-400 text-xs">
-            <span>Entries ({selectedDate === getTodayIST() ? 'Today' : selectedDate})</span>
-            <LogIn size={16} className="text-emerald-400" />
-          </div>
-          <p className="text-2xl font-extrabold text-white font-outfit mt-2">{stats.entries_today}</p>
-        </div>
-
-        <div className="glass-panel p-4 rounded-2xl border border-dark-800">
-          <div className="flex items-center justify-between text-slate-400 text-xs">
-            <span>Exits</span>
-            <LogOut size={16} className="text-amber-400" />
-          </div>
-          <p className="text-2xl font-extrabold text-white font-outfit mt-2">{stats.exits_today}</p>
-        </div>
-
-        <div className="glass-panel p-4 rounded-2xl border border-dark-800">
-          <div className="flex items-center justify-between text-slate-400 text-xs">
-            <span>Currently Inside</span>
-            <Users size={16} className="text-primary-400" />
-          </div>
-          <p className="text-2xl font-extrabold text-white font-outfit mt-2">{stats.inside_now}</p>
-        </div>
-
-        <div className="glass-panel p-4 rounded-2xl border border-dark-800">
-          <div className="flex items-center justify-between text-slate-400 text-xs">
-            <span>Auto-Marked Present</span>
-            <CheckCircle2 size={16} className="text-cyan-400" />
-          </div>
-          <p className="text-2xl font-extrabold text-white font-outfit mt-2">{stats.attendance_synced}</p>
-        </div>
+        {[
+          {
+            label: `Entries (${selectedDate === getTodayIST() ? 'Today' : selectedDate})`,
+            value: stats.entries_today,
+            icon: LogIn,
+            accent: 'text-emerald-400 bg-emerald-500/10 border-emerald-500/25',
+            bar: 'from-emerald-500/70 to-teal-500/10'
+          },
+          {
+            label: 'Exits',
+            value: stats.exits_today,
+            icon: LogOut,
+            accent: 'text-amber-400 bg-amber-500/10 border-amber-500/25',
+            bar: 'from-amber-500/70 to-orange-500/10'
+          },
+          {
+            label: 'On Campus Now',
+            value: stats.inside_now,
+            icon: Users,
+            accent: 'text-primary-400 bg-primary-500/10 border-primary-500/25',
+            bar: 'from-primary-500/70 to-indigo-500/10'
+          },
+          {
+            label: 'Auto-Marked Present',
+            value: stats.attendance_synced,
+            icon: CheckCircle2,
+            accent: 'text-cyan-400 bg-cyan-500/10 border-cyan-500/25',
+            bar: 'from-cyan-500/70 to-sky-500/10'
+          }
+        ].map(kpi => {
+          const IconComp = kpi.icon;
+          return (
+            <div key={kpi.label} className="glass-card-hover relative overflow-hidden p-4 rounded-2xl">
+              <div className={`absolute inset-x-0 top-0 h-[2px] bg-gradient-to-r ${kpi.bar}`} />
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] font-medium text-slate-400 truncate">{kpi.label}</span>
+                <div className={`p-2 rounded-xl border shrink-0 ${kpi.accent}`}>
+                  <IconComp size={15} />
+                </div>
+              </div>
+              <p className="text-2xl sm:text-3xl font-extrabold text-white font-outfit tabular-nums mt-2.5">
+                {kpi.value}
+              </p>
+            </div>
+          );
+        })}
       </div>
 
-      {/* STAFF TABS */}
+      {/* SEGMENTED STAFF TABS */}
       {isStaff && (
-        <div className="flex items-center gap-2 border-b border-dark-800 pb-2">
+        <div className="inline-flex items-center gap-1.5 p-1 rounded-2xl bg-dark-900/80 border border-dark-800/90 backdrop-blur-md">
           <button
+            type="button"
             onClick={() => setActiveTab('feed')}
-            className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-2 ${
+            className={`px-4 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2 ${
               activeTab === 'feed'
-                ? 'bg-primary-600 text-white shadow-md shadow-primary-600/20'
-                : 'bg-dark-900/60 text-slate-400 hover:text-white border border-dark-800'
+                ? 'bg-primary-600 text-white shadow-lg shadow-primary-600/25'
+                : 'text-slate-400 hover:text-white hover:bg-white/[0.04]'
             }`}
           >
             <Clock size={14} />
             <span>Live Entry &amp; Exit Feed</span>
+            <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded-md ${activeTab === 'feed' ? 'bg-white/20 text-white' : 'bg-dark-950 text-slate-400'}`}>
+              {logs.length}
+            </span>
           </button>
 
           <button
+            type="button"
             onClick={() => setActiveTab('enroll')}
-            className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-2 ${
+            className={`px-4 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2 ${
               activeTab === 'enroll'
-                ? 'bg-primary-600 text-white shadow-md shadow-primary-600/20'
-                : 'bg-dark-900/60 text-slate-400 hover:text-white border border-dark-800'
+                ? 'bg-primary-600 text-white shadow-lg shadow-primary-600/25'
+                : 'text-slate-400 hover:text-white hover:bg-white/[0.04]'
             }`}
           >
             <UserPlus size={14} />
-            <span>Enroll Fingerprints ({activeDevice?.enrolled_count ?? templates.length})</span>
+            <span>Enroll Fingerprints</span>
+            <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded-md ${activeTab === 'enroll' ? 'bg-white/20 text-white' : 'bg-dark-950 text-slate-400'}`}>
+              {activeDevice?.enrolled_count ?? templates.length}
+            </span>
           </button>
         </div>
       )}
 
       {/* TAB 1: LIVE ENTRY / EXIT FEED */}
       {(!isStaff || activeTab === 'feed') && (
-        <div className="glass-panel p-4 sm:p-5 rounded-2xl border border-dark-800 space-y-4">
-          {/* Filters */}
-          <div className="flex flex-col sm:flex-row flex-wrap gap-3 items-stretch sm:items-center justify-between">
-            <div className="flex flex-wrap items-center gap-2.5">
+        <div className="glass-panel p-4 sm:p-5 rounded-2xl border border-white/[0.07] space-y-4">
+          {/* Filters Toolbar */}
+          <div className="flex flex-col lg:flex-row gap-3 items-stretch lg:items-center justify-between">
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="inline-flex items-center gap-1 p-1 rounded-xl bg-dark-950/70 border border-dark-800">
+                <button
+                  type="button"
+                  onClick={() => setSelectedDate(getTodayIST())}
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition ${
+                    selectedDate === getTodayIST() ? 'bg-primary-600 text-white' : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  Today
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSelectedDate(getYesterdayIST())}
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition ${
+                    selectedDate === getYesterdayIST() ? 'bg-primary-600 text-white' : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  Yesterday
+                </button>
+              </div>
+
               <input
                 type="date"
                 value={selectedDate}
                 onChange={(e) => setSelectedDate(e.target.value)}
-                className="px-3 py-2 rounded-xl bg-dark-900 border border-dark-800 text-xs text-white outline-none focus:border-primary-500"
+                className="px-3 py-2 rounded-xl bg-dark-900/90 border border-dark-800 hover:border-dark-700 text-xs text-white transition"
               />
 
               {isStaff && (
@@ -777,7 +1266,7 @@ const BiometricGatePanel = () => {
                   <select
                     value={classFilter}
                     onChange={(e) => setClassFilter(e.target.value)}
-                    className="px-3 py-2 rounded-xl bg-dark-900 border border-dark-800 text-xs text-white outline-none focus:border-primary-500"
+                    className="px-3 py-2 rounded-xl bg-dark-900/90 border border-dark-800 hover:border-dark-700 text-xs text-white transition"
                   >
                     <option value="All">All Classes</option>
                     {classes.map(c => (
@@ -788,7 +1277,7 @@ const BiometricGatePanel = () => {
                   <select
                     value={eventFilter}
                     onChange={(e) => setEventFilter(e.target.value)}
-                    className="px-3 py-2 rounded-xl bg-dark-900 border border-dark-800 text-xs text-white outline-none focus:border-primary-500"
+                    className="px-3 py-2 rounded-xl bg-dark-900/90 border border-dark-800 hover:border-dark-700 text-xs text-white transition"
                   >
                     <option value="All">Entry &amp; Exit</option>
                     <option value="ENTRY">Entry Only</option>
@@ -799,27 +1288,50 @@ const BiometricGatePanel = () => {
             </div>
 
             {isStaff && (
-              <div className="relative flex-1 sm:max-w-xs">
-                <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
+              <div className="relative flex-1 lg:max-w-xs">
+                <Search size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-500" />
                 <input
                   type="text"
                   placeholder="Search student or roll..."
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  className="w-full pl-9 pr-3 py-2 rounded-xl bg-dark-900 border border-dark-800 text-xs text-white placeholder-slate-500 outline-none focus:border-primary-500"
+                  className="w-full pl-9 pr-8 py-2 rounded-xl bg-dark-900/90 border border-dark-800 focus:border-primary-500 text-xs text-white placeholder-slate-500 transition"
                 />
+                {searchQuery && (
+                  <button
+                    type="button"
+                    onClick={() => setSearchQuery('')}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-500 hover:text-white"
+                  >
+                    <X size={13} />
+                  </button>
+                )}
               </div>
             )}
           </div>
 
           {/* Logs List */}
           {loadingLogs ? (
-            <div className="py-12 text-center">
-              <div className="animate-spin rounded-full h-7 w-7 border-t-2 border-primary-500 mx-auto"></div>
+            <div className="space-y-2.5">
+              {[1, 2, 3].map(i => (
+                <div key={i} className="p-4 rounded-xl bg-dark-900/50 border border-dark-800/70 flex items-center gap-3 animate-pulse">
+                  <div className="w-10 h-10 rounded-xl bg-dark-800" />
+                  <div className="flex-1 space-y-2">
+                    <div className="h-3.5 w-44 rounded bg-dark-800" />
+                    <div className="h-2.5 w-60 rounded bg-dark-800/70" />
+                  </div>
+                </div>
+              ))}
             </div>
           ) : logs.length === 0 ? (
-            <div className="py-12 text-center text-xs text-slate-500 bg-dark-950/40 rounded-xl border border-dark-800/60">
-              No biometric entry or exit scans recorded for {selectedDate}.
+            <div className="py-14 px-4 text-center bg-dark-950/45 rounded-2xl border border-dashed border-dark-800 space-y-2">
+              <div className="w-12 h-12 rounded-2xl bg-dark-900 border border-dark-800 text-slate-500 flex items-center justify-center mx-auto">
+                <Fingerprint size={22} />
+              </div>
+              <p className="text-sm font-bold text-slate-300 font-outfit">No scans recorded for {selectedDate}</p>
+              <p className="text-xs text-slate-500 max-w-sm mx-auto">
+                Student arrivals and departures will appear here instantaneously when scanned on the ESP32 gate terminal.
+              </p>
             </div>
           ) : (
             <div className="space-y-2.5">
@@ -828,17 +1340,20 @@ const BiometricGatePanel = () => {
                 return (
                   <div
                     key={log._id}
-                    className="p-3.5 rounded-xl bg-dark-900/70 border border-dark-800/90 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                    className="group relative overflow-hidden p-3.5 sm:p-4 rounded-xl bg-dark-900/70 hover:bg-dark-900/95 border border-dark-800/90 hover:border-primary-500/25 transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-3"
                   >
-                    <div className="flex items-start sm:items-center gap-3 min-w-0">
+                    {/* Left Event Accent Stripe */}
+                    <div className={`absolute inset-y-0 left-0 w-1 ${isEntry ? 'bg-emerald-500' : 'bg-amber-500'}`} />
+
+                    <div className="flex items-start sm:items-center gap-3 min-w-0 pl-1.5">
                       <div
-                        className={`p-2.5 rounded-xl border shrink-0 ${
+                        className={`w-10 h-10 rounded-xl border flex items-center justify-center font-bold text-xs shrink-0 ${
                           isEntry
-                            ? 'bg-emerald-500/10 border-emerald-500/25 text-emerald-400'
-                            : 'bg-amber-500/10 border-amber-500/25 text-amber-400'
+                            ? 'bg-emerald-500/12 border-emerald-500/30 text-emerald-300'
+                            : 'bg-amber-500/12 border-amber-500/30 text-amber-300'
                         }`}
                       >
-                        {isEntry ? <LogIn size={16} /> : <LogOut size={16} />}
+                        {getInitials(log.student?.name)}
                       </div>
 
                       <div className="min-w-0">
@@ -852,23 +1367,24 @@ const BiometricGatePanel = () => {
                             </span>
                           )}
                           <span
-                            className={`text-[10px] font-extrabold uppercase tracking-wider px-2 py-0.5 rounded-full border ${
-                              isEntry
-                                ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
-                                : 'bg-amber-500/15 text-amber-400 border-amber-500/30'
+                            className={`inline-flex items-center gap-1 text-[10px] font-extrabold uppercase tracking-wider px-2 py-0.5 rounded-full border ${
+                              isEntry ? 'badge-glow-emerald' : 'badge-glow-amber'
                             }`}
                           >
+                            {isEntry ? <LogIn size={10} /> : <LogOut size={10} />}
                             {log.event_type}
                           </span>
                         </div>
 
-                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-400 mt-1">
-                          <span className="font-mono text-slate-200 font-semibold">{formatISTTime(log.timestamp)}</span>
+                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-400 mt-1.5">
+                          <span className="font-mono text-slate-100 font-semibold">{formatISTTime(log.timestamp)}</span>
                           {!isEntry && log.duration_minutes !== null && (
-                            <span>Duration: <strong className="text-slate-200">{formatDuration(log.duration_minutes)}</strong></span>
+                            <span className="px-2 py-0.5 rounded-md bg-dark-950/70 border border-dark-800 text-slate-300">
+                              Stay: <strong className="text-white">{formatDuration(log.duration_minutes)}</strong>
+                            </span>
                           )}
                           {log.attendance_marked && (
-                            <span className="inline-flex items-center gap-1 text-cyan-400 font-medium">
+                            <span className="inline-flex items-center gap-1 text-cyan-300 font-medium">
                               <CheckCircle2 size={11} />
                               Present ({log.attendance_session || 'Session 1'})
                             </span>
@@ -878,7 +1394,7 @@ const BiometricGatePanel = () => {
                     </div>
 
                     {/* Parent Notification Badges + 1-Tap WhatsApp */}
-                    <div className="flex items-center gap-2 flex-wrap sm:justify-end shrink-0">
+                    <div className="flex items-center gap-1.5 flex-wrap sm:justify-end shrink-0 pl-1.5 sm:pl-0">
                       {log.notification?.paused ? (
                         <span
                           className="inline-flex items-center gap-1 text-[10px] font-semibold px-2.5 py-1 rounded-lg border bg-amber-500/10 text-amber-300 border-amber-500/25"
@@ -892,8 +1408,8 @@ const BiometricGatePanel = () => {
                           <span
                             className={`inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-1 rounded-lg border ${
                               log.notification?.push_sent
-                                ? 'bg-indigo-500/10 text-indigo-300 border-indigo-500/20'
-                                : 'bg-dark-950 text-slate-500 border-dark-800'
+                                ? 'bg-indigo-500/10 text-indigo-300 border-indigo-500/25'
+                                : 'bg-dark-950/70 text-slate-500 border-dark-800'
                             }`}
                             title="Mobile App Push Notification"
                           >
@@ -904,8 +1420,8 @@ const BiometricGatePanel = () => {
                           <span
                             className={`inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-1 rounded-lg border ${
                               log.notification?.email_sent
-                                ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20'
-                                : 'bg-dark-950 text-slate-500 border-dark-800'
+                                ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/25'
+                                : 'bg-dark-950/70 text-slate-500 border-dark-800'
                             }`}
                             title={log.notification?.email_sent ? `Emailed ${log.notification.email_to}` : (log.notification?.email_error || 'Email not sent')}
                           >
@@ -920,7 +1436,7 @@ const BiometricGatePanel = () => {
                           href={log.notification.whatsapp_link}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="inline-flex items-center gap-1 text-[10px] font-bold px-2.5 py-1 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/30 transition"
+                          className="inline-flex items-center gap-1 text-[10px] font-bold px-2.5 py-1 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/35 text-emerald-300 border border-emerald-500/35 transition"
                           title="Send WhatsApp alert to parent"
                         >
                           <MessageCircle size={11} />
@@ -936,93 +1452,291 @@ const BiometricGatePanel = () => {
         </div>
       )}
 
-      {/* TAB 2: FINGERPRINT ENROLLMENT MANAGER (Staff Only) */}
+      {/* TAB 2: MULTI-FINGER ENROLLMENT MANAGER (Staff Only) */}
       {isStaff && activeTab === 'enroll' && (
-        <div className="glass-panel p-4 sm:p-5 rounded-2xl border border-dark-800 space-y-4">
-          <div className="p-3.5 rounded-xl bg-primary-500/5 border border-primary-500/20 text-xs text-slate-300">
-            <strong className="text-primary-300">How Remote Enrollment Works:</strong> Make sure your ESP32 scanner is{' '}
-            <strong className="text-emerald-400">Online</strong>, tap <strong>Enroll</strong> next to a student below,
-            then have the student place their finger twice on the R307S sensor following the 0.96&quot; OLED prompts.
+        <div className="glass-panel p-4 sm:p-5 rounded-2xl border border-white/[0.07] space-y-4">
+          {/* Unified Enrollment Progress & Action Header */}
+          <div className="p-4 rounded-2xl bg-gradient-to-br from-dark-950/90 to-dark-900/70 border border-dark-800/90 space-y-3.5">
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h3 className="text-sm font-bold text-white font-outfit">
+                    {enrollClassFilter === 'All' ? 'Campus' : `Class ${enrollClassFilter}`} Fingerprint Coverage
+                  </h3>
+                  <span className="text-xs font-mono font-bold text-primary-300">
+                    {enrollProgressStats.enrolled}/{enrollProgressStats.total} ({enrollProgressStats.pct}%)
+                  </span>
+                  {enrollProgressStats.withBackup > 0 && (
+                    <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-cyan-500/10 text-cyan-300 border border-cyan-500/25">
+                      {enrollProgressStats.withBackup} with Backup
+                    </span>
+                  )}
+                </div>
+
+                {activeDevice && (
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-400">
+                    <span>DB Slots: <strong className="text-slate-200 tabular-nums">{activeDevice.enrolled_count ?? templates.length}</strong></span>
+                    <span>R307S Flash: <strong className={`tabular-nums ${sensorDriftDetected ? 'text-amber-400' : 'text-emerald-400'}`}>{activeDevice.total_templates ?? 0}</strong></span>
+                    {sensorDriftDetected && (
+                      <span className="inline-flex items-center gap-1 text-amber-300 font-semibold">
+                        <AlertCircle size={11} />
+                        Hardware &amp; DB out of sync
+                      </span>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                {firstUnenrolledInScope && (
+                  <button
+                    type="button"
+                    onClick={() => handleStartEnroll(firstUnenrolledInScope, 1)}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 active:scale-[0.98] text-white text-xs font-bold transition shadow-lg shadow-emerald-600/20"
+                  >
+                    <Sparkles size={13} />
+                    <span>Start Class Enrollment</span>
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  disabled={syncingSlots}
+                  onClick={handleSyncSensorSlots}
+                  className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold transition disabled:opacity-50 border ${
+                    sensorDriftDetected
+                      ? 'bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border-amber-400/40 animate-pulse'
+                      : 'bg-dark-900 hover:bg-dark-800 text-cyan-300 border-cyan-500/30'
+                  }`}
+                  title="Audit all 1000 R307S slots, erase orphan sensor prints, and remove stale DB records"
+                >
+                  <RefreshCw size={13} className={syncingSlots ? 'animate-spin' : ''} />
+                  <span>{syncingSlots ? 'Syncing...' : 'Sync Sensor'}</span>
+                </button>
+
+                {isSuperAdmin && (
+                  <button
+                    type="button"
+                    disabled={clearingAll}
+                    onClick={handleClearAllTemplates}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 text-xs font-bold transition disabled:opacity-50"
+                  >
+                    <AlertTriangle size={13} />
+                    <span>{clearingAll ? 'Clearing...' : 'Clear All'}</span>
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {allStudents.length > 0 && (
+              <div className="w-full h-2 rounded-full bg-dark-900 overflow-hidden border border-dark-800">
+                <div
+                  className="h-full bg-gradient-to-r from-primary-500 via-cyan-400 to-emerald-400 transition-all duration-500 rounded-full"
+                  style={{ width: `${enrollProgressStats.pct}%` }}
+                />
+              </div>
+            )}
           </div>
 
-          <div className="flex flex-col sm:flex-row gap-3 items-stretch sm:items-center justify-between">
-            <select
-              value={enrollClassFilter}
-              onChange={(e) => setEnrollClassFilter(e.target.value)}
-              className="px-3 py-2 rounded-xl bg-dark-900 border border-dark-800 text-xs text-white outline-none focus:border-primary-500"
-            >
-              <option value="All">All Classes</option>
-              {classes.map(c => (
-                <option key={c} value={c}>Class {c}</option>
-              ))}
-            </select>
+          {/* Roster Filter Bar */}
+          <div className="flex flex-col md:flex-row gap-3 items-stretch md:items-center justify-between">
+            <div className="flex flex-wrap items-center gap-2">
+              <select
+                value={enrollClassFilter}
+                onChange={(e) => setEnrollClassFilter(e.target.value)}
+                className="px-3 py-2 rounded-xl bg-dark-900/90 border border-dark-800 hover:border-dark-700 text-xs text-white transition"
+              >
+                <option value="All">All Classes</option>
+                {classes.map(c => (
+                  <option key={c} value={c}>Class {c}</option>
+                ))}
+              </select>
 
-            <div className="relative flex-1 sm:max-w-xs">
-              <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
+              <div className="inline-flex rounded-xl bg-dark-950/70 border border-dark-800 p-0.5 text-[11px] font-semibold">
+                {[
+                  { id: 'all', label: `All (${enrollProgressStats.total})` },
+                  { id: 'unenrolled', label: `Pending (${Math.max(0, enrollProgressStats.total - enrollProgressStats.enrolled)})` },
+                  { id: 'enrolled', label: `Enrolled (${enrollProgressStats.enrolled})` }
+                ].map(opt => (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() => setEnrollStatusFilter(opt.id)}
+                    className={`px-2.5 py-1.5 rounded-lg transition ${
+                      enrollStatusFilter === opt.id
+                        ? 'bg-primary-600 text-white shadow-sm'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="relative flex-1 md:max-w-xs">
+              <Search size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-500" />
               <input
                 type="text"
-                placeholder="Search student to enroll..."
+                placeholder="Search student or roll..."
                 value={enrollSearch}
                 onChange={(e) => setEnrollSearch(e.target.value)}
-                className="w-full pl-9 pr-3 py-2 rounded-xl bg-dark-900 border border-dark-800 text-xs text-white placeholder-slate-500 outline-none focus:border-primary-500"
+                className="w-full pl-9 pr-8 py-2 rounded-xl bg-dark-900/90 border border-dark-800 focus:border-primary-500 text-xs text-white placeholder-slate-500 transition"
               />
+              {enrollSearch && (
+                <button
+                  type="button"
+                  onClick={() => setEnrollSearch('')}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-500 hover:text-white"
+                >
+                  <X size={13} />
+                </button>
+              )}
             </div>
           </div>
 
+          {/* Student Multi-Finger Cards */}
           {loadingEnrollData ? (
-            <div className="py-12 text-center">
-              <div className="animate-spin rounded-full h-7 w-7 border-t-2 border-primary-500 mx-auto"></div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {[1, 2, 3, 4].map(i => (
+                <div key={i} className="p-4 rounded-2xl bg-dark-900/50 border border-dark-800/70 space-y-3 animate-pulse">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-xl bg-dark-800" />
+                    <div className="flex-1 space-y-1.5">
+                      <div className="h-3.5 w-36 rounded bg-dark-800" />
+                      <div className="h-2.5 w-24 rounded bg-dark-800/70" />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="h-9 rounded-xl bg-dark-800/70" />
+                    <div className="h-9 rounded-xl bg-dark-800/50" />
+                  </div>
+                </div>
+              ))}
             </div>
           ) : filteredEnrollStudents.length === 0 ? (
-            <div className="py-10 text-center text-xs text-slate-500">No active students match your filter.</div>
+            <div className="py-12 text-center bg-dark-950/45 rounded-2xl border border-dashed border-dark-800 space-y-1.5">
+              <p className="text-sm font-bold text-slate-300 font-outfit">No matching students</p>
+              <p className="text-xs text-slate-500">Try clearing your search or switching the status filter.</p>
+            </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               {filteredEnrollStudents.map(student => {
-                const tmpl = templateByStudentId.get(String(student._id));
+                const studentTemplates = templatesByStudentId.get(String(student._id)) || [];
+                const primaryTmpl = studentTemplates.find(t => (t.finger_index || 1) === 1) || studentTemplates[0] || null;
+                const backupTmpl = studentTemplates.find(t => t.finger_index === 2) || null;
                 return (
                   <div
                     key={student._id}
-                    className="p-3.5 rounded-xl bg-dark-900/70 border border-dark-800/90 flex items-center justify-between gap-3"
+                    className="p-3.5 sm:p-4 rounded-2xl bg-dark-900/75 hover:bg-dark-900/95 border border-dark-800/90 hover:border-primary-500/30 transition-all space-y-3"
                   >
-                    <div className="min-w-0">
-                      <p className="text-sm font-bold text-white truncate">{student.name}</p>
-                      <div className="flex items-center gap-2 mt-1 flex-wrap">
-                        <span className="text-[10px] font-semibold px-2 py-0.5 rounded bg-dark-950 border border-dark-800 text-slate-300">
-                          Class {student.class_level} &bull; Roll {student.roll_number}
-                        </span>
-                        {tmpl ? (
-                          <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
-                            <CheckCircle2 size={10} />
-                            Enrolled (Slot #{tmpl.slot_id})
-                          </span>
-                        ) : (
-                          <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-dark-950 text-slate-500 border border-dark-800">
-                            <XCircle size={10} />
-                            Not Enrolled
-                          </span>
-                        )}
+                    {/* Student Header */}
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div
+                          className={`w-10 h-10 rounded-xl border flex items-center justify-center font-bold text-xs shrink-0 ${
+                            primaryTmpl
+                              ? 'bg-emerald-500/12 border-emerald-500/30 text-emerald-300'
+                              : 'bg-dark-950 border-dark-800 text-slate-400'
+                          }`}
+                        >
+                          {getInitials(student.name)}
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-sm font-bold text-white truncate">{student.name}</p>
+                          <p className="text-[11px] text-slate-400 mt-0.5">
+                            Class <strong className="text-slate-200">{student.class_level}</strong> &bull; Roll <strong className="font-mono text-slate-200">{student.roll_number}</strong>
+                          </p>
+                        </div>
                       </div>
+
+                      <span
+                        className={`text-[10px] font-bold px-2 py-0.5 rounded-full border shrink-0 ${
+                          primaryTmpl
+                            ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/25'
+                            : 'bg-dark-950 text-slate-500 border-dark-800'
+                        }`}
+                      >
+                        {studentTemplates.length === 2 ? '2 Prints' : primaryTmpl ? '1 Print' : 'Pending'}
+                      </span>
                     </div>
 
-                    <div className="flex items-center gap-2 shrink-0">
-                      <button
-                        type="button"
-                        onClick={() => handleStartEnroll(student)}
-                        className="px-3 py-1.5 rounded-xl bg-primary-600 hover:bg-primary-500 text-white text-xs font-bold transition flex items-center gap-1.5"
-                      >
-                        <Fingerprint size={13} />
-                        <span>{tmpl ? 'Re-Enroll' : 'Enroll'}</span>
-                      </button>
-
-                      {tmpl && (
+                    {/* Clean 2-Slot Finger Controls */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      {/* Slot 1: Primary Finger */}
+                      {primaryTmpl ? (
+                        <div className="flex items-center justify-between gap-1.5 px-2.5 py-2 rounded-xl bg-emerald-500/[0.07] border border-emerald-500/25">
+                          <div className="min-w-0">
+                            <span className="text-[10px] font-bold text-emerald-300 block leading-tight">Primary Finger</span>
+                            <span className="text-[10px] font-mono text-slate-400">Slot #{primaryTmpl.slot_id}</span>
+                          </div>
+                          <div className="flex items-center gap-1 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => handleStartEnroll(student, 1)}
+                              className="p-1.5 rounded-lg bg-dark-900/90 hover:bg-primary-600 text-slate-300 hover:text-white transition"
+                              title="Re-enroll Primary Finger"
+                            >
+                              <RotateCcw size={12} />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveTemplate(student, primaryTmpl)}
+                              className="p-1.5 rounded-lg bg-dark-900/90 hover:bg-rose-600 text-rose-400 hover:text-white transition"
+                              title={`Remove Primary (Slot #${primaryTmpl.slot_id})`}
+                            >
+                              <Trash2 size={12} />
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
                         <button
                           type="button"
-                          onClick={() => handleRemoveTemplate(student)}
-                          className="p-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/20 transition"
-                          title="Remove fingerprint from sensor"
+                          onClick={() => handleStartEnroll(student, 1)}
+                          className="sm:col-span-2 w-full px-3 py-2.5 rounded-xl bg-primary-600 hover:bg-primary-500 active:scale-[0.99] text-white text-xs font-bold transition flex items-center justify-center gap-2 shadow-md shadow-primary-600/20"
                         >
-                          <Trash2 size={14} />
+                          <Fingerprint size={14} />
+                          <span>Enroll Primary Finger</span>
                         </button>
+                      )}
+
+                      {/* Slot 2: Optional Backup Finger */}
+                      {primaryTmpl && (
+                        backupTmpl ? (
+                          <div className="flex items-center justify-between gap-1.5 px-2.5 py-2 rounded-xl bg-cyan-500/[0.07] border border-cyan-500/25">
+                            <div className="min-w-0">
+                              <span className="text-[10px] font-bold text-cyan-300 block leading-tight">Backup Finger</span>
+                              <span className="text-[10px] font-mono text-slate-400">Slot #{backupTmpl.slot_id}</span>
+                            </div>
+                            <div className="flex items-center gap-1 shrink-0">
+                              <button
+                                type="button"
+                                onClick={() => handleStartEnroll(student, 2)}
+                                className="p-1.5 rounded-lg bg-dark-900/90 hover:bg-cyan-600 text-slate-300 hover:text-white transition"
+                                title="Re-enroll Backup Finger"
+                              >
+                                <RotateCcw size={12} />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveTemplate(student, backupTmpl)}
+                                className="p-1.5 rounded-lg bg-dark-900/90 hover:bg-rose-600 text-rose-400 hover:text-white transition"
+                                title={`Remove Backup (Slot #${backupTmpl.slot_id})`}
+                              >
+                                <Trash2 size={12} />
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => handleStartEnroll(student, 2)}
+                            className="px-3 py-2 rounded-xl bg-dark-950/70 hover:bg-cyan-500/15 text-slate-300 hover:text-cyan-200 border border-dashed border-dark-700 hover:border-cyan-500/40 text-xs font-semibold transition flex items-center justify-center gap-1.5"
+                          >
+                            <Plus size={13} />
+                            <span>Add Backup Finger</span>
+                          </button>
+                        )
                       )}
                     </div>
                   </div>
@@ -1030,6 +1744,271 @@ const BiometricGatePanel = () => {
               })}
             </div>
           )}
+        </div>
+      )}
+
+      {/* INTERACTIVE LIVE ENROLLMENT WIZARD MODAL */}
+      {isStaff && showEnrollWizard && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-4 animate-fadeIn">
+          <div className="glass-panel w-full max-w-md rounded-3xl border border-white/10 p-5 sm:p-6 space-y-5 shadow-2xl animate-scaleUp relative overflow-hidden">
+            {/* Ambient Top Modal Glow */}
+            <div
+              className={`pointer-events-none absolute -top-20 left-1/2 -translate-x-1/2 w-64 h-40 rounded-full blur-3xl opacity-25 ${
+                liveCommand?.status === 'COMPLETED'
+                  ? 'bg-emerald-500'
+                  : liveCommand?.status === 'FAILED'
+                    ? 'bg-rose-500'
+                    : 'bg-primary-500'
+              }`}
+            />
+
+            <div className="relative flex items-start justify-between gap-3">
+              <div>
+                <span className="text-[10px] font-bold uppercase tracking-widest text-primary-400 flex items-center gap-1">
+                  <Sparkles size={11} />
+                  Live Biometric Enrollment
+                </span>
+                <h3 className="text-lg sm:text-xl font-extrabold text-white font-outfit mt-0.5">
+                  {enrollWizardStudent?.name || liveCommand?.student_name || 'Student'}
+                </h3>
+                <div className="flex flex-wrap items-center gap-1.5 mt-1.5 text-[10px]">
+                  {enrollWizardStudent?.class_level && (
+                    <span className="px-2 py-0.5 rounded-md bg-dark-950/80 border border-dark-800 text-slate-300 font-semibold">
+                      Class {enrollWizardStudent.class_level} &bull; Roll {enrollWizardStudent.roll_number}
+                    </span>
+                  )}
+                  <span className="px-2 py-0.5 rounded-md bg-primary-500/15 border border-primary-500/30 text-primary-300 font-bold">
+                    {liveCommand?.finger_label || (enrollWizardFingerIndex === 2 ? 'Backup Finger' : 'Primary Finger')}
+                  </span>
+                  {liveCommand?.slot_id && (
+                    <span className="px-2 py-0.5 rounded-md bg-dark-950/80 border border-dark-800 text-slate-400 font-mono">
+                      Slot #{liveCommand.slot_id}
+                    </span>
+                  )}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowEnrollWizard(false)}
+                className="p-1.5 rounded-xl bg-dark-900/90 hover:bg-dark-800 border border-dark-800 text-slate-400 hover:text-white transition"
+                aria-label="Hide enrollment wizard"
+              >
+                <X size={15} />
+              </button>
+            </div>
+
+            {/* Animated Concentric Fingerprint Sonar Ring */}
+            <div className="relative flex flex-col items-center text-center py-3 space-y-4">
+              <div className="relative flex items-center justify-center">
+                {isCommandInFlight && (
+                  <span className="absolute w-24 h-24 rounded-full border border-primary-400/35 animate-ping" style={{ animationDuration: '2s' }} />
+                )}
+                <div
+                  className={`relative w-20 h-20 rounded-full flex items-center justify-center border-2 transition-all duration-300 ${
+                    liveCommand?.status === 'COMPLETED'
+                      ? 'bg-emerald-500/15 border-emerald-400 text-emerald-400 shadow-xl shadow-emerald-500/25'
+                      : liveCommand?.status === 'FAILED'
+                        ? 'bg-rose-500/15 border-rose-400 text-rose-400 shadow-xl shadow-rose-500/25'
+                        : 'bg-primary-500/15 border-primary-400 text-primary-300 shadow-xl shadow-primary-500/25'
+                  }`}
+                >
+                  {liveCommand?.status === 'COMPLETED' ? (
+                    <CheckCircle2 size={38} />
+                  ) : liveCommand?.status === 'FAILED' ? (
+                    <XCircle size={38} />
+                  ) : (
+                    <Fingerprint size={38} className="animate-pulse" />
+                  )}
+                </div>
+              </div>
+
+              <div className="w-full space-y-2">
+                <p className="text-xs sm:text-sm font-semibold text-white leading-relaxed px-2">
+                  {liveCommand?.message || 'Sending enrollment command to ESP32 scanner...'}
+                </p>
+                {liveCommand?.status !== 'FAILED' && (
+                  <div className="w-full h-2 rounded-full bg-dark-950/90 border border-dark-800 overflow-hidden">
+                    <div
+                      className={`h-full rounded-full transition-all duration-500 ${
+                        liveCommand?.status === 'COMPLETED'
+                          ? 'bg-emerald-500'
+                          : 'bg-gradient-to-r from-primary-500 via-indigo-400 to-cyan-400'
+                      }`}
+                      style={{ width: `${enrollStageInfo.pct}%` }}
+                    />
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* 4-Stage Visual Stepper */}
+            <div className="grid grid-cols-4 gap-2 text-center text-[10px]">
+              {[
+                { idx: 1, label: 'ESP32 Ready' },
+                { idx: 2, label: 'Scan 1/2' },
+                { idx: 3, label: 'Scan 2/2' },
+                { idx: 4, label: 'Verified' }
+              ].map(st => {
+                const done = enrollStageInfo.stage >= st.idx;
+                const active = enrollStageInfo.stage >= st.idx - 0.5 && enrollStageInfo.stage < st.idx + 0.5 && liveCommand?.status !== 'COMPLETED';
+                return (
+                  <div
+                    key={st.idx}
+                    className={`p-2 rounded-xl border transition-all ${
+                      liveCommand?.status === 'FAILED'
+                        ? 'bg-dark-950/60 border-dark-800 text-slate-500'
+                        : done
+                          ? 'bg-emerald-500/12 border-emerald-500/35 text-emerald-300 font-bold'
+                          : active
+                            ? 'bg-primary-500/15 border-primary-500/45 text-primary-200 font-bold'
+                            : 'bg-dark-950/60 border-dark-800 text-slate-500'
+                    }`}
+                  >
+                    <span className="block font-mono text-[11px]">{done ? '✓' : st.idx}</span>
+                    <span className="block mt-0.5 leading-tight">{st.label}</span>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Contextual Troubleshooting Card on Failure */}
+            {liveCommand?.status === 'FAILED' && (
+              <div className="p-3.5 rounded-2xl bg-rose-500/10 border border-rose-500/25 text-[11px] text-rose-200 space-y-1">
+                <p className="font-bold text-rose-300">Quick Tip</p>
+                <p className="opacity-90 leading-relaxed">
+                  {liveCommand?.step === 'DUPLICATE' || liveCommand?.duplicate_student_name
+                    ? 'Ask the student to scan their own finger, or remove the existing slot first.'
+                    : 'Place the flat center pad of the finger firmly on the glass, wipe dust, and slightly moisten very dry fingertips.'}
+                </p>
+              </div>
+            )}
+
+            {/* Wizard Action Footer */}
+            <div className="flex flex-wrap items-center justify-end gap-2 pt-3 border-t border-white/[0.06]">
+              {isCommandInFlight && (
+                <button
+                  type="button"
+                  onClick={handleCancelCommand}
+                  className="px-4 py-2 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-rose-300 text-xs font-bold transition"
+                >
+                  Cancel Enrollment
+                </button>
+              )}
+
+              {liveCommand?.status === 'FAILED' && enrollWizardStudent && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => setShowEnrollWizard(false)}
+                    className="px-3.5 py-2 rounded-xl bg-dark-900 hover:bg-dark-800 border border-dark-800 text-slate-300 text-xs font-semibold transition"
+                  >
+                    Close
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleStartEnroll(enrollWizardStudent, enrollWizardFingerIndex)}
+                    className="px-4 py-2 rounded-xl bg-primary-600 hover:bg-primary-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-lg shadow-primary-600/20 transition"
+                  >
+                    <RotateCcw size={13} />
+                    <span>Retry Enrollment</span>
+                  </button>
+                </>
+              )}
+
+              {liveCommand?.status === 'COMPLETED' && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => setShowEnrollWizard(false)}
+                    className="px-3.5 py-2 rounded-xl bg-dark-900 hover:bg-dark-800 border border-dark-800 text-slate-300 text-xs font-semibold transition"
+                  >
+                    Done
+                  </button>
+                  {enrollWizardStudent && enrollWizardFingerIndex === 1 && (
+                    <button
+                      type="button"
+                      onClick={() => handleStartEnroll(enrollWizardStudent, 2)}
+                      className="px-3.5 py-2 rounded-xl bg-cyan-600/20 hover:bg-cyan-600/30 border border-cyan-500/35 text-cyan-200 text-xs font-bold flex items-center gap-1.5 transition"
+                    >
+                      <Plus size={13} />
+                      <span>Add Backup</span>
+                    </button>
+                  )}
+                  {nextUnenrolledStudent && (
+                    <button
+                      type="button"
+                      onClick={() => handleStartEnroll(nextUnenrolledStudent, 1)}
+                      className="px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-lg shadow-emerald-600/20 transition"
+                    >
+                      <span>Next: {nextUnenrolledStudent.name.split(' ')[0]}</span>
+                      <ArrowRight size={13} />
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ADD NEW GATE SCANNER MODAL (SuperAdmin Only) */}
+      {isSuperAdmin && showAddDeviceModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-4 animate-fadeIn">
+          <div className="glass-panel w-full max-w-md rounded-3xl border border-white/10 p-5 sm:p-6 space-y-4 shadow-2xl animate-scaleUp">
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-[10px] font-bold uppercase tracking-widest text-primary-400">Hardware Registry</span>
+                <h3 className="text-base font-bold text-white font-outfit mt-0.5">Register New Gate Scanner</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowAddDeviceModal(false)}
+                className="p-1.5 rounded-xl bg-dark-900 hover:bg-dark-800 border border-dark-800 text-slate-400 hover:text-white transition"
+                aria-label="Close modal"
+              >
+                <X size={15} />
+              </button>
+            </div>
+            <form onSubmit={handleCreateDevice} className="space-y-3.5 text-xs">
+              <div>
+                <label className="block font-semibold text-slate-400 mb-1.5">Device ID</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. GATE-ESP32-02"
+                  value={newDeviceId}
+                  onChange={(e) => setNewDeviceId(e.target.value.toUpperCase())}
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-dark-900 border border-dark-800 focus:border-primary-500 text-white font-mono transition"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-slate-400 mb-1.5">Scanner Name</label>
+                <input
+                  type="text"
+                  placeholder="e.g. Back Gate Scanner"
+                  value={newDeviceName}
+                  onChange={(e) => setNewDeviceName(e.target.value)}
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-dark-900 border border-dark-800 focus:border-primary-500 text-white transition"
+                />
+              </div>
+              <div className="flex justify-end gap-2 pt-2 border-t border-white/[0.06]">
+                <button
+                  type="button"
+                  onClick={() => setShowAddDeviceModal(false)}
+                  className="px-3.5 py-2 rounded-xl bg-dark-900 hover:bg-dark-800 border border-dark-800 text-slate-300 font-semibold transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={creatingDevice}
+                  className="px-4 py-2 rounded-xl bg-primary-600 hover:bg-primary-500 disabled:opacity-50 text-white font-bold shadow-lg shadow-primary-600/20 transition"
+                >
+                  {creatingDevice ? 'Registering...' : 'Register Scanner'}
+                </button>
+              </div>
+            </form>
+          </div>
         </div>
       )}
     </div>

@@ -397,12 +397,18 @@ class MainActivity : AppCompatActivity() {
 
         @JavascriptInterface
         fun registerUser(email: String, classLevel: String, name: String, socketUrl: String) {
+            registerUserWithToken(email, classLevel, name, socketUrl, "")
+        }
+
+        @JavascriptInterface
+        fun registerUserWithToken(email: String, classLevel: String, name: String, socketUrl: String, authToken: String) {
             getSharedPreferences("edustride_prefs", Context.MODE_PRIVATE)
                 .edit()
                 .putString("user_email", email)
                 .putString("user_class", classLevel)
                 .putString("user_name", name)
                 .putString("socket_url", socketUrl)
+                .putString("auth_token", authToken)
                 .apply()
 
             // Start background service as foreground service safely
@@ -426,6 +432,7 @@ class MainActivity : AppCompatActivity() {
                 .putString("user_email", "")
                 .putString("user_class", "")
                 .putString("user_name", "")
+                .putString("auth_token", "")
                 .apply()
 
             // Stop background service

@@ -2,9 +2,13 @@ import mongoose from 'mongoose';
 import crypto from 'crypto';
 
 const pendingCommandSchema = new mongoose.Schema({
+  command_id: {
+    type: String,
+    default: ''
+  },
   action: {
     type: String,
-    enum: ['NONE', 'ENROLL', 'DELETE', 'CLEAR_ALL'],
+    enum: ['NONE', 'ENROLL', 'DELETE', 'CLEAR_ALL', 'SYNC_SLOTS'],
     default: 'NONE'
   },
   slot_id: {
@@ -20,10 +24,31 @@ const pendingCommandSchema = new mongoose.Schema({
     type: String,
     default: ''
   },
+  finger_index: {
+    type: Number,
+    default: 1
+  },
+  finger_label: {
+    type: String,
+    default: 'Primary Finger'
+  },
+  enrolled_by: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null
+  },
   status: {
     type: String,
     enum: ['IDLE', 'PENDING', 'IN_PROGRESS', 'COMPLETED', 'FAILED'],
     default: 'IDLE'
+  },
+  step: {
+    type: String,
+    default: ''
+  },
+  progress: {
+    type: Number,
+    default: 0
   },
   message: {
     type: String,
@@ -81,7 +106,11 @@ const biometricDeviceSchema = new mongoose.Schema({
   },
   pending_command: {
     type: pendingCommandSchema,
-    default: () => ({ action: 'NONE', status: 'IDLE' })
+    default: () => ({ command_id: '', action: 'NONE', status: 'IDLE' })
+  },
+  command_queue: {
+    type: [pendingCommandSchema],
+    default: []
   },
   last_heartbeat: {
     type: Date,

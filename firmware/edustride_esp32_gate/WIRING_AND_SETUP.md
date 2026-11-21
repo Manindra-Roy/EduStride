@@ -63,8 +63,8 @@ All pins below are **safe non-strapping GPIOs** (avoiding flash pins 6–11, boo
   GND ───────────────────────────────────────── Emitter
   ```
 
-### B. 5V Fallback Voltage Divider (ONLY if your seller shipped a 5V-only R307)
-Test the R307S on **`3V3`** first. If Serial Monitor reports `R307S NOT FOUND` and the optical LED never flickers at 3.3V, connect R307 `VCC → VIN (5V)` **ONLY WITH** this resistor divider on `TXD → GPIO 16`:
+### B. 5V TXD Voltage Divider (ONLY if multimeter measures `TXD > 3.6V`)
+Most genuine R307S modules powered at `5.00V` (`VIN`) output native `3.3V TTL` on `TXD`. Measure `TXD` against `GND` once with a multimeter; if a rare 5V-TTL clone reads `>3.6V`, add this resistor divider on `TXD → GPIO 16`:
 ```text
 R307 TXD (5V) ── [ 1kΩ ] ──┬── ESP32 GPIO 16 (RX2, safe ~3.33V)
                            │

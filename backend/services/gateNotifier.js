@@ -92,8 +92,13 @@ export const dispatchGateNotification = async ({ logDoc, student, time12Str, dat
 
   // 3. Instant Parent Email via existing mailService (Brevo in prod / SMTP in dev)
   try {
-    const studentUser = await User.findOne({ studentProfile: student._id });
-    emailTo = studentUser?.email || (student.primary_contact && student.primary_contact.includes('@') ? student.primary_contact : '');
+    const dedicatedParentEmail = student.parent_email && student.parent_email.includes('@')
+      ? student.parent_email.trim()
+      : '';
+    const studentUser = dedicatedParentEmail ? null : await User.findOne({ studentProfile: student._id });
+    emailTo = dedicatedParentEmail
+      || studentUser?.email
+      || (student.primary_contact && student.primary_contact.includes('@') ? student.primary_contact.trim() : '');
 
     if (emailTo) {
       const accentColor = isEntry ? '#10b981' : '#f59e0b';

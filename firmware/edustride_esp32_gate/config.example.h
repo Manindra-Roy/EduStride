@@ -43,11 +43,15 @@
 #define OTA_PORT                 3232
 
 // ============================================================================
-// 5. TIMING & FIRMWARE METADATA
+// 5. TIMING, TLS & FIRMWARE METADATA
 // ============================================================================
-#define FIRMWARE_VERSION         "1.1.0-ota"
-#define HEARTBEAT_INTERVAL_MS    2000
-#define HTTP_TIMEOUT_MS          8000
+#define FIRMWARE_VERSION         "2.3.0-ota"
+#define HEARTBEAT_INTERVAL_MS    5500   // Calm 5.5s interval keeps 3.3V rail quiet for R307S
+#define HTTP_TIMEOUT_MS          12000  // Handles cloud cold-starts cleanly
 #define ENROLL_STEP_TIMEOUT_MS   25000
+
+// Set to true ONLY for local self-signed HTTPS development servers.
+// Production (https://api.edustride.in) uses built-in Root CA verification (ISRG / GTS / DigiCert).
+#define ALLOW_INSECURE_TLS       false
 
 #endif

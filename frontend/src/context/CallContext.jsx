@@ -214,12 +214,17 @@ export const CallProvider = ({ children }) => {
     }
 
     const syncNativeBridge = (roomsList) => {
-      if (window.AndroidNotificationBridge && typeof window.AndroidNotificationBridge.registerUser === 'function') {
+      if (window.AndroidNotificationBridge) {
         try {
           const myName = user.studentProfile?.name || (user.role === 'SuperAdmin' ? 'Admin' : 'Teacher');
           const roomValue = roomsList.length > 0 ? roomsList.join(',') : (user.studentProfile?.class_level || 'All');
           const socketUrl = import.meta.env.VITE_API_URL || window.location.origin;
-          window.AndroidNotificationBridge.registerUser(user.email, roomValue, myName, socketUrl);
+          const authToken = localStorage.getItem('token') || '';
+          if (typeof window.AndroidNotificationBridge.registerUserWithToken === 'function') {
+            window.AndroidNotificationBridge.registerUserWithToken(user.email, roomValue, myName, socketUrl, authToken);
+          } else if (typeof window.AndroidNotificationBridge.registerUser === 'function') {
+            window.AndroidNotificationBridge.registerUser(user.email, roomValue, myName, socketUrl);
+          }
         } catch (err) {
           console.error('Failed to register native user:', err);
         }

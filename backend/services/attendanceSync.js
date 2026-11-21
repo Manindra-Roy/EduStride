@@ -5,6 +5,27 @@ import { getIO } from '../config/socket.js';
 
 const DAYS_OF_WEEK_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
+// Short-TTL in-memory Timetable cache to avoid re-querying MongoDB on every biometric scan
+let cachedTimetableData = null;
+let cachedTimetableExpiresAt = 0;
+const TIMETABLE_CACHE_TTL_MS = 60000;
+
+export const invalidateTimetableCache = () => {
+  cachedTimetableData = null;
+  cachedTimetableExpiresAt = 0;
+};
+
+const getCachedTimetableData = async () => {
+  const now = Date.now();
+  if (cachedTimetableData !== null && now < cachedTimetableExpiresAt) {
+    return cachedTimetableData;
+  }
+  const timetableDoc = await Timetable.findOne().select('data').lean();
+  cachedTimetableData = Array.isArray(timetableDoc?.data) ? timetableDoc.data : [];
+  cachedTimetableExpiresAt = now + TIMETABLE_CACHE_TTL_MS;
+  return cachedTimetableData;
+};
+
 /**
  * Broadcast real-time attendance update event over Socket.IO so ClassGrid,
  * Dashboard (Admin/Teacher/Student), and Gate Scanner update live without refresh.
@@ -84,102 +105,137 @@ export const parseSlotStartMinutes = (timeStr) => {
   return hours * 60 + mins;
 };
 
-/**
- * Recalculate dynamic merit-based roll numbers for a class level.
- */
-export const recalculateRollNumbers = async (class_level) => {
-  try {
-    const students = await Student.find({ class_level });
-    if (students.length === 0) return;
+// Per-class serialization + coalescing for roll number recalculation
+// Prevents concurrent rush-hour biometric scans from colliding on the unique { class_level, roll_number } index.
+const rollRecalcActive = new Map(); // class_level -> Promise
+const rollRecalcDirty = new Set();  // class_level needing one more pass after active finishes
 
-    const studentsWithProgress = students.map(student => {
-      let totalMarksObtained = 0;
-      let totalMarksPossible = 0;
+const runRecalculateRollNumbers = async (class_level) => {
+  const students = await Student.find({ class_level })
+    .select('_id status test_scores attendance_history joining_date name')
+    .lean();
+  if (students.length === 0) return;
 
-      if (student.test_scores && student.test_scores.length > 0) {
-        student.test_scores.forEach(score => {
-          totalMarksObtained += score.marks_obtained;
-          totalMarksPossible += score.total_marks;
-        });
-      }
+  const studentsWithProgress = students.map(student => {
+    let totalMarksObtained = 0;
+    let totalMarksPossible = 0;
 
-      const testScorePercentage = totalMarksPossible > 0
-        ? (totalMarksObtained / totalMarksPossible) * 100
-        : 0;
-
-      let totalClasses = 0;
-      let totalAttended = 0;
-      if (student.attendance_history && student.attendance_history.length > 0) {
-        student.attendance_history.forEach(att => {
-          totalClasses += att.total_classes;
-          totalAttended += att.attended;
-        });
-      }
-      const attendancePercentage = totalClasses > 0
-        ? (totalAttended / totalClasses) * 100
-        : 0;
-
-      let progressScore = 0;
-      if (totalMarksPossible > 0) {
-        progressScore = (testScorePercentage * 0.8) + (attendancePercentage * 0.2);
-      } else if (totalClasses > 0) {
-        progressScore = attendancePercentage;
-      }
-
-      return {
-        _id: student._id,
-        status: student.status || 'Active',
-        progressScore,
-        testScorePercentage,
-        attendancePercentage,
-        joining_date: student.joining_date || new Date(),
-        name: student.name
-      };
-    });
-
-    studentsWithProgress.sort((a, b) => {
-      if (a.status !== b.status) {
-        return a.status === 'Active' ? -1 : 1;
-      }
-      if (b.progressScore !== a.progressScore) {
-        return b.progressScore - a.progressScore;
-      }
-      if (b.testScorePercentage !== a.testScorePercentage) {
-        return b.testScorePercentage - a.testScorePercentage;
-      }
-      if (b.attendancePercentage !== a.attendancePercentage) {
-        return b.attendancePercentage - a.attendancePercentage;
-      }
-      const timeA = a.joining_date ? new Date(a.joining_date).getTime() : 0;
-      const timeB = b.joining_date ? new Date(b.joining_date).getTime() : 0;
-      const validA = isNaN(timeA) ? 0 : timeA;
-      const validB = isNaN(timeB) ? 0 : timeB;
-      if (validA !== validB) {
-        return validA - validB;
-      }
-      return a.name.localeCompare(b.name);
-    });
-
-    for (let i = 0; i < studentsWithProgress.length; i++) {
-      const tempRoll = `TEMP_${Date.now()}_${studentsWithProgress[i]._id}`;
-      await Student.findByIdAndUpdate(studentsWithProgress[i]._id, { roll_number: tempRoll });
+    if (student.test_scores && student.test_scores.length > 0) {
+      student.test_scores.forEach(score => {
+        totalMarksObtained += score.marks_obtained;
+        totalMarksPossible += score.total_marks;
+      });
     }
 
-    for (let i = 0; i < studentsWithProgress.length; i++) {
-      const finalRoll = (i + 1).toString().padStart(2, '0');
-      await Student.findByIdAndUpdate(studentsWithProgress[i]._id, { roll_number: finalRoll });
+    const testScorePercentage = totalMarksPossible > 0
+      ? (totalMarksObtained / totalMarksPossible) * 100
+      : 0;
+
+    let totalClasses = 0;
+    let totalAttended = 0;
+    if (student.attendance_history && student.attendance_history.length > 0) {
+      student.attendance_history.forEach(att => {
+        totalClasses += att.total_classes;
+        totalAttended += att.attended;
+      });
     }
-  } catch (error) {
-    console.error(`Error recalculating roll numbers for class ${class_level}:`, error);
-  }
+    const attendancePercentage = totalClasses > 0
+      ? (totalAttended / totalClasses) * 100
+      : 0;
+
+    let progressScore = 0;
+    if (totalMarksPossible > 0) {
+      progressScore = (testScorePercentage * 0.8) + (attendancePercentage * 0.2);
+    } else if (totalClasses > 0) {
+      progressScore = attendancePercentage;
+    }
+
+    return {
+      _id: student._id,
+      status: student.status || 'Active',
+      progressScore,
+      testScorePercentage,
+      attendancePercentage,
+      joining_date: student.joining_date || new Date(),
+      name: student.name
+    };
+  });
+
+  studentsWithProgress.sort((a, b) => {
+    if (a.status !== b.status) {
+      return a.status === 'Active' ? -1 : 1;
+    }
+    if (b.progressScore !== a.progressScore) {
+      return b.progressScore - a.progressScore;
+    }
+    if (b.testScorePercentage !== a.testScorePercentage) {
+      return b.testScorePercentage - a.testScorePercentage;
+    }
+    if (b.attendancePercentage !== a.attendancePercentage) {
+      return b.attendancePercentage - a.attendancePercentage;
+    }
+    const timeA = a.joining_date ? new Date(a.joining_date).getTime() : 0;
+    const timeB = b.joining_date ? new Date(b.joining_date).getTime() : 0;
+    const validA = isNaN(timeA) ? 0 : timeA;
+    const validB = isNaN(timeB) ? 0 : timeB;
+    if (validA !== validB) {
+      return validA - validB;
+    }
+    return a.name.localeCompare(b.name);
+  });
+
+  const nonce = `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const tempOps = studentsWithProgress.map(s => ({
+    updateOne: {
+      filter: { _id: s._id },
+      update: { $set: { roll_number: `TEMP_${nonce}_${s._id}` } }
+    }
+  }));
+  const finalOps = studentsWithProgress.map((s, idx) => ({
+    updateOne: {
+      filter: { _id: s._id },
+      update: { $set: { roll_number: (idx + 1).toString().padStart(2, '0') } }
+    }
+  }));
+
+  await Student.bulkWrite(tempOps, { ordered: true });
+  await Student.bulkWrite(finalOps, { ordered: true });
 };
 
 /**
- * Recalculate monthly attendance_history for all active students in a class for YYYY-MM.
+ * Recalculate dynamic merit-based roll numbers for a class level (serialized per class).
+ */
+export const recalculateRollNumbers = async (class_level) => {
+  if (!class_level) return;
+  const key = String(class_level).trim().toUpperCase();
+
+  if (rollRecalcActive.has(key)) {
+    rollRecalcDirty.add(key);
+    return rollRecalcActive.get(key);
+  }
+
+  const job = (async () => {
+    try {
+      do {
+        rollRecalcDirty.delete(key);
+        await runRecalculateRollNumbers(class_level);
+      } while (rollRecalcDirty.has(key));
+    } catch (error) {
+      console.error(`Error recalculating roll numbers for class ${class_level}:`, error);
+    } finally {
+      rollRecalcActive.delete(key);
+    }
+  })();
+
+  rollRecalcActive.set(key, job);
+  return job;
+};
+
+/**
+ * Recalculate monthly attendance_history for all active students in a class for YYYY-MM
+ * using lean queries + a single batched Student.bulkWrite (instead of N round-trips).
  */
 export const recalculateMonthlyAttendance = async (class_level, trackingMonth) => {
-  const studentsInClass = await Student.find({ class_level, status: 'Active' });
-
   const startOfMonth = new Date(`${trackingMonth}-01T00:00:00.000Z`);
   const year = parseInt(trackingMonth.split('-')[0], 10);
   const month = parseInt(trackingMonth.split('-')[1], 10);
@@ -188,60 +244,111 @@ export const recalculateMonthlyAttendance = async (class_level, trackingMonth) =
   const nextMonthStr = nextMonthVal < 10 ? `0${nextMonthVal}` : `${nextMonthVal}`;
   const endOfMonth = new Date(`${nextMonthYear}-${nextMonthStr}-01T00:00:00.000Z`);
 
-  const monthlySheets = await Attendance.find({
-    class_level,
-    date: {
-      $gte: startOfMonth,
-      $lt: endOfMonth
+  const [studentsInClass, monthlySheets] = await Promise.all([
+    Student.find({ class_level, status: 'Active' })
+      .select('_id attendance_history.month')
+      .lean(),
+    Attendance.find({
+      class_level,
+      date: {
+        $gte: startOfMonth,
+        $lt: endOfMonth
+      }
+    })
+      .select('records.student records.status')
+      .lean()
+  ]);
+
+  if (studentsInClass.length === 0) return;
+
+  // Tally monthly attendance counts in O(sheets * records) with a Map instead of nested .find()
+  const countsByStudent = new Map();
+  for (const sheet of monthlySheets) {
+    if (!Array.isArray(sheet.records)) continue;
+    for (const rec of sheet.records) {
+      if (!rec.student) continue;
+      const sid = rec.student.toString();
+      let entry = countsByStudent.get(sid);
+      if (!entry) {
+        entry = { total_classes: 0, attended: 0 };
+        countsByStudent.set(sid, entry);
+      }
+      entry.total_classes++;
+      if (rec.status === 'Present' || rec.status === 'Late') {
+        entry.attended++;
+      }
     }
-  });
+  }
 
-  const updatePromises = studentsInClass.map(async (student) => {
-    let total_classes = 0;
-    let attended = 0;
+  const bulkOps = [];
+  for (const student of studentsInClass) {
+    const sid = student._id.toString();
+    const tally = countsByStudent.get(sid) || { total_classes: 0, attended: 0 };
+    const hasMonth = Array.isArray(student.attendance_history)
+      && student.attendance_history.some(h => h.month === trackingMonth);
 
-    monthlySheets.forEach(sheet => {
-      const studentRecord = sheet.records.find(r => r.student.toString() === student._id.toString());
-      if (studentRecord) {
-        total_classes++;
-        if (studentRecord.status === 'Present' || studentRecord.status === 'Late') {
-          attended++;
+    if (hasMonth) {
+      bulkOps.push({
+        updateOne: {
+          filter: { _id: student._id, 'attendance_history.month': trackingMonth },
+          update: {
+            $set: {
+              'attendance_history.$.total_classes': tally.total_classes,
+              'attendance_history.$.attended': tally.attended
+            }
+          }
         }
-      }
-    });
-
-    return Student.findOneAndUpdate(
-      {
-        _id: student._id,
-        'attendance_history.month': trackingMonth
-      },
-      {
-        $set: {
-          'attendance_history.$.total_classes': total_classes,
-          'attendance_history.$.attended': attended
-        }
-      }
-    ).then(async (result) => {
-      if (!result) {
-        return Student.findByIdAndUpdate(
-          student._id,
-          {
+      });
+    } else {
+      bulkOps.push({
+        updateOne: {
+          filter: { _id: student._id },
+          update: {
             $push: {
               attendance_history: {
                 month: trackingMonth,
-                total_classes,
-                attended
+                total_classes: tally.total_classes,
+                attended: tally.attended
               }
             }
           }
-        );
-      }
-      return result;
-    });
-  });
+        }
+      });
+    }
+  }
 
-  await Promise.all(updatePromises);
+  if (bulkOps.length > 0) {
+    await Student.bulkWrite(bulkOps, { ordered: false });
+  }
   await recalculateRollNumbers(class_level);
+};
+
+// Debounced per-(class_level, month) background recalculation so ESP32 gate scans respond in ~100ms
+// and burst arrivals coalesce into a single DB recalculation + Socket.IO broadcast.
+const biometricRecalcTimers = new Map();
+
+const scheduleBiometricPostSync = ({ class_level, trackingMonth, dateStr, session_name, student_id, student_name }) => {
+  const key = `${String(class_level).trim().toUpperCase()}::${trackingMonth}`;
+  if (biometricRecalcTimers.has(key)) {
+    clearTimeout(biometricRecalcTimers.get(key));
+  }
+  const timer = setTimeout(async () => {
+    biometricRecalcTimers.delete(key);
+    try {
+      await recalculateMonthlyAttendance(class_level, trackingMonth);
+      emitAttendanceUpdated({
+        class_level,
+        date: dateStr,
+        session_name,
+        student_id,
+        student_name,
+        source: 'biometric'
+      });
+    } catch (err) {
+      console.error('[Biometric Post-Sync Error]:', err.message);
+    }
+  }, 450);
+  biometricRecalcTimers.set(key, timer);
 };
 
 /**
@@ -257,10 +364,10 @@ export const resolveActiveSessionForClass = async (class_level, dateStr, istMinu
   try {
     const normalizedDate = new Date(`${dateStr}T00:00:00.000Z`);
     const dayOfWeekName = DAYS_OF_WEEK_NAMES[normalizedDate.getUTCDay()];
-    const timetableDoc = await Timetable.findOne();
+    const timetableData = await getCachedTimetableData();
 
-    if (timetableDoc && Array.isArray(timetableDoc.data)) {
-      const dayData = timetableDoc.data.find(d => d.day && d.day.toLowerCase() === dayOfWeekName.toLowerCase());
+    if (timetableData.length > 0) {
+      const dayData = timetableData.find(d => d.day && d.day.toLowerCase() === dayOfWeekName.toLowerCase());
       if (dayData && Array.isArray(dayData.slots)) {
         const classSlots = dayData.slots.filter(
           s => s.grade && s.grade.trim().toUpperCase() === class_level.trim().toUpperCase()
@@ -301,7 +408,8 @@ export const resolveActiveSessionForClass = async (class_level, dateStr, istMinu
 
 /**
  * Automatically mark a scanned student as Present in the existing Attendance collection,
- * preserving all classmates' existing manual statuses and syncing monthly attendance + roll numbers.
+ * preserving all classmates' existing manual statuses and scheduling debounced monthly/roll sync
+ * so the ESP32 scanner receives instant feedback without waiting on class-wide recalculation.
  */
 export const markBiometricAttendancePresent = async (student, dateStr, time12Str, istMinutesNow, sessionOverride = '') => {
   const class_level = student.class_level;
@@ -314,7 +422,7 @@ export const markBiometricAttendancePresent = async (student, dateStr, time12Str
 
   if (!sheet) {
     // First student of this class for this session today: initialize sheet with all active classmates
-    const activeStudents = await Student.find({ class_level, status: 'Active' }).select('_id');
+    const activeStudents = await Student.find({ class_level, status: 'Active' }).select('_id').lean();
     const records = activeStudents.map(s => ({
       student: s._id,
       status: s._id.toString() === student._id.toString() ? 'Present' : 'Absent',
@@ -354,15 +462,13 @@ export const markBiometricAttendancePresent = async (student, dateStr, time12Str
     await sheet.save();
   }
 
-  await recalculateMonthlyAttendance(class_level, trackingMonth);
-
-  emitAttendanceUpdated({
+  scheduleBiometricPostSync({
     class_level,
-    date: dateStr,
+    trackingMonth,
+    dateStr,
     session_name,
     student_id: student._id,
-    student_name: student.name,
-    source: 'biometric'
+    student_name: student.name
   });
 
   return { session_name, marked: true };

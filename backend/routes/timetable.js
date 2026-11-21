@@ -1,6 +1,7 @@
 import express from 'express';
 import Timetable from '../models/Timetable.js';
 import { protect, authorize } from '../middleware/auth.js';
+import { invalidateTimetableCache } from '../services/attendanceSync.js';
 
 const router = express.Router();
 
@@ -84,6 +85,7 @@ router.put('/', protect, authorize('SuperAdmin', 'Teacher'), async (req, res, ne
       await timetable.save();
     }
 
+    invalidateTimetableCache();
     res.json({ success: true, data: timetable.data });
   } catch (error) {
     next(error);
