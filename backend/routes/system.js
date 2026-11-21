@@ -14,9 +14,17 @@ const __dirname = path.dirname(__filename);
 // @route   GET /api/system/download-apk
 // @access  Public
 router.get('/download-apk', (req, res) => {
-  const apkPath = path.resolve(__dirname, '../../android/EduStride.apk');
-  if (fs.existsSync(apkPath)) {
-    res.download(apkPath, 'EduStride.apk');
+  const candidates = [
+    path.resolve(__dirname, '../../android/EduStride.apk'),
+    path.resolve(__dirname, '../../frontend/public/EduStride.apk')
+  ];
+  const apkPath = candidates.find(p => fs.existsSync(p));
+  if (apkPath) {
+    res.setHeader('Content-Type', 'application/vnd.android.package-archive');
+    res.setHeader('Content-Disposition', 'attachment; filename="EduStride.apk"');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.sendFile(apkPath);
   } else {
     res.status(404).json({ success: false, message: 'APK file not found' });
   }

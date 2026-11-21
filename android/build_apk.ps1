@@ -88,10 +88,12 @@ cd C:\Users\manin\Desktop\EduStride\android
 Write-Host "=== Step 5: Locating Compiled APK ===" -ForegroundColor Cyan
 $apkSource = "C:\Users\manin\Desktop\EduStride\android\app\build\outputs\apk\debug\app-debug.apk"
 $apkDest = "C:\Users\manin\Desktop\EduStride\android\EduStride.apk"
+$publicApkDest = "C:\Users\manin\Desktop\EduStride\frontend\public\EduStride.apk"
 
 if (Test-Path $apkSource) {
     Copy-Item -Path $apkSource -Destination $apkDest -Force
-    Write-Host "Success! The compiled APK has been saved to: $apkDest" -ForegroundColor Green
+    Copy-Item -Path $apkSource -Destination $publicApkDest -Force
+    Write-Host "Success! The compiled APK has been saved to: $apkDest and $publicApkDest" -ForegroundColor Green
 } else {
     Write-Error "Build failed: Compiled APK not found."
 }

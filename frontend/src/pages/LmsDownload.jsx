@@ -235,7 +235,7 @@ const LmsDownload = () => {
 
         <div className="relative z-10 flex flex-wrap items-center gap-3">
           <a
-            href="/api/system/download-apk"
+            href="/EduStride.apk"
             download="EduStride.apk"
             className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold text-xs shadow-lg shadow-emerald-600/20 transition active:scale-95 cursor-pointer shrink-0"
             title="Download latest EduStride Android Application"
