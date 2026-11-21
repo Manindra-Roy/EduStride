@@ -14,14 +14,46 @@ const __dirname = path.dirname(__filename);
 // @route   GET /api/system/download-apk
 // @access  Public
 router.get('/download-apk', (req, res) => {
-  const candidates = [
-    path.resolve(__dirname, '../../android/EduStride.apk'),
-    path.resolve(__dirname, '../../frontend/public/EduStride.apk')
+  // Prefer the newest versioned EduStride-v*.apk in frontend/public or android/releases, then fall back to EduStride.apk
+  const searchDirs = [
+    path.resolve(__dirname, '../../frontend/public'),
+    path.resolve(__dirname, '../../android/releases'),
+    path.resolve(__dirname, '../../android')
   ];
-  const apkPath = candidates.find(p => fs.existsSync(p));
+
+  let apkPath = null;
+  let apkFilename = 'EduStride.apk';
+
+  for (const dir of searchDirs) {
+    if (!fs.existsSync(dir)) continue;
+    const versioned = fs.readdirSync(dir)
+      .filter(f => /^EduStride-v\d+\.\d+\.\d+\.apk$/i.test(f))
+      .sort((a, b) => {
+        const va = a.match(/v(\d+)\.(\d+)\.(\d+)/i).slice(1).map(Number);
+        const vb = b.match(/v(\d+)\.(\d+)\.(\d+)/i).slice(1).map(Number);
+        for (let i = 0; i < 3; i++) {
+          if (vb[i] !== va[i]) return vb[i] - va[i];
+        }
+        return 0;
+      });
+    if (versioned.length > 0) {
+      apkFilename = versioned[0];
+      apkPath = path.join(dir, apkFilename);
+      break;
+    }
+  }
+
+  if (!apkPath) {
+    const fallbacks = [
+      path.resolve(__dirname, '../../android/EduStride.apk'),
+      path.resolve(__dirname, '../../frontend/public/EduStride.apk')
+    ];
+    apkPath = fallbacks.find(p => fs.existsSync(p)) || null;
+  }
+
   if (apkPath) {
     res.setHeader('Content-Type', 'application/vnd.android.package-archive');
-    res.setHeader('Content-Disposition', 'attachment; filename="EduStride.apk"');
+    res.setHeader('Content-Disposition', `attachment; filename="${apkFilename}"`);
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Cache-Control', 'no-cache');
     res.sendFile(apkPath);

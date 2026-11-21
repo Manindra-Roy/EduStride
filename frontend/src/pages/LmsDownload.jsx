@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import axios from 'axios';
 import { useAuth } from '../context/AuthContext';
+import { APP_VERSION, APK_FILENAME, APK_DOWNLOAD_URL } from '../config/appVersion';
 import { 
   FileDown, 
   Upload, 
@@ -235,13 +236,13 @@ const LmsDownload = () => {
 
         <div className="relative z-10 flex flex-wrap items-center gap-3">
           <a
-            href="/EduStride.apk"
-            download="EduStride.apk"
+            href={APK_DOWNLOAD_URL}
+            download={APK_FILENAME}
             className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold text-xs shadow-lg shadow-emerald-600/20 transition active:scale-95 cursor-pointer shrink-0"
-            title="Download latest EduStride Android Application"
+            title={`Download latest EduStride Android Application (v${APP_VERSION})`}
           >
             <FileDown size={16} />
-            <span>Download Android App (.APK)</span>
+            <span>Download Android App (v{APP_VERSION})</span>
           </a>
 
           {user.role !== 'Student' && (
