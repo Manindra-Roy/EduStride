@@ -7,10 +7,20 @@ import fs from 'fs';
 import { fileURLToPath } from 'url';
 import User from '../models/User.js';
 import Student from '../models/Student.js';
+import SpecialBatch from '../models/SpecialBatch.js';
 import { protect, authorize } from '../middleware/auth.js';
 import { uploadToCloud, deleteFromCloud } from '../services/cloudStorage.js';
 
 const router = express.Router();
+
+const ALLOWED_ROLES = ['SuperAdmin', 'Teacher', 'Student'];
+const ALLOWED_AVATAR_MIMES = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/jpg',
+  'image/gif',
+  'image/webp'
+]);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -33,10 +43,13 @@ const storage = multer.diskStorage({
 const fileFilter = (req, file, cb) => {
   const allowedExtensions = ['.png', '.jpg', '.jpeg', '.gif', '.webp'];
   const ext = path.extname(file.originalname).toLowerCase();
-  if (allowedExtensions.includes(ext)) {
+  const mime = (file.mimetype || '').toLowerCase();
+  if (allowedExtensions.includes(ext) && ALLOWED_AVATAR_MIMES.has(mime)) {
     cb(null, true);
   } else {
-    cb(new Error('Only image files (.png, .jpg, .jpeg, .gif, .webp) are allowed'), false);
+    const err = new Error('Only image files (.png, .jpg, .jpeg, .gif, .webp) are allowed');
+    err.statusCode = 400;
+    cb(err, false);
   }
 };
 
@@ -46,20 +59,34 @@ const uploadAvatar = multer({
   limits: { fileSize: 10 * 1024 * 1024 } // 10 MB limit for high resolution pictures
 });
 
-// Generate Token
-const generateToken = (id) => {
-  return jwt.sign({ id }, process.env.JWT_SECRET || 'fallback_secret_key_123', {
+// Generate Token with tokenVersion for immediate revocation on password changes
+const generateToken = (id, tokenVersion = 0) => {
+  return jwt.sign({ id, tv: tokenVersion }, process.env.JWT_SECRET, {
     expiresIn: '30d'
   });
 };
 
 // @desc    Register a new user
 // @route   POST /api/auth/register
-// @access  Public
+// @access  Public (initial SuperAdmin) / Authenticated (subsequent users)
 router.post('/register', async (req, res, next) => {
   try {
-    const { email, password, role, class_level, roll_number } = req.body;
+    const { email, password, role, class_level, roll_number } = req.body || {};
 
+    if (typeof email !== 'string' || !email.trim()) {
+      res.status(400);
+      throw new Error('A valid email/login ID is required');
+    }
+    if (typeof password !== 'string' || password.length < 6) {
+      res.status(400);
+      throw new Error('Password must be a string of at least 6 characters');
+    }
+    if (typeof role !== 'string' || !ALLOWED_ROLES.includes(role)) {
+      res.status(400);
+      throw new Error('Invalid user role');
+    }
+
+    const cleanEmail = email.trim().toLowerCase();
     const totalUsers = await User.countDocuments();
 
     if (totalUsers === 0) {
@@ -70,10 +97,9 @@ router.post('/register', async (req, res, next) => {
       }
     } else {
       // Enforce creation permissions
-      // We must authenticate the request
       let token;
-      if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
-        token = req.headers.authorization.split(' ')[1];
+      if (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
+        token = req.headers.authorization.slice(7).trim();
       }
 
       if (!token) {
@@ -83,8 +109,11 @@ router.post('/register', async (req, res, next) => {
 
       let creator;
       try {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET || 'fallback_secret_key_123');
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
         creator = await User.findById(decoded.id);
+        if (creator && (decoded.tv ?? 0) !== (creator.tokenVersion || 0)) {
+          creator = null;
+        }
       } catch (err) {
         res.status(401);
         throw new Error('Not authorized, token failed');
@@ -115,7 +144,7 @@ router.post('/register', async (req, res, next) => {
     }
 
     // Check if user exists
-    const userExists = await User.findOne({ email });
+    const userExists = await User.findOne({ email: cleanEmail });
     if (userExists) {
       res.status(400);
       throw new Error('User already exists');
@@ -125,16 +154,19 @@ router.post('/register', async (req, res, next) => {
 
     // If student, link to existing profile or require it
     if (role === 'Student') {
-      if (!class_level || !roll_number) {
+      if (typeof class_level !== 'string' || !class_level.trim() || typeof roll_number !== 'string' || !roll_number.trim()) {
         res.status(400);
-        throw new Error('Student account registration requires class_level and roll_number');
+        throw new Error('Student account registration requires valid class_level and roll_number');
       }
 
+      const cleanClass = class_level.trim().toUpperCase();
+      const cleanRoll = roll_number.trim();
+
       // Check if student profile exists
-      const student = await Student.findOne({ class_level, roll_number });
+      const student = await Student.findOne({ class_level: cleanClass, roll_number: cleanRoll });
       if (!student) {
         res.status(400);
-        throw new Error(`No student profile found for Class ${class_level} and Roll No ${roll_number}. Please consult your Admin/Teacher.`);
+        throw new Error(`No student profile found for Class ${cleanClass} and Roll No ${cleanRoll}. Please consult your Admin/Teacher.`);
       }
 
       // Check if profile is already claimed
@@ -152,7 +184,7 @@ router.post('/register', async (req, res, next) => {
 
     // Create user
     const user = await User.create({
-      email,
+      email: cleanEmail,
       password: hashedPassword,
       role,
       studentProfile
@@ -162,7 +194,7 @@ router.post('/register', async (req, res, next) => {
 
     res.status(201).json({
       success: true,
-      token: generateToken(user._id),
+      token: generateToken(user._id, user.tokenVersion || 0),
       user: {
         id: populatedUser._id,
         email: populatedUser.email,
@@ -182,9 +214,15 @@ router.post('/register', async (req, res, next) => {
 // @access  Public
 router.post('/login', async (req, res, next) => {
   try {
-    const { email, password } = req.body;
+    const { email, password } = req.body || {};
 
-    const user = await User.findOne({ email }).populate('studentProfile');
+    if (typeof email !== 'string' || typeof password !== 'string' || !email.trim() || !password) {
+      res.status(400);
+      throw new Error('Please provide a valid email and password');
+    }
+
+    const cleanEmail = email.trim().toLowerCase();
+    const user = await User.findOne({ email: cleanEmail }).populate('studentProfile');
     if (!user) {
       res.status(401);
       throw new Error('Invalid email or password');
@@ -198,7 +236,7 @@ router.post('/login', async (req, res, next) => {
 
     res.json({
       success: true,
-      token: generateToken(user._id),
+      token: generateToken(user._id, user.tokenVersion || 0),
       user: {
         id: user._id,
         email: user.email,
@@ -219,6 +257,10 @@ router.post('/login', async (req, res, next) => {
 router.get('/me', protect, async (req, res, next) => {
   try {
     const user = await User.findById(req.user.id).populate('studentProfile');
+    if (!user) {
+      res.status(404);
+      throw new Error('User not found');
+    }
     res.json({
       success: true,
       user: {
@@ -254,6 +296,7 @@ router.get('/init-status', async (req, res, next) => {
 // @route   PUT /api/auth/profile-pic
 // @access  Private
 router.put('/profile-pic', protect, uploadAvatar.single('avatar'), async (req, res, next) => {
+  let uploadedCloudUrl = null;
   try {
     if (!req.file) {
       res.status(400);
@@ -262,19 +305,22 @@ router.put('/profile-pic', protect, uploadAvatar.single('avatar'), async (req, r
 
     const user = await User.findById(req.user.id);
     if (!user) {
+      if (fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
       res.status(404);
       throw new Error('User not found');
     }
 
-    // Delete old profile picture if exists
-    if (user.profile_pic) {
-      await deleteFromCloud(user.profile_pic);
-    }
-
-    // Save new profile picture path
-    const cloudUrl = await uploadToCloud(req.file.path, 'avatars');
-    user.profile_pic = cloudUrl;
+    const oldProfilePic = user.profile_pic;
+    uploadedCloudUrl = await uploadToCloud(req.file.path, 'avatars');
+    user.profile_pic = uploadedCloudUrl;
     await user.save();
+
+    // Only delete old profile picture after DB save succeeds
+    if (oldProfilePic && oldProfilePic !== uploadedCloudUrl) {
+      await deleteFromCloud(oldProfilePic);
+    }
 
     res.json({
       success: true,
@@ -282,6 +328,12 @@ router.put('/profile-pic', protect, uploadAvatar.single('avatar'), async (req, r
       profile_pic: user.profile_pic
     });
   } catch (error) {
+    // Clean up newly uploaded asset if save failed
+    if (uploadedCloudUrl) {
+      await deleteFromCloud(uploadedCloudUrl).catch(() => {});
+    } else if (req.file && fs.existsSync(req.file.path)) {
+      try { fs.unlinkSync(req.file.path); } catch { /* ignore */ }
+    }
     next(error);
   }
 });
@@ -291,7 +343,7 @@ router.put('/profile-pic', protect, uploadAvatar.single('avatar'), async (req, r
 // @access  Private
 router.put('/theme', protect, async (req, res, next) => {
   try {
-    const { theme_color } = req.body;
+    const { theme_color } = req.body || {};
     if (theme_color === undefined) {
       res.status(400);
       throw new Error('Theme color preference is required');
@@ -329,8 +381,8 @@ router.put('/theme', protect, async (req, res, next) => {
 // @access  Private
 router.put('/change-password', protect, async (req, res, next) => {
   try {
-    const { currentPassword, newPassword } = req.body;
-    if (!currentPassword || !newPassword) {
+    const { currentPassword, newPassword } = req.body || {};
+    if (typeof currentPassword !== 'string' || typeof newPassword !== 'string' || !currentPassword || !newPassword) {
       res.status(400);
       throw new Error('Please provide both current and new passwords');
     }
@@ -353,14 +405,16 @@ router.put('/change-password', protect, async (req, res, next) => {
       throw new Error('Current password is incorrect');
     }
 
-    // Hash new password
+    // Hash new password and invalidate all older sessions
     const salt = await bcrypt.genSalt(10);
     user.password = await bcrypt.hash(newPassword, salt);
+    user.tokenVersion = (user.tokenVersion || 0) + 1;
     await user.save();
 
     res.json({
       success: true,
-      message: 'Password changed successfully'
+      message: 'Password changed successfully',
+      token: generateToken(user._id, user.tokenVersion)
     });
   } catch (error) {
     next(error);
@@ -396,6 +450,17 @@ router.delete('/teachers/:id', protect, authorize('SuperAdmin'), async (req, res
       res.status(400);
       throw new Error('User is not a teacher');
     }
+
+    // Prevent deleting a teacher who owns active SpecialBatch records
+    const activeBatchCount = await SpecialBatch.countDocuments({
+      instructor: teacher._id,
+      status: 'Active'
+    });
+    if (activeBatchCount > 0) {
+      res.status(400);
+      throw new Error(`Cannot delete teacher because they are assigned as instructor for ${activeBatchCount} active special batch(es). Please reassign or archive those batches first.`);
+    }
+
     if (teacher.profile_pic) {
       await deleteFromCloud(teacher.profile_pic);
     }
@@ -458,11 +523,13 @@ router.delete('/students/:id', protect, authorize('SuperAdmin', 'Teacher'), asyn
 // @access  Private (SuperAdmin & Teacher)
 router.put('/students/:id/email', protect, authorize('SuperAdmin', 'Teacher'), async (req, res, next) => {
   try {
-    const { email } = req.body;
-    if (!email) {
+    const { email } = req.body || {};
+    if (typeof email !== 'string' || !email.trim()) {
       res.status(400);
-      throw new Error('Email/Login ID is required');
+      throw new Error('Valid Email/Login ID is required');
     }
+
+    const cleanEmail = email.trim().toLowerCase();
 
     const studentUser = await User.findById(req.params.id);
     if (!studentUser) {
@@ -475,13 +542,13 @@ router.put('/students/:id/email', protect, authorize('SuperAdmin', 'Teacher'), a
     }
 
     // Check if email is already taken
-    const existingUser = await User.findOne({ email });
+    const existingUser = await User.findOne({ email: cleanEmail });
     if (existingUser && existingUser._id.toString() !== req.params.id) {
       res.status(400);
       throw new Error('Email is already in use by another user');
     }
 
-    studentUser.email = email;
+    studentUser.email = cleanEmail;
     await studentUser.save();
 
     res.json({
@@ -502,9 +569,9 @@ router.put('/students/:id/email', protect, authorize('SuperAdmin', 'Teacher'), a
 // @access  Private (SuperAdmin & Teacher)
 const handleAdminResetPassword = async (req, res, next) => {
   try {
-    const { newPassword } = req.body;
+    const { newPassword } = req.body || {};
 
-    if (!newPassword || newPassword.trim().length < 6) {
+    if (typeof newPassword !== 'string' || newPassword.trim().length < 6) {
       res.status(400);
       throw new Error('New password must be at least 6 characters long');
     }
@@ -525,9 +592,10 @@ const handleAdminResetPassword = async (req, res, next) => {
       }
     }
 
-    // Hash the new password
+    // Hash the new password and immediately invalidate existing tokens
     const salt = await bcrypt.genSalt(10);
     targetUser.password = await bcrypt.hash(newPassword.trim(), salt);
+    targetUser.tokenVersion = (targetUser.tokenVersion || 0) + 1;
     await targetUser.save();
 
     res.json({
@@ -543,4 +611,3 @@ router.put('/users/:id/reset-password', protect, authorize('SuperAdmin', 'Teache
 router.put('/reset-password/:id', protect, authorize('SuperAdmin', 'Teacher'), handleAdminResetPassword);
 
 export default router;
-

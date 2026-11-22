@@ -30,6 +30,10 @@ const userSchema = new mongoose.Schema({
     type: String,
     enum: ['indigo', 'emerald', 'amber', 'rose', 'violet', 'cyan', null],
     default: null
+  },
+  tokenVersion: {
+    type: Number,
+    default: 0
   }
 }, {
   timestamps: true

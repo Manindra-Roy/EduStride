@@ -3,12 +3,14 @@
   Terminal compiler & flasher for EduStride ESP32 Biometric Gate (USB-C and Wireless Wi-Fi OTA)
 
 .EXAMPLES
-  .\flash.ps1 -Setup                              # Install portable arduino-cli, ESP32 core, and libraries
-  .\flash.ps1 -Build                              # Compile sketch and verify zero errors
-  .\flash.ps1 -UsbPort COM3                       # Compile + Flash via USB-C (first-time bootstrap)
-  .\flash.ps1 -OtaIp 192.168.1.45                 # Compile + Flash WIRELESSLY over Wi-Fi OTA!
-  .\flash.ps1 -OtaIp edustride-gate.local         # Compile + Flash over Wi-Fi using mDNS hostname!
-  .\flash.ps1 -Monitor COM3                       # Open live 115200 baud Serial Monitor
+  .\flash.ps1 -Setup                                      # Configure ESP32 core and required libraries
+  .\flash.ps1 -Build                                      # Compile sketch and verify zero errors
+  .\flash.ps1 -Build -PartitionScheme min_spiffs          # Compile with larger 1.9MB OTA app partitions
+  .\flash.ps1 -UsbPort COM3                               # Compile + Flash via USB-C (first-time bootstrap)
+  .\flash.ps1 -UsbPort COM3 -PartitionScheme min_spiffs   # Bootstrap with larger OTA partition layout
+  .\flash.ps1 -OtaIp 192.168.1.45                         # Compile + Flash WIRELESSLY over Wi-Fi OTA!
+  .\flash.ps1 -OtaIp edustride-gate.local                 # Compile + Flash over Wi-Fi using mDNS hostname!
+  .\flash.ps1 -Monitor COM3                               # Open live 115200 baud Serial Monitor
 #>
 param(
   [switch]$Setup,
@@ -16,18 +18,18 @@ param(
   [string]$UsbPort = "",
   [string]$OtaIp = "",
   [string]$OtaPassword = "",
-  [string]$Monitor = ""
+  [string]$Monitor = "",
+  [string]$PartitionScheme = ""
 )
 
 $ErrorActionPreference = "Stop"
 
 $SketchDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$FirmwareRoot = Split-Path -Parent $SketchDir
-$ToolsDir = Join-Path $FirmwareRoot ".tools"
-$CliDir = Join-Path $ToolsDir "arduino-cli"
-$CliExe = Join-Path $CliDir "arduino-cli.exe"
 $BuildDir = Join-Path $SketchDir "build"
 $Fqbn = "esp32:esp32:esp32"
+if ($PartitionScheme) {
+  $Fqbn = "${Fqbn}:PartitionScheme=${PartitionScheme}"
+}
 
 function Ensure-ArduinoCli {
   $globalCli = Get-Command "arduino-cli" -ErrorAction SilentlyContinue
@@ -51,7 +53,16 @@ function Ensure-ArduinoCli {
 
 function Run-Setup($cli) {
   Write-Host "=== Configuring ESP32 Board Manager & Installing Libraries ===" -ForegroundColor Cyan
-  & $cli config init --overwrite 2>$null | Out-Null
+  $hasConfig = $false
+  try {
+    & $cli config dump 2>$null | Out-Null
+    if ($LASTEXITCODE -eq 0) { $hasConfig = $true }
+  } catch {
+    $hasConfig = $false
+  }
+  if (-not $hasConfig) {
+    & $cli config init 2>$null | Out-Null
+  }
   & $cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
   & $cli core update-index
 
@@ -76,23 +87,64 @@ function Run-Setup($cli) {
   Write-Host "=== Toolchain Setup Complete! ===" -ForegroundColor Green
 }
 
-function Read-ConfigDefine($name) {
+function Ensure-ConfigExists {
   $cfgPath = Join-Path $SketchDir "config.h"
+  if (-not (Test-Path $cfgPath)) {
+    throw "Missing config.h at $cfgPath. Run 'Copy-Item config.example.h config.h' inside $SketchDir and fill in your Wi-Fi, API key, and OTA password."
+  }
+  return $cfgPath
+}
+
+function Read-ConfigDefine($name) {
+  $cfgPath = Ensure-ConfigExists
   $content = Get-Content $cfgPath -Raw
-  if ($content -match "#define\s+$name\s+`"([^`"]*)`"") {
+  if ($content -match "(?m)^\s*#define\s+$name\s+`"([^`"]*)`"") {
     return $Matches[1]
   }
-  if ($content -match "#define\s+$name\s+(\d+)") {
+  if ($content -match "(?m)^\s*#define\s+$name\s+(\d+)") {
     return $Matches[1]
   }
   return ""
 }
 
+function Validate-ConfigCredentials {
+  $ssid = Read-ConfigDefine "WIFI_SSID"
+  $apiKey = Read-ConfigDefine "DEVICE_API_KEY"
+  $otaPass = Read-ConfigDefine "OTA_PASSWORD"
+
+  if (-not $ssid -or $ssid -eq "YOUR_2.4GHZ_WIFI_NAME") {
+    Write-Warning "WIFI_SSID in config.h is still a placeholder! Update config.h so Wi-Fi & OTA can connect."
+  }
+  if (-not $apiKey -or $apiKey -match "^(PASTE_API_KEY|CHANGE_ME)") {
+    Write-Warning "DEVICE_API_KEY in config.h is still a placeholder! Copy the key from EduStride App -> Gate Scanner -> ESP32 Setup Credentials."
+  }
+  if (-not $otaPass -or $otaPass -match "^CHANGE_ME") {
+    Write-Warning "OTA_PASSWORD in config.h is empty or still a placeholder! Set a strong unique password before deploying."
+  } elseif ($otaPass -eq "edustride-ota-2026") {
+    Write-Warning "OTA_PASSWORD in config.h is still the legacy default ('edustride-ota-2026'). Rotate it to a strong unique password before production use."
+  }
+}
+
 function Run-Compile($cli) {
+  Ensure-ConfigExists | Out-Null
+  Validate-ConfigCredentials
+
   Write-Host "=== Compiling EduStride ESP32 Firmware ($Fqbn) ===" -ForegroundColor Cyan
   New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
   & $cli compile --fqbn $Fqbn --output-dir $BuildDir $SketchDir
   if ($LASTEXITCODE -ne 0) { throw "Compilation failed!" }
+
+  $binPath = Join-Path $BuildDir "edustride_esp32_gate.ino.bin"
+  if (Test-Path $binPath) {
+    $binSize = (Get-Item $binPath).Length
+    $maxAppBytes = if ($PartitionScheme -eq "min_spiffs") { 1966080 } else { 1310720 }
+    $pct = [math]::Round(($binSize * 100.0) / $maxAppBytes, 1)
+    Write-Host ("Compiled binary size: {0:N0} bytes ({1}% of {2:N0}-byte OTA partition)" -f $binSize, $pct, $maxAppBytes) -ForegroundColor Cyan
+    if ($pct -ge 90.0 -and $PartitionScheme -ne "min_spiffs") {
+      Write-Warning "Binary uses $pct% of the default 1.25 MB OTA partition! Consider flashing once via USB-C with '-PartitionScheme min_spiffs' (1.875 MB per OTA slot) for extra headroom."
+    }
+  }
+
   Write-Host "Compilation succeeded! Binary saved to $BuildDir" -ForegroundColor Green
 }
 
@@ -118,10 +170,6 @@ if ($Build -or $UsbPort -or $OtaIp) {
 }
 
 if ($UsbPort) {
-  $ssid = Read-ConfigDefine "WIFI_SSID"
-  if ($ssid -eq "YOUR_2.4GHZ_WIFI_NAME") {
-    Write-Warning "WIFI_SSID in config.h is still a placeholder! Update config.h so Wi-Fi & OTA can connect."
-  }
   Write-Host "=== Flashing ESP32 via USB-C on $UsbPort ===" -ForegroundColor Cyan
   Write-Host "(SAFETY: Make sure 12V external buck converter is UNPLUGGED while USB-C is connected!)" -ForegroundColor Yellow
   & $cli upload -p $UsbPort --fqbn $Fqbn --input-dir $BuildDir $SketchDir
@@ -139,8 +187,13 @@ if ($OtaIp) {
 
   Write-Host "=== Flashing ESP32 WIRELESSLY over Wi-Fi OTA -> ${OtaIp}:${otaPort} ===" -ForegroundColor Cyan
 
-  # Prefer native espota.exe shipped inside the installed esp32 Arduino core (no Python required)
-  $espotaExe = Get-ChildItem -Path "$env:LOCALAPPDATA\Arduino15\packages\esp32" -Recurse -Filter "espota.exe" -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
+  # Prefer native espota.exe shipped inside the newest installed esp32 Arduino core (no Python required)
+  $espotaExe = Get-ChildItem -Path "$env:LOCALAPPDATA\Arduino15\packages\esp32" -Recurse -Filter "espota.exe" -ErrorAction SilentlyContinue |
+    Sort-Object {
+      if ($_.FullName -match '\\(\d+\.\d+\.\d+)\\') { [version]$Matches[1] } else { [version]"0.0.0" }
+    } -Descending |
+    Select-Object -First 1 -ExpandProperty FullName
+
   if ($espotaExe) {
     $otaArgs = @("-i", $OtaIp, "-p", $otaPort, "-f", $binPath, "-r")
     if ($pass) { $otaArgs += @("--auth=$pass") }
@@ -159,9 +212,10 @@ if ($OtaIp) {
 
 if (-not $Setup -and -not $Build -and -not $UsbPort -and -not $OtaIp -and -not $Monitor) {
   Write-Host "Usage:" -ForegroundColor Cyan
-  Write-Host "  .\flash.ps1 -Setup                  # Install arduino-cli, ESP32 core & libraries"
-  Write-Host "  .\flash.ps1 -Build                  # Compile firmware"
-  Write-Host "  .\flash.ps1 -UsbPort COM3           # Initial flash over USB-C"
-  Write-Host "  .\flash.ps1 -OtaIp 192.168.1.45     # Wireless flash over Wi-Fi OTA"
-  Write-Host "  .\flash.ps1 -Monitor COM3           # Live serial monitor (115200 baud)"
+  Write-Host "  .\flash.ps1 -Setup                                    # Configure ESP32 core & libraries"
+  Write-Host "  .\flash.ps1 -Build                                    # Compile firmware"
+  Write-Host "  .\flash.ps1 -Build -PartitionScheme min_spiffs        # Compile with 1.9MB OTA partitions"
+  Write-Host "  .\flash.ps1 -UsbPort COM3                             # Initial flash over USB-C"
+  Write-Host "  .\flash.ps1 -OtaIp 192.168.1.45                       # Wireless flash over Wi-Fi OTA"
+  Write-Host "  .\flash.ps1 -Monitor COM3                             # Live serial monitor (115200 baud)"
 }

@@ -1,5 +1,5 @@
 /*
- * EduStride Biometric Attendance & Gate Entry/Exit Scanner (Clean Remake v2.0)
+ * EduStride Biometric Attendance & Gate Entry/Exit Scanner (v2.4)
  *
  * Hardware:
  *   - ESP32-CP2102-TypeC-38Pins
@@ -7,13 +7,13 @@
  *   - R307S Optical Fingerprint Sensor (5V->VIN, GND->GND, TXD->GPIO16, RXD->GPIO17, optional TOUCH->GPIO4 & 3.3VT->3V3)
  *   - Buzzer (GPIO 25)
  *
- * Design Principles (Clean Remake):
+ * Design Principles:
  *   1. Exact proven Adafruit R307S capture flow (getImage -> image2Tz -> fingerFastSearch).
  *   2. NEVER sends LEDcontrol(false) on idle or OTA (prevents R307S optical LED latching OFF across reboots!).
  *   3. Pure 6-Wire Touch Wake on GPIO 4 (LED stays 100% dark & cool while idle, flashes only on finger touch!).
  *   4. Zero Wi-Fi / R307S overlap: Core 0 heartbeat (5.5s) never collides with optical capture.
  *   5. Cute Vector/EMO OLED desk-robot eyes with dirty-only rendering & balanced contrast for clean 3.3V power.
- *   6. Built-in Wireless Wi-Fi OTA (ArduinoOTA).
+ *   6. Built-in Wireless Wi-Fi OTA (ArduinoOTA) & strict Root CA TLS verification.
  */
 
 #include <WiFi.h>
@@ -30,11 +30,17 @@
 #include <ArduinoJson.h>
 #include "config.h"
 
+#ifndef FIRMWARE_VERSION
+#define FIRMWARE_VERSION "2.4.0-ota"
+#endif
 #ifndef FP_TOUCH_PIN
 #define FP_TOUCH_PIN 4
 #endif
 #ifndef FP_USE_TOUCH_PIN
 #define FP_USE_TOUCH_PIN true
+#endif
+#ifndef BUZZER_ACTIVE_LOW
+#define BUZZER_ACTIVE_LOW false
 #endif
 #ifndef HEARTBEAT_INTERVAL_MS
 #define HEARTBEAT_INTERVAL_MS 5500
@@ -51,7 +57,7 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 HardwareSerial fpSerial(2); // ESP32 Hardware UART2 (RX=16, TX=17)
 Adafruit_Fingerprint finger = Adafruit_Fingerprint(&fpSerial);
 
-// Persistent network clients (reset cleanly on Wi-Fi disconnect/errors)
+// Persistent network clients (strictly accessed under netMutex; reset cleanly on Wi-Fi disconnect/errors)
 WiFiClient sharedPlainClient;
 WiFiClientSecure sharedSecureClient;
 bool tlsConfigured = false;
@@ -72,12 +78,18 @@ volatile bool commandInProgress = false;
 volatile bool wifiBusy = false;
 volatile int cachedTemplateCount = 0;
 
+bool oledReady = false;
 bool sensorReady = false;
 bool otaInitialized = false;
-bool ntpSynced = false;
+volatile bool ntpSynced = false;
+volatile bool ntpRequestPending = false;
+unsigned long lastNtpRequestMs = 0;
+bool ntpEverRequested = false;
 int touchIdleLevel = HIGH;
 
-String lastServerTime = "--:--";
+// Fixed char buffer protected by stateMutex (zero cross-core String heap races!)
+char lastServerTime[16] = "--:--";
+bool messageHolding = false;
 unsigned long messageHoldUntilMs = 0;
 unsigned long lastWifiCheckMs = 0;
 unsigned long lastSensorRetryMs = 0;
@@ -92,11 +104,17 @@ String queuedCmdAction = "NONE";
 int queuedCmdSlot = 0;
 String queuedCmdStudent = "";
 
-// Offline scan ring buffer (preserves scans during brief Wi-Fi drops or cloud cold-starts)
+// Monotonic scan sequence + random boot nonce for backend scan_id idempotency
+uint32_t bootNonce = 0;
+uint32_t nextScanSeq = 0;
+
+// Offline scan ring buffer (preserves scans during brief Wi-Fi drops, 5xx errors, or cloud cold-starts)
 struct OfflineScanItem {
+  uint32_t seq;
   int slotId;
   int confidence;
   time_t scannedAt; // UTC epoch seconds (0 if NTP not yet synced)
+  char scanId[40];
 };
 const int OFFLINE_QUEUE_CAPACITY = 32;
 OfflineScanItem offlineQueue[OFFLINE_QUEUE_CAPACITY];
@@ -104,7 +122,7 @@ int offlineQueueHead = 0;
 int offlineQueueCount = 0;
 
 // ============================================================================
-// VECTOR / EMO DESK-ROBOT EYE ENGINE v2.2 (30 FPS, Squash-Stretch, Dirty-Only)
+// VECTOR / EMO DESK-ROBOT EYE ENGINE v2.4 (30 FPS, Squash-Stretch, Dirty-Only)
 // ============================================================================
 enum FaceMood {
   FACE_IDLE,
@@ -127,6 +145,21 @@ enum EnrollIconType {
   ENROLL_ICON_WARN
 };
 
+// Wrap-safe millis() deadline helpers (immune to 49.7-day uint32 rollover)
+inline bool deadlineReached(unsigned long now, unsigned long deadline) {
+  return (long)(now - deadline) >= 0;
+}
+
+inline void setMessageHold(unsigned long durationMs) {
+  messageHoldUntilMs = millis() + durationMs;
+  messageHolding = true;
+}
+
+inline void clearMessageHold() {
+  messageHolding = false;
+  messageHoldUntilMs = 0;
+}
+
 float eyeCurX = 0.0f, eyeTargetX = 0.0f;
 float eyeCurY = 0.0f, eyeTargetY = 0.0f;
 float eyeLeftH = 30.0f, eyeTargetLeftH = 30.0f;
@@ -140,12 +173,14 @@ bool lastDrawnHappy = false;
 bool lastDrawnCurious = false;
 int lastDrawnRssiBars = -1;
 int lastDrawnOfflineCnt = -1;
-String lastDrawnTimeStr = "";
+char lastDrawnTimeStr[16] = "";
 
 unsigned long lastFrameMs = 0;
 unsigned long nextBlinkMs = 0;
 unsigned long nextBehaviorMs = 0;
+bool idleHappyActive = false;
 unsigned long idleHappyUntilMs = 0;
+bool idleCuriousActive = false;
 unsigned long idleCuriousUntilMs = 0;
 uint8_t blinkPhase = 0; // 0=open, 1=closing, 2=overshoot-open, 3=settle
 uint8_t pendingDoubleBlink = 0;
@@ -157,11 +192,11 @@ String activeEventCaption = "";
 volatile bool enrollCancelRequested = false;
 
 // ============================================================================
-// BUZZER HELPERS
+// BUZZER HELPERS (Supports active-HIGH, active-LOW 3-pin modules, and passive)
 // ============================================================================
 void buzzerOn(int freqHz = 2200) {
 #if BUZZER_IS_ACTIVE
-  digitalWrite(BUZZER_PIN, HIGH);
+  digitalWrite(BUZZER_PIN, BUZZER_ACTIVE_LOW ? LOW : HIGH);
 #else
   tone(BUZZER_PIN, freqHz);
 #endif
@@ -169,7 +204,7 @@ void buzzerOn(int freqHz = 2200) {
 
 void buzzerOff() {
 #if BUZZER_IS_ACTIVE
-  digitalWrite(BUZZER_PIN, LOW);
+  digitalWrite(BUZZER_PIN, BUZZER_ACTIVE_LOW ? HIGH : LOW);
 #else
   noTone(BUZZER_PIN);
 #endif
@@ -209,17 +244,48 @@ int getWifiSignalBars() {
   return cachedWifiBars;
 }
 
+void getStatusStripSnapshot(int& qCountOut, char* timeOut, size_t timeSize) {
+  qCountOut = 0;
+  if (timeSize > 0) {
+    strncpy(timeOut, "--:--", timeSize - 1);
+    timeOut[timeSize - 1] = '\0';
+  }
+  if (stateMutex && xSemaphoreTake(stateMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+    qCountOut = offlineQueueCount;
+    if (timeSize > 0) {
+      strncpy(timeOut, lastServerTime, timeSize - 1);
+      timeOut[timeSize - 1] = '\0';
+    }
+    xSemaphoreGive(stateMutex);
+  }
+}
+
+int getOfflineQueueCountSnapshot() {
+  int count = 0;
+  if (stateMutex && xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+    count = offlineQueueCount;
+    xSemaphoreGive(stateMutex);
+  }
+  return count;
+}
+
 void drawTopStatusStrip(unsigned long now) {
+  if (!oledReady) return;
+  int qCount = 0;
+  char timeBuf[16];
+  getStatusStripSnapshot(qCount, timeBuf, sizeof(timeBuf));
+
   // Top-left: Offline queue badge (if scans buffered) or subtle IST clock
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
-  if (offlineQueueCount > 0) {
+  if (qCount > 0) {
     display.setCursor(1, 0);
     display.print("Q:");
-    display.print(offlineQueueCount);
-  } else if (lastServerTime.length() > 0 && lastServerTime != "--:--") {
+    display.print(qCount);
+  } else if (timeBuf[0] != '\0' && strcmp(timeBuf, "--:--") != 0) {
+    timeBuf[8] = '\0';
     display.setCursor(1, 0);
-    display.print(lastServerTime.substring(0, 8));
+    display.print(timeBuf);
   }
 
   // Top-right: 3-bar Wi-Fi signal strength meter
@@ -263,6 +329,7 @@ void drawCenteredFooter(const String& footerText) {
 }
 
 void renderRoboEyes(FaceMood mood, const String& caption, unsigned long now) {
+  if (!oledReady) return;
   display.clearDisplay();
   drawTopStatusStrip(now);
 
@@ -314,11 +381,11 @@ void renderRoboEyes(FaceMood mood, const String& caption, unsigned long now) {
     case FACE_IDLE:
       display.fillRoundRect(lX, lY, lW, lH, lRad, SSD1306_WHITE);
       display.fillRoundRect(rX, rY, rW, rH, rRad, SSD1306_WHITE);
-      if (idleHappyUntilMs > now && blinkPhase == 0 && lH > 18) {
+      if (idleHappyActive && !deadlineReached(now, idleHappyUntilMs) && blinkPhase == 0 && lH > 18) {
         // Gentle smiling lower eyelid arc
         display.fillRoundRect(lX - 2, lCy + 3, lW + 4, lH, 10, SSD1306_BLACK);
         display.fillRoundRect(rX - 2, rCy + 3, rW + 4, rH, 10, SSD1306_BLACK);
-      } else if (idleCuriousUntilMs > now && blinkPhase == 0 && lH > 18) {
+      } else if (idleCuriousActive && !deadlineReached(now, idleCuriousUntilMs) && blinkPhase == 0 && lH > 18) {
         // Playful quizzical raised eyebrow on left eye
         display.fillTriangle(rX - 1, rY - 1, rX + rW + 1, rY - 1, rX + rW + 1, rY + 8, SSD1306_BLACK);
       }
@@ -442,7 +509,7 @@ void drawCuteFace(FaceMood mood, const String& caption) {
 }
 
 void playBootAnimation() {
-  if (!sensorReady) return;
+  if (!oledReady || !sensorReady) return;
   // Wake-up sequence: closed slits -> flutter open -> glance L/R -> cheerful sparkle!
   const int steps[] = {3, 8, 18, 33, 29, 30};
   for (int i = 0; i < 6; i++) {
@@ -460,6 +527,7 @@ void playBootAnimation() {
 
 // Graphical enrollment screen with animated fingerprint/arrow icon & live countdown bar
 void drawEnrollScreen(const String& header, const String& studentName, const String& prompt1, const String& prompt2, int progressPct, EnrollIconType iconType) {
+  if (!oledReady) return;
   lastDrawnX = 999;
   unsigned long now = millis();
   display.clearDisplay();
@@ -524,6 +592,7 @@ void drawEnrollScreen(const String& header, const String& studentName, const Str
 }
 
 void showOledStatus(const String& header, const String& line1, const String& line2 = "", const String& line3 = "") {
+  if (!oledReady) return;
   lastDrawnX = 999;
   display.clearDisplay();
   display.fillRect(0, 0, SCREEN_WIDTH, 14, SSD1306_WHITE);
@@ -543,12 +612,13 @@ void showOledStatus(const String& header, const String& line1, const String& lin
 void showIdleScreen() {
   activeEventCaption = "";
   lastDrawnX = 999;
+  if (!oledReady) return;
   if (!sensorReady) {
     showOledStatus("R307S NOT FOUND", "Check sensor wires", "5V->VIN  GND->GND", "TXD->16  RXD->17");
     return;
   }
   if (WiFi.status() != WL_CONNECTED) {
-    renderRoboEyes(FACE_FOCUSED, "Wi-Fi Reconnecting...", millis());
+    renderRoboEyes(FACE_FOCUSED, "Offline Mode (Wi-Fi)", millis());
     return;
   }
   if (!sensingEnabled) {
@@ -559,9 +629,9 @@ void showIdleScreen() {
 }
 
 void animateIdleFace(unsigned long now) {
-  if (otaInProgress || !sensorReady) return;
+  if (!oledReady || otaInProgress || !sensorReady) return;
 
-  if (messageHoldUntilMs > 0) {
+  if (messageHolding) {
     if (now - lastFrameMs >= 70) {
       lastFrameMs = now;
       renderRoboEyes(activeEventMood, activeEventCaption, now);
@@ -569,7 +639,13 @@ void animateIdleFace(unsigned long now) {
     return;
   }
 
-  if (WiFi.status() != WL_CONNECTED) return;
+  if (WiFi.status() != WL_CONNECTED) {
+    if (now - lastFrameMs >= 500) {
+      lastFrameMs = now;
+      renderRoboEyes(FACE_FOCUSED, "Offline Mode (Wi-Fi)", now);
+    }
+    return;
+  }
 
   if (!sensingEnabled) {
     if (now - lastSleepZMs >= 550) {
@@ -584,8 +660,12 @@ void animateIdleFace(unsigned long now) {
   if (now - lastFrameMs < 33) return;
   lastFrameMs = now;
 
+  // Expire mood overlays using rollover-safe signed subtraction
+  if (idleHappyActive && deadlineReached(now, idleHappyUntilMs)) idleHappyActive = false;
+  if (idleCuriousActive && deadlineReached(now, idleCuriousUntilMs)) idleCuriousActive = false;
+
   // Organic squash-and-stretch blinks with spring overshoot
-  if (blinkPhase == 0 && now >= nextBlinkMs) {
+  if (blinkPhase == 0 && deadlineReached(now, nextBlinkMs)) {
     blinkPhase = 1;
     eyeTargetLeftH = 3.0f; eyeTargetRightH = 3.0f;
     eyeTargetLeftW = 36.0f; eyeTargetRightW = 36.0f;
@@ -612,7 +692,7 @@ void animateIdleFace(unsigned long now) {
   }
 
   // Expressive idle personality behaviors
-  if (blinkPhase == 0 && now >= nextBehaviorMs) {
+  if (blinkPhase == 0 && deadlineReached(now, nextBehaviorMs)) {
     nextBehaviorMs = now + 2600 + (now % 3200);
     eyeTargetLeftW = 30.0f; eyeTargetRightW = 30.0f;
     eyeTargetLeftH = 30.0f; eyeTargetRightH = 30.0f;
@@ -625,8 +705,8 @@ void animateIdleFace(unsigned long now) {
       case 6:         eyeTargetX = 0.0f;   eyeTargetY = 5.0f;  break;
       case 7:         eyeTargetX = -5.0f;  eyeTargetY = -2.0f; eyeTargetLeftH = 35.0f; eyeTargetRightH = 22.0f; break;
       case 8:         eyeTargetX = 5.0f;   eyeTargetY = -2.0f; eyeTargetLeftH = 22.0f; eyeTargetRightH = 35.0f; break;
-      case 9:         eyeTargetX = 0.0f;   eyeTargetY = -2.0f; idleHappyUntilMs = now + 1700; break;
-      case 10:        eyeTargetX = -4.0f;  eyeTargetY = -2.0f; idleCuriousUntilMs = now + 1600; break;
+      case 9:         eyeTargetX = 0.0f;   eyeTargetY = -2.0f; idleHappyUntilMs = now + 1700; idleHappyActive = true; break;
+      case 10:        eyeTargetX = -4.0f;  eyeTargetY = -2.0f; idleCuriousUntilMs = now + 1600; idleCuriousActive = true; break;
       case 11:        eyeTargetX = 0.0f;   eyeTargetY = -4.0f; eyeTargetLeftH = 33.0f; eyeTargetRightH = 33.0f; break;
     }
   }
@@ -650,10 +730,13 @@ void animateIdleFace(unsigned long now) {
   int curX = (int)roundf(eyeCurX), curY = (int)roundf(eyeCurY);
   int curLH = (int)roundf(eyeLeftH), curRH = (int)roundf(eyeRightH);
   int curLW = (int)roundf(eyeLeftW), curRW = (int)roundf(eyeRightW);
-  bool curHappy = (idleHappyUntilMs > now && blinkPhase == 0 && curLH > 18);
-  bool curCurious = (idleCuriousUntilMs > now && blinkPhase == 0 && curLH > 18);
+  bool curHappy = (idleHappyActive && blinkPhase == 0 && curLH > 18);
+  bool curCurious = (idleCuriousActive && blinkPhase == 0 && curLH > 18);
   int curRssiBars = getWifiSignalBars();
-  int curOfflineCnt = offlineQueueCount;
+
+  int curOfflineCnt = 0;
+  char timeBuf[16];
+  getStatusStripSnapshot(curOfflineCnt, timeBuf, sizeof(timeBuf));
 
   // Dirty-only optimization: zero I2C traffic when eyes & status bar are resting!
   if (curX == lastDrawnX && curY == lastDrawnY &&
@@ -661,7 +744,7 @@ void animateIdleFace(unsigned long now) {
       curLW == lastDrawnLW && curRW == lastDrawnRW &&
       curHappy == lastDrawnHappy && curCurious == lastDrawnCurious &&
       curRssiBars == lastDrawnRssiBars && curOfflineCnt == lastDrawnOfflineCnt &&
-      lastServerTime == lastDrawnTimeStr) {
+      strncmp(timeBuf, lastDrawnTimeStr, sizeof(lastDrawnTimeStr)) == 0) {
     return;
   }
 
@@ -670,41 +753,63 @@ void animateIdleFace(unsigned long now) {
   lastDrawnLW = curLW; lastDrawnRW = curRW;
   lastDrawnHappy = curHappy; lastDrawnCurious = curCurious;
   lastDrawnRssiBars = curRssiBars; lastDrawnOfflineCnt = curOfflineCnt;
-  lastDrawnTimeStr = lastServerTime;
+  strncpy(lastDrawnTimeStr, timeBuf, sizeof(lastDrawnTimeStr) - 1);
+  lastDrawnTimeStr[sizeof(lastDrawnTimeStr) - 1] = '\0';
   renderRoboEyes(FACE_IDLE, "", now);
 }
 
 // ============================================================================
-// HTTP / HTTPS CLIENT (Thread-safe via netMutex + Root CA TLS Verification)
+// HTTP / HTTPS CLIENT (Thread-safe via netMutex + Strict Root CA Verification)
 // ============================================================================
-void startNtpClockAsync() {
-  if (WiFi.status() != WL_CONNECTED) return;
-  configTime(19800, 0, "pool.ntp.org", "time.google.com", "time.cloudflare.com");
-}
-
-void syncNtpClock() {
-  if (ntpSynced || WiFi.status() != WL_CONNECTED) return;
+// MUST be called while holding netMutex!
+void syncNtpClockLocked(bool force = false) {
   time_t nowSec = 0;
   time(&nowSec);
   if (nowSec > 1700000000) {
-    ntpSynced = true;
-    tlsConfigured = false; // Upgrade TLS client to full Root CA bundle now that clock is valid
-    Serial.printf("[NTP] Clock synced! Epoch=%ld\n", (long)nowSec);
+    if (!ntpSynced) {
+      ntpSynced = true;
+      Serial.printf("[NTP] Clock synced! Epoch=%ld\n", (long)nowSec);
+    }
+    ntpRequestPending = false;
     return;
   }
-  startNtpClockAsync();
+
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  unsigned long now = millis();
+  if (!ntpEverRequested || force || (unsigned long)(now - lastNtpRequestMs) >= 60000UL) {
+    ntpEverRequested = true;
+    lastNtpRequestMs = now;
+    ntpRequestPending = false;
+    configTime(19800, 0, "pool.ntp.org", "time.google.com", "time.cloudflare.com");
+    Serial.println("[NTP] Requested SNTP time sync...");
+  }
 }
 
-int performHttpRequest(const String& method, const String& path, const String& jsonBody, String& responseOut) {
+void syncNtpClock(bool force = false) {
+  if (netMutex && xSemaphoreTake(netMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+    syncNtpClockLocked(force);
+    xSemaphoreGive(netMutex);
+  }
+}
+
+int performHttpRequest(const String& method, const String& path, const String& jsonBody, String& responseOut, unsigned long timeoutOverrideMs = 0) {
   if (WiFi.status() != WL_CONNECTED) return -1;
-  if (netMutex && xSemaphoreTake(netMutex, pdMS_TO_TICKS(HTTP_TIMEOUT_MS + 2000)) != pdTRUE) return -3;
+  unsigned long effectiveTimeoutMs = (timeoutOverrideMs > 0) ? timeoutOverrideMs : (unsigned long)HTTP_TIMEOUT_MS;
+  if (netMutex && xSemaphoreTake(netMutex, pdMS_TO_TICKS(effectiveTimeoutMs + 2000)) != pdTRUE) return -3;
 
   wifiBusy = true;
 
   if (wifiResetNeeded) {
     wifiResetNeeded = false;
     sharedSecureClient.stop();
+    tlsConfigured = false;
     sharedPlainClient.stop();
+  }
+
+  // Opportunistically check/throttle NTP sync from this single synchronized path
+  if (!ntpSynced || ntpRequestPending) {
+    syncNtpClockLocked(ntpRequestPending);
   }
 
   String baseUrl = String(SERVER_BASE_URL);
@@ -717,27 +822,18 @@ int performHttpRequest(const String& method, const String& path, const String& j
   // Up to 2 attempts: recovers transparently if a Render/Cloudflare Keep-Alive socket closed while idle
   for (int netAttempt = 0; netAttempt < 2; netAttempt++) {
     HTTPClient http;
-    http.setTimeout(HTTP_TIMEOUT_MS);
+    http.setTimeout(effectiveTimeoutMs);
     http.setReuse(true);
 
     bool began = false;
     if (isHttps) {
-      time_t nowEpoch = 0;
-      time(&nowEpoch);
-      bool clockValid = (nowEpoch > 1700000000);
-      if (!tlsConfigured || (clockValid && !ntpSynced)) {
-        if (clockValid) ntpSynced = true;
+      if (!tlsConfigured) {
 #if ALLOW_INSECURE_TLS
         sharedSecureClient.setInsecure();
 #elif defined(SERVER_ROOT_CA)
         sharedSecureClient.setCACert(SERVER_ROOT_CA);
 #else
-        if (clockValid) {
-          sharedSecureClient.useBuiltinCACertBundle();
-        } else {
-          sharedSecureClient.setInsecure();
-          Serial.println("[TLS] Waiting for NTP clock — using TLS without expiry check until synced.");
-        }
+        sharedSecureClient.useBuiltinCACertBundle();
 #endif
         tlsConfigured = true;
       }
@@ -759,8 +855,12 @@ int performHttpRequest(const String& method, const String& path, const String& j
       } else {
         Serial.printf("[HTTP] %s %s failed (code=%d, attempt=%d)\n", method.c_str(), path.c_str(), httpCode, netAttempt + 1);
         http.end();
-        if (isHttps) sharedSecureClient.stop();
-        else sharedPlainClient.stop();
+        if (isHttps) {
+          sharedSecureClient.stop();
+          tlsConfigured = false;
+        } else {
+          sharedPlainClient.stop();
+        }
         if (netAttempt == 0) delay(120);
       }
     } else {
@@ -774,8 +874,8 @@ int performHttpRequest(const String& method, const String& path, const String& j
   return httpCode;
 }
 
-void sendCommandAck(const String& action, const String& status, int slotId, const String& message, const String& cmdId = "", const String& step = "", int progress = -1, int duplicateSlotId = -1) {
-  StaticJsonDocument<448> doc;
+int sendCommandAck(const String& action, const String& status, int slotId, const String& message, const String& cmdId = "", const String& step = "", int progress = -1, int duplicateSlotId = -1) {
+  JsonDocument doc;
   doc["action"] = action;
   doc["status"] = status;
   if (slotId > 0) doc["slot_id"] = slotId;
@@ -784,15 +884,52 @@ void sendCommandAck(const String& action, const String& status, int slotId, cons
   if (progress >= 0) doc["progress"] = progress;
   if (duplicateSlotId > 0) doc["duplicate_slot_id"] = duplicateSlotId;
   doc["message"] = message;
-  String payload, resp;
+  String payload;
   serializeJson(doc, payload);
-  performHttpRequest("POST", "/api/biometric/device/command-ack", payload, resp);
+
+  bool isTerminal = (status == "COMPLETED" || status == "FAILED");
+  int maxAttempts = isTerminal ? 3 : 1;
+  int lastCode = -1;
+
+  for (int attempt = 0; attempt < maxAttempts; attempt++) {
+    if (attempt > 0) {
+      unsigned long backoffMs = (attempt == 1) ? 400UL : 800UL;
+      unsigned long waitStart = millis();
+      while (millis() - waitStart < backoffMs) {
+        if (otaInitialized && WiFi.status() == WL_CONNECTED) ArduinoOTA.handle();
+        delay(25);
+      }
+    }
+    String resp;
+    lastCode = performHttpRequest("POST", "/api/biometric/device/command-ack", payload, resp);
+    if (lastCode == 200 || lastCode == 201 || lastCode == 400 || lastCode == 403 || lastCode == 404) {
+      break;
+    }
+    if (isTerminal) {
+      Serial.printf("[ACK] %s/%s attempt %d/%d failed (HTTP %d)\n",
+                    action.c_str(), status.c_str(), attempt + 1, maxAttempts, lastCode);
+    }
+  }
+  return lastCode;
 }
 
-bool enqueueOfflineScan(int slotId, int confidence) {
-  time_t nowSec = 0;
-  time(&nowSec);
-  if (nowSec < 1700000000) nowSec = 0;
+uint32_t generateScanId(char* outBuf, size_t outSize) {
+  uint32_t seq = 0;
+  if (stateMutex && xSemaphoreTake(stateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    seq = ++nextScanSeq;
+    xSemaphoreGive(stateMutex);
+  } else {
+    seq = ++nextScanSeq;
+  }
+  snprintf(outBuf, outSize, "%.16s-%08lx-%lu", DEVICE_ID, (unsigned long)bootNonce, (unsigned long)seq);
+  return seq;
+}
+
+bool enqueueOfflineScan(int slotId, int confidence, uint32_t seq, const char* scanId, time_t scannedAt = 0) {
+  if (scannedAt == 0) {
+    time(&scannedAt);
+    if (scannedAt < 1700000000) scannedAt = 0;
+  }
 
   if (!stateMutex || xSemaphoreTake(stateMutex, pdMS_TO_TICKS(150)) != pdTRUE) return false;
   if (offlineQueueCount >= OFFLINE_QUEUE_CAPACITY) {
@@ -801,13 +938,16 @@ bool enqueueOfflineScan(int slotId, int confidence) {
     offlineQueueCount--;
   }
   int tail = (offlineQueueHead + offlineQueueCount) % OFFLINE_QUEUE_CAPACITY;
+  offlineQueue[tail].seq = seq;
   offlineQueue[tail].slotId = slotId;
   offlineQueue[tail].confidence = confidence;
-  offlineQueue[tail].scannedAt = nowSec;
+  offlineQueue[tail].scannedAt = scannedAt;
+  strncpy(offlineQueue[tail].scanId, scanId, sizeof(offlineQueue[tail].scanId) - 1);
+  offlineQueue[tail].scanId[sizeof(offlineQueue[tail].scanId) - 1] = '\0';
   offlineQueueCount++;
   int countSnapshot = offlineQueueCount;
   xSemaphoreGive(stateMutex);
-  Serial.printf("[OFFLINE] Queued Slot #%d (pending=%d)\n", slotId, countSnapshot);
+  Serial.printf("[OFFLINE] Queued Slot #%d id=%s (pending=%d)\n", slotId, scanId, countSnapshot);
   return true;
 }
 
@@ -826,27 +966,29 @@ void flushOfflineScans() {
     }
     if (!hasItem) return;
 
-    StaticJsonDocument<192> reqDoc;
+    JsonDocument reqDoc;
     reqDoc["slot_id"] = item.slotId;
     reqDoc["confidence"] = item.confidence;
+    reqDoc["scan_id"] = item.scanId;
     if (item.scannedAt > 1700000000) {
       reqDoc["scanned_at"] = (long)item.scannedAt;
     }
     String payload, resp;
     serializeJson(reqDoc, payload);
     int code = performHttpRequest("POST", "/api/biometric/device/scan", payload, resp);
-    if (code > 0) {
-      // Server responded (200/201/400/403/404) -> pop item from queue
-      if (stateMutex && xSemaphoreTake(stateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        if (offlineQueueCount > 0) {
+    // Only pop on terminal statuses — preserve scans across 5xx, 408, 429, or transport drops!
+    if (code == 200 || code == 201 || code == 400 || code == 403 || code == 404) {
+      if (stateMutex && xSemaphoreTake(stateMutex, pdMS_TO_TICKS(150)) == pdTRUE) {
+        // Verify head sequence matches so a concurrent full-queue enqueue never double-pops!
+        if (offlineQueueCount > 0 && offlineQueue[offlineQueueHead].seq == item.seq) {
           offlineQueueHead = (offlineQueueHead + 1) % OFFLINE_QUEUE_CAPACITY;
           offlineQueueCount--;
         }
         xSemaphoreGive(stateMutex);
       }
-      Serial.printf("[OFFLINE] Flushed Slot #%d -> HTTP %d\n", item.slotId, code);
+      Serial.printf("[OFFLINE] Flushed Slot #%d id=%s -> HTTP %d\n", item.slotId, item.scanId, code);
     } else {
-      // Still unreachable -> keep item for next cycle
+      Serial.printf("[OFFLINE] Keeping Slot #%d id=%s for retry (HTTP %d)\n", item.slotId, item.scanId, code);
       return;
     }
   }
@@ -887,8 +1029,9 @@ bool initR307Sensor() {
     delay(50);
     finger.security_level = 2;
   }
-  finger.getTemplateCount();
-  cachedTemplateCount = finger.templateCount;
+  if (finger.getTemplateCount() == FINGERPRINT_OK) {
+    cachedTemplateCount = finger.templateCount;
+  }
 
   // Clear any previously latched LED-OFF state from older firmware — NEVER call LEDcontrol(false)!
   finger.LEDcontrol(true);
@@ -937,14 +1080,15 @@ bool checkRemoteEnrollCancelled(const String& cmdId) {
   if (cmdId.length() == 0 || WiFi.status() != WL_CONNECTED) return false;
   String response;
   String path = "/api/biometric/device/status?firmware=" + String(FIRMWARE_VERSION)
-              + "&templates=" + String((int)cachedTemplateCount);
+              + "&templates=" + String((int)cachedTemplateCount)
+              + "&ip=" + WiFi.localIP().toString();
   int code = performHttpRequest("GET", path, "", response);
   if (code != 200) return false;
 
-  StaticJsonDocument<1024> doc;
+  JsonDocument doc;
   if (deserializeJson(doc, response)) return false;
 
-  JsonObject cmd = doc["pending_command"];
+  JsonObject cmd = doc["pending_command"].as<JsonObject>();
   if (cmd.isNull()) return true;
   String serverCmdId = cmd["command_id"] | "";
   String serverAction = cmd["action"] | "NONE";
@@ -967,7 +1111,7 @@ uint8_t waitAndCaptureBuffer(uint8_t bufferSlot, unsigned long timeoutMs, const 
   while (millis() - startMs < timeoutMs) {
     unsigned long now = millis();
     unsigned long elapsed = now - startMs;
-    int remainPct = (int)(((timeoutMs - elapsed) * 100UL) / timeoutMs);
+    int remainPct = (elapsed >= timeoutMs) ? 0 : (int)(((timeoutMs - elapsed) * 100UL) / timeoutMs);
 
     if (now - lastUiMs >= 90) {
       lastUiMs = now;
@@ -1015,9 +1159,10 @@ void waitCleanFingerLift(const String& header, const String& studentName, unsign
   unsigned long liftStart = millis();
   int consecutiveNoFinger = 0;
   while (millis() - liftStart < timeoutMs) {
-    int liftPct = (int)(((timeoutMs - (millis() - liftStart)) * 100UL) / timeoutMs);
+    unsigned long elapsed = millis() - liftStart;
+    int liftPct = (elapsed >= timeoutMs) ? 0 : (int)(((timeoutMs - elapsed) * 100UL) / timeoutMs);
     drawEnrollScreen(header, studentName, "LIFT FINGER", "Remove cleanly", liftPct, ENROLL_ICON_LIFT);
-    if (millis() - liftStart >= 650) {
+    if (elapsed >= 650) {
       if (finger.getImage() == FINGERPRINT_NOFINGER) {
         consecutiveNoFinger++;
         if (consecutiveNoFinger >= 2) break; // Two consecutive clean reads guarantee lift
@@ -1025,6 +1170,7 @@ void waitCleanFingerLift(const String& header, const String& studentName, unsign
         consecutiveNoFinger = 0;
       }
     }
+    if (otaInitialized && WiFi.status() == WL_CONNECTED) ArduinoOTA.handle();
     delay(90);
   }
   delay(180);
@@ -1049,7 +1195,7 @@ void executeRemoteEnroll(int slotId, const String& studentName, const String& cm
   if (err1 == ENROLL_ERR_CANCELLED) {
     drawCuteFace(FACE_CHEEKY, "Enroll Cancelled");
     beepNotice();
-    messageHoldUntilMs = millis() + 2000;
+    setMessageHold(2000);
     commandInProgress = false;
     return;
   }
@@ -1058,7 +1204,7 @@ void executeRemoteEnroll(int slotId, const String& studentName, const String& cm
     drawEnrollScreen("STEP 1 FAILED", studentName, reason.substring(0, 15), "Retry from App", 0, ENROLL_ICON_WARN);
     beepError();
     sendCommandAck("ENROLL", "FAILED", slotId, "Step 1 failed: " + reason + " (0x" + String(err1, HEX) + ").", cmdId, "FAILED", 0);
-    messageHoldUntilMs = millis() + 3000;
+    setMessageHold(3000);
     commandInProgress = false;
     return;
   }
@@ -1079,7 +1225,7 @@ void executeRemoteEnroll(int slotId, const String& studentName, const String& cm
       0,
       existingSlot
     );
-    messageHoldUntilMs = millis() + 3500;
+    setMessageHold(3500);
     commandInProgress = false;
     return;
   }
@@ -1089,7 +1235,7 @@ void executeRemoteEnroll(int slotId, const String& studentName, const String& cm
   sendCommandAck("ENROLL", "IN_PROGRESS", slotId, "Step 1 captured! Lift finger cleanly, then press SAME finger flat (Step 2/2)...", cmdId, "LIFT_FINGER", 52);
   waitCleanFingerLift("STEP 1 OK!", studentName, 10000);
 
-  // Step 2: Up to 3 attempts + Auto-Rebase Recovery (if Step 1 was a weak tip graze!)
+  // Step 2: Up to 3 attempts + Safe Auto-Rebase Recovery (always requires clean lift + 2nd press & duplicate check!)
   String step2Header = "ENROLL #" + String(slotId) + " (2/2)";
   sendCommandAck("ENROLL", "IN_PROGRESS", slotId, "Press the SAME finger flat on the center of glass (Step 2/2)...", cmdId, "SCAN_2", 72);
 
@@ -1113,7 +1259,7 @@ void executeRemoteEnroll(int slotId, const String& studentName, const String& cm
     if (lastErr == ENROLL_ERR_CANCELLED) {
       drawCuteFace(FACE_CHEEKY, "Enroll Cancelled");
       beepNotice();
-      messageHoldUntilMs = millis() + 2000;
+      setMessageHold(2000);
       commandInProgress = false;
       return;
     }
@@ -1124,24 +1270,33 @@ void executeRemoteEnroll(int slotId, const String& studentName, const String& cm
       if (lastErr == FINGERPRINT_OK) {
         matched = true;
       } else if (attempt == 2 && lastErr == FINGERPRINT_ENROLLMISMATCH) {
-        // Auto-Rebase: Step 1 was likely an off-center graze — promote this crisp finger into Buffer 1!
+        // Auto-Rebase: Step 1 was likely an off-center graze — promote this crisp finger into Buffer 1,
+        // ALWAYS re-run duplicate check, and require a clean lift + second press on Attempt 3!
         drawEnrollScreen("RE-ALIGNING", studentName, "Hold steady...", "Updating base", 78, ENROLL_ICON_SCAN);
         delay(200);
         if (finger.getImage() == FINGERPRINT_OK && finger.image2Tz(1) == FINGERPRINT_OK) {
           Serial.println("[ENROLL] Auto-Rebased Buffer 1 from fresh settled frame!");
-        }
-        beepNotice();
-      } else if (attempt == maxStep2Attempts) {
-        // Final steady-hold recovery while finger is flat on glass
-        drawEnrollScreen(step2Header, studentName, "Hold Steady...", "Aligning...", 88, ENROLL_ICON_SCAN);
-        delay(260);
-        if (finger.getImage() == FINGERPRINT_OK && finger.image2Tz(1) == FINGERPRINT_OK) {
-          lastErr = finger.createModel();
-          Serial.printf("[ENROLL] Steady-hold recovery createModel -> 0x%02X\n", lastErr);
-          if (lastErr == FINGERPRINT_OK) {
-            matched = true;
+          if (searchStoredTemplates() == FINGERPRINT_OK && finger.fingerID != slotId) {
+            int existingSlot = finger.fingerID;
+            Serial.printf("[ENROLL] Duplicate finger detected after rebase! Already in Slot #%d\n", existingSlot);
+            drawEnrollScreen("DUPLICATE PRINT!", studentName, "Already in", "Slot #" + String(existingSlot), 0, ENROLL_ICON_WARN);
+            beepError();
+            sendCommandAck(
+              "ENROLL",
+              "FAILED",
+              slotId,
+              "Duplicate finger! Already enrolled in Slot #" + String(existingSlot) + ".",
+              cmdId,
+              "DUPLICATE",
+              0,
+              existingSlot
+            );
+            setMessageHold(3500);
+            commandInProgress = false;
+            return;
           }
         }
+        beepNotice();
       } else {
         beepNotice();
       }
@@ -1153,7 +1308,7 @@ void executeRemoteEnroll(int slotId, const String& studentName, const String& cm
     drawEnrollScreen("NO MATCH", studentName, reason.substring(0, 15), "Retry in App", 0, ENROLL_ICON_WARN);
     beepError();
     sendCommandAck("ENROLL", "FAILED", slotId, "Enrollment failed after 3 attempts: " + reason + " (0x" + String(lastErr, HEX) + ").", cmdId, "FAILED", 0);
-    messageHoldUntilMs = millis() + 3500;
+    setMessageHold(3500);
     commandInProgress = false;
     return;
   }
@@ -1165,7 +1320,7 @@ void executeRemoteEnroll(int slotId, const String& studentName, const String& cm
     drawEnrollScreen("SAVE ERROR", studentName, "Slot #" + String(slotId), reason.substring(0, 15), 0, ENROLL_ICON_WARN);
     beepError();
     sendCommandAck("ENROLL", "FAILED", slotId, "Failed saving template to R307S flash: " + reason + " (0x" + String(storeErr, HEX) + ").", cmdId, "FAILED", 0);
-    messageHoldUntilMs = millis() + 3000;
+    setMessageHold(3000);
     commandInProgress = false;
     return;
   }
@@ -1176,55 +1331,104 @@ void executeRemoteEnroll(int slotId, const String& studentName, const String& cm
     drawEnrollScreen("VERIFY ERROR", studentName, "Slot #" + String(slotId), "Flash mismatch", 0, ENROLL_ICON_WARN);
     beepError();
     sendCommandAck("ENROLL", "FAILED", slotId, "Template flash verification failed for Slot #" + String(slotId) + " (0x" + String(verifyErr, HEX) + "). Please retry.", cmdId, "FAILED", 0);
-    messageHoldUntilMs = millis() + 3000;
+    setMessageHold(3000);
     commandInProgress = false;
     return;
   }
 
-  finger.getTemplateCount();
-  cachedTemplateCount = finger.templateCount;
+  if (finger.getTemplateCount() == FINGERPRINT_OK) {
+    cachedTemplateCount = finger.templateCount;
+  }
   drawCuteFace(FACE_EXCITED, "Enrolled #" + String(slotId) + "!");
   beepEnrollOk();
   sendCommandAck("ENROLL", "COMPLETED", slotId, "Verified & enrolled " + studentName + " in Slot #" + String(slotId) + "!", cmdId, "DONE", 100);
-  messageHoldUntilMs = millis() + 3200;
+  setMessageHold(3200);
   commandInProgress = false;
 }
 
-// Read occupied slots (1..1000) via R307S ReadIndexTable (0x1F, pages 0..3), with loadModel fallback
+// Read occupied slots (1..1000) via R307S ReadIndexTable (0x1F, pages 0..3), with full loadModel fallback
 int readOccupiedHardwareSlots(uint16_t* outSlots, int maxSlots) {
   int count = 0;
   bool indexTableOk = true;
+  bool slotZeroOccupied = false;
+
+  while (fpSerial.available()) fpSerial.read();
 
   for (uint8_t page = 0; page < 4; page++) {
-    uint8_t cmdData[2] = { 0x1F, page };
-    Adafruit_Fingerprint_Packet pkt(FINGERPRINT_COMMANDPACKET, 2, cmdData);
-    finger.writeStructuredPacket(pkt);
-    if (finger.getStructuredPacket(&pkt) != FINGERPRINT_OK || pkt.type != FINGERPRINT_ACKPACKET || pkt.data[0] != FINGERPRINT_OK) {
+    bool pageOk = false;
+    Adafruit_Fingerprint_Packet respPkt(FINGERPRINT_COMMANDPACKET, 0, nullptr);
+
+    for (int retry = 0; retry < 3; retry++) {
+      if (retry > 0) {
+        while (fpSerial.available()) fpSerial.read();
+        delay(40);
+      }
+      uint8_t cmdData[2] = { 0x1F, page };
+      Adafruit_Fingerprint_Packet pkt(FINGERPRINT_COMMANDPACKET, 2, cmdData);
+      finger.writeStructuredPacket(pkt);
+      if (finger.getStructuredPacket(&pkt) == FINGERPRINT_OK &&
+          pkt.type == FINGERPRINT_ACKPACKET &&
+          pkt.length >= 35 &&
+          pkt.data[0] == FINGERPRINT_OK) {
+        respPkt = pkt;
+        pageOk = true;
+        break;
+      }
+      Serial.printf("[SYNC] ReadIndexTable page %d retry %d/3 failed (type=0x%02X len=%u status=0x%02X)\n",
+                    page, retry + 1, pkt.type, pkt.length, pkt.data[0]);
+    }
+
+    if (!pageOk) {
       indexTableOk = false;
       break;
     }
+
     for (int byteIdx = 0; byteIdx < 32; byteIdx++) {
-      uint8_t mask = pkt.data[1 + byteIdx];
+      uint8_t mask = respPkt.data[1 + byteIdx];
       if (mask == 0) continue;
       for (int bit = 0; bit < 8; bit++) {
         if (mask & (1 << bit)) {
           uint16_t slot = (uint16_t)(page * 256 + byteIdx * 8 + bit);
-          if (slot >= 1 && slot <= 1000 && count < maxSlots) {
+          if (slot == 0) {
+            slotZeroOccupied = true;
+          } else if (slot >= 1 && slot <= 1000 && count < maxSlots) {
             outSlots[count++] = slot;
           }
         }
       }
     }
+    if (otaInitialized && WiFi.status() == WL_CONNECTED) ArduinoOTA.handle();
   }
 
-  if (indexTableOk) return count;
+  if (indexTableOk) {
+    if (slotZeroOccupied) {
+      Serial.println("[SYNC] Found orphan Slot #0 occupied — erasing to prevent templateCount drift!");
+      finger.deleteModel(0);
+    }
+    return count;
+  }
 
-  // Fallback for rare clones without 0x1F: probe slots 1..min(capacity, 300) via loadModel
+  // Fallback for rare clones without 0x1F: probe FULL 1..min(capacity, 1000) so slots > 300 are NEVER wiped!
+  Serial.println("[SYNC] ReadIndexTable unavailable — running full loadModel scan (1..1000)...");
+  if (finger.loadModel(0) == FINGERPRINT_OK) {
+    Serial.println("[SYNC] Found orphan Slot #0 occupied (fallback) — erasing!");
+    finger.deleteModel(0);
+  }
+
   count = 0;
-  int limit = min((int)finger.capacity, 300);
+  int limit = min((int)finger.capacity, 1000);
+  if (limit <= 0) limit = 1000;
   for (int s = 1; s <= limit && count < maxSlots; s++) {
     if (finger.loadModel(s) == FINGERPRINT_OK) {
       outSlots[count++] = (uint16_t)s;
+    }
+    if ((s % 20) == 0) {
+      if (otaInitialized && WiFi.status() == WL_CONNECTED) ArduinoOTA.handle();
+      yield();
+    }
+    if ((s % 50) == 0) {
+      int pct = 25 + (s * 28) / limit;
+      drawEnrollScreen("SENSOR SYNC", "Full Flash Scan", "Slot " + String(s) + "/" + String(limit), "Found: " + String(count), pct, ENROLL_ICON_SCAN);
     }
   }
   return count;
@@ -1242,8 +1446,12 @@ void executeRemoteSyncSlots(const String& cmdId) {
 
   drawEnrollScreen("SENSOR SYNC", "Comparing DB", "Found " + String(hwCount), "sensor prints", 55, ENROLL_ICON_SCAN);
 
-  // Build JSON array of hardware_slots manually to stay lightweight on RAM
-  String payload = "{\"command_id\":\"" + cmdId + "\",\"hardware_slots\":[";
+  // Pre-allocate JSON payload to avoid heap fragmentation across up to 1,000 slots
+  String payload;
+  payload.reserve(64 + hwCount * 5);
+  payload += "{\"command_id\":\"";
+  payload += cmdId;
+  payload += "\",\"hardware_slots\":[";
   for (int i = 0; i < hwCount; i++) {
     if (i > 0) payload += ",";
     payload += String(hwSlots[i]);
@@ -1256,12 +1464,12 @@ void executeRemoteSyncSlots(const String& cmdId) {
     drawEnrollScreen("SYNC FAILED", "Server Error", "HTTP " + String(httpCode), "Try again", 0, ENROLL_ICON_WARN);
     beepError();
     sendCommandAck("SYNC_SLOTS", "FAILED", 0, "Could not reach server to sync slots (HTTP " + String(httpCode) + ").", cmdId, "FAILED", 0);
-    messageHoldUntilMs = millis() + 2800;
+    setMessageHold(2800);
     commandInProgress = false;
     return;
   }
 
-  DynamicJsonDocument respDoc(4096);
+  JsonDocument respDoc;
   if (deserializeJson(respDoc, respStr)) {
     beepError();
     sendCommandAck("SYNC_SLOTS", "FAILED", 0, "Invalid JSON response during slot sync.", cmdId, "FAILED", 0);
@@ -1283,11 +1491,13 @@ void executeRemoteSyncSlots(const String& cmdId) {
       if (finger.deleteModel(slotToErase) == FINGERPRINT_OK) {
         orphansErased++;
       }
+      if (otaInitialized && WiFi.status() == WL_CONNECTED) ArduinoOTA.handle();
     }
   }
 
-  finger.getTemplateCount();
-  cachedTemplateCount = finger.templateCount;
+  if (finger.getTemplateCount() == FINGERPRINT_OK) {
+    cachedTemplateCount = finger.templateCount;
+  }
 
   String summary = "Sync complete! " + String(validCount) + " valid prints matched";
   if (orphansErased > 0 || ghostsRemoved > 0) {
@@ -1299,25 +1509,27 @@ void executeRemoteSyncSlots(const String& cmdId) {
   drawCuteFace(FACE_EXCITED, "Synced: " + String(cachedTemplateCount) + " OK!");
   beepEnrollOk();
   sendCommandAck("SYNC_SLOTS", "COMPLETED", 0, summary, cmdId, "DONE", 100);
-  messageHoldUntilMs = millis() + 3000;
+  setMessageHold(3000);
   commandInProgress = false;
 }
 
 void executeRemoteDelete(int slotId, const String& studentName, const String& cmdId) {
   commandInProgress = true;
   showOledStatus("REMOVING PRINT", studentName, "Clearing Slot #" + String(slotId), "");
+  sendCommandAck("DELETE", "IN_PROGRESS", slotId, "Erasing Slot #" + String(slotId) + " from sensor...", cmdId, "DELETING", 40);
   uint8_t p = finger.deleteModel(slotId);
   if (p == FINGERPRINT_OK) {
-    finger.getTemplateCount();
-    cachedTemplateCount = finger.templateCount;
-    sendCommandAck("DELETE", "COMPLETED", slotId, "Deleted Slot #" + String(slotId) + " from sensor.", cmdId);
+    if (finger.getTemplateCount() == FINGERPRINT_OK) {
+      cachedTemplateCount = finger.templateCount;
+    }
+    sendCommandAck("DELETE", "COMPLETED", slotId, "Deleted Slot #" + String(slotId) + " from sensor.", cmdId, "DONE", 100);
     showOledStatus("REMOVED", studentName, "Slot #" + String(slotId) + " freed", "");
     beepNotice();
   } else {
-    sendCommandAck("DELETE", "FAILED", slotId, "Failed to erase slot (code 0x" + String(p, HEX) + ").", cmdId);
+    sendCommandAck("DELETE", "FAILED", slotId, "Failed to erase slot (code 0x" + String(p, HEX) + ").", cmdId, "FAILED", 0);
     beepError();
   }
-  messageHoldUntilMs = millis() + 2500;
+  setMessageHold(2500);
   commandInProgress = false;
 }
 
@@ -1336,13 +1548,13 @@ void pollServerStatus() {
   int code = performHttpRequest("GET", path, "", response);
   if (code != 200) return;
 
-  StaticJsonDocument<1024> doc;
+  JsonDocument doc;
   if (deserializeJson(doc, response)) return;
 
   bool newSensing = doc["sensing_enabled"] | true;
-  String newTime = doc["server_time_ist"].is<const char*>() ? doc["server_time_ist"].as<String>() : "";
+  const char* newTime = doc["server_time_ist"] | "";
 
-  JsonObject cmd = doc["pending_command"];
+  JsonObject cmd = doc["pending_command"].as<JsonObject>();
   String cmdId = "", cmdAction = "NONE", cmdStatus = "IDLE", cmdStudent = "Student";
   int cmdSlot = 0;
   if (!cmd.isNull()) {
@@ -1355,7 +1567,10 @@ void pollServerStatus() {
 
   if (stateMutex && xSemaphoreTake(stateMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
     sensingEnabled = newSensing;
-    if (newTime.length() > 0) lastServerTime = newTime;
+    if (newTime && newTime[0] != '\0') {
+      strncpy(lastServerTime, newTime, sizeof(lastServerTime) - 1);
+      lastServerTime[sizeof(lastServerTime) - 1] = '\0';
+    }
     if (cmdStatus == "PENDING" && cmdAction != "NONE" && !hasQueuedCommand) {
       queuedCmdId = cmdId;
       queuedCmdAction = cmdAction;
@@ -1372,7 +1587,7 @@ void heartbeatTask(void* param) {
   const TickType_t pollDelayTicks = pdMS_TO_TICKS(max(2000, HEARTBEAT_INTERVAL_MS));
   for (;;) {
     if (!otaInProgress && !scanInProgress && !commandInProgress && WiFi.status() == WL_CONNECTED) {
-      if (!ntpSynced) syncNtpClock();
+      if (!ntpSynced || ntpRequestPending) syncNtpClock(ntpRequestPending);
       flushOfflineScans();
       pollServerStatus();
     }
@@ -1383,6 +1598,22 @@ void heartbeatTask(void* param) {
 // ============================================================================
 // FINGERPRINT SCAN & SERVER SUBMISSION (Core 1 — Exact Adafruit Flow!)
 // ============================================================================
+void waitForFingerLiftAfterScan(unsigned long maxWaitMs = 3000) {
+#if FP_USE_TOUCH_PIN
+  unsigned long liftWait = millis();
+  while (touchPinTriggered() && millis() - liftWait < maxWaitMs) {
+    if (otaInitialized && WiFi.status() == WL_CONNECTED) ArduinoOTA.handle();
+    delay(40);
+  }
+#else
+  unsigned long liftWait = millis();
+  while (finger.getImage() != FINGERPRINT_NOFINGER && millis() - liftWait < maxWaitMs) {
+    if (otaInitialized && WiFi.status() == WL_CONNECTED) ArduinoOTA.handle();
+    delay(60);
+  }
+#endif
+}
+
 void scanAndSubmitFingerprint() {
   if (!sensorReady || !sensingEnabled) return;
   // Wait briefly if a background heartbeat Wi-Fi burst is finishing
@@ -1427,64 +1658,73 @@ void scanAndSubmitFingerprint() {
   if (matchedSlot < 0) {
     drawCuteFace(FACE_ERROR, "Unknown! Try Again");
     beepError();
-    messageHoldUntilMs = millis() + 1800;
-#if FP_USE_TOUCH_PIN
-    unsigned long lw = millis();
-    while (touchPinTriggered() && millis() - lw < 2500) delay(40);
-#endif
+    setMessageHold(1800);
+    waitForFingerLiftAfterScan(2500);
     scanInProgress = false;
     return;
   }
 
-  Serial.printf("[SCAN] Matched Slot #%d (confidence %d)\n", matchedSlot, confidence);
+  // Generate unique idempotent scan_id & capture timestamp right on match
+  char scanId[40];
+  uint32_t scanSeq = generateScanId(scanId, sizeof(scanId));
+  time_t scanEpoch = 0;
+  time(&scanEpoch);
+  if (scanEpoch < 1700000000) scanEpoch = 0;
+
+  Serial.printf("[SCAN] Matched Slot #%d (conf=%d, id=%s)\n", matchedSlot, confidence, scanId);
 
   // If Wi-Fi is down, save directly to offline ring buffer so scan is never lost
   if (WiFi.status() != WL_CONNECTED) {
-    enqueueOfflineScan(matchedSlot, confidence);
+    enqueueOfflineScan(matchedSlot, confidence, scanSeq, scanId, scanEpoch);
     drawCuteFace(FACE_CHEEKY, "Saved Offline #" + String(matchedSlot));
     beepEntry();
-    messageHoldUntilMs = millis() + 2400;
-#if FP_USE_TOUCH_PIN
-    unsigned long liftWaitOff = millis();
-    while (touchPinTriggered() && millis() - liftWaitOff < 3000) delay(40);
-#endif
+    setMessageHold(2400);
+    waitForFingerLiftAfterScan(3000);
+    scanInProgress = false;
+    return;
+  }
+
+  // Preserve strict FIFO ordering if offline backlog is waiting to flush
+  if (getOfflineQueueCountSnapshot() > 0) {
+    enqueueOfflineScan(matchedSlot, confidence, scanSeq, scanId, scanEpoch);
+    drawCuteFace(FACE_CHEEKY, "Queued Sync #" + String(matchedSlot));
+    beepNotice();
+    setMessageHold(2200);
+    waitForFingerLiftAfterScan(3000);
     scanInProgress = false;
     return;
   }
 
   drawCuteFace(FACE_SCANNING, "Syncing Slot #" + String(matchedSlot));
 
-  StaticJsonDocument<128> reqDoc;
+  JsonDocument reqDoc;
   reqDoc["slot_id"] = matchedSlot;
   reqDoc["confidence"] = confidence;
+  reqDoc["scan_id"] = scanId;
   String reqPayload, respStr;
   serializeJson(reqDoc, reqPayload);
 
-  int httpCode = performHttpRequest("POST", "/api/biometric/device/scan", reqPayload, respStr);
-  if (httpCode <= 0) {
-    // Automatic retry once for transient Wi-Fi hiccups / cloud cold-starts
-    delay(250);
-    respStr = "";
-    httpCode = performHttpRequest("POST", "/api/biometric/device/scan", reqPayload, respStr);
-  }
-  if (httpCode <= 0) {
-    enqueueOfflineScan(matchedSlot, confidence);
+  // Single outer call (performHttpRequest already handles up to 2 attempts cleanly without 62s stalls)
+  unsigned long scanTimeoutMs = min((unsigned long)HTTP_TIMEOUT_MS, 8000UL);
+  int httpCode = performHttpRequest("POST", "/api/biometric/device/scan", reqPayload, respStr, scanTimeoutMs);
+
+  // Enqueue offline on transport failures, timeouts, rate limits, or 5xx server errors
+  if (httpCode <= 0 || httpCode == 408 || httpCode == 429 || httpCode >= 500) {
+    enqueueOfflineScan(matchedSlot, confidence, scanSeq, scanId, scanEpoch);
     drawCuteFace(FACE_CHEEKY, "Queued Sync #" + String(matchedSlot));
     beepNotice();
-    messageHoldUntilMs = millis() + 2400;
-#if FP_USE_TOUCH_PIN
-    unsigned long liftWaitQ = millis();
-    while (touchPinTriggered() && millis() - liftWaitQ < 3000) delay(40);
-#endif
+    setMessageHold(2400);
+    waitForFingerLiftAfterScan(3000);
     scanInProgress = false;
     return;
   }
 
-  StaticJsonDocument<512> respDoc;
+  JsonDocument respDoc;
   if (deserializeJson(respDoc, respStr)) {
     drawCuteFace(FACE_ERROR, "Server Error " + String(httpCode));
     beepError();
-    messageHoldUntilMs = millis() + 2200;
+    setMessageHold(2200);
+    waitForFingerLiftAfterScan(3000);
     scanInProgress = false;
     return;
   }
@@ -1501,12 +1741,12 @@ void scanAndSubmitFingerprint() {
       drawCuteFace(FACE_WINK, "OUT: " + studentName.substring(0, 16));
       beepExit();
     }
-    messageHoldUntilMs = millis() + 3000;
+    setMessageHold(3000);
   } else if (status == "COOLDOWN") {
     int waitSec = respDoc["wait_seconds"] | 0;
     drawCuteFace(FACE_CHEEKY, "Scanned! Wait " + String(waitSec) + "s");
     beepNotice();
-    messageHoldUntilMs = millis() + 2200;
+    setMessageHold(2200);
   } else if (status == "PAUSED") {
     sensingEnabled = false;
     prevSensingObserved = false; // Prevent duplicate beepNotice() on next loop() tick
@@ -1516,21 +1756,10 @@ void scanAndSubmitFingerprint() {
     String msg = respDoc["message"] | "Unassigned Slot";
     drawCuteFace(FACE_ERROR, msg.substring(0, 21));
     beepError();
-    messageHoldUntilMs = millis() + 2400;
+    setMessageHold(2400);
   }
 
-  // Wait for finger lift so LED does not re-trigger immediately
-#if FP_USE_TOUCH_PIN
-  unsigned long liftWait = millis();
-  while (touchPinTriggered() && millis() - liftWait < 3000) {
-    delay(40);
-  }
-#else
-  unsigned long liftWait = millis();
-  while (finger.getImage() != FINGERPRINT_NOFINGER && millis() - liftWait < 3000) {
-    delay(60);
-  }
-#endif
+  waitForFingerLiftAfterScan(3000);
   scanInProgress = false;
 }
 
@@ -1568,7 +1797,7 @@ void initOtaIfReady() {
     otaInProgress = false;
     showOledStatus("OTA FAILED", "Error code: " + String(error), "Resuming normal mode", "");
     beepError();
-    messageHoldUntilMs = millis() + 3000;
+    setMessageHold(3000);
   });
 
   ArduinoOTA.begin();
@@ -1581,8 +1810,9 @@ void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
   switch (event) {
     case ARDUINO_EVENT_WIFI_STA_GOT_IP:
       lastWifiDisconnectReason = 0;
+      wifiResetNeeded = true;
+      ntpRequestPending = true; // Handled synchronously under netMutex (never call configTime here!)
       Serial.printf("[WIFI] Got IP: %s (RSSI %d dBm)\n", WiFi.localIP().toString().c_str(), WiFi.RSSI());
-      startNtpClockAsync();
       break;
     case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
       lastWifiDisconnectReason = info.wifi_sta_disconnected.reason;
@@ -1606,6 +1836,13 @@ void ensureWifiConnected(bool isBoot = false) {
     wifiEventsRegistered = true;
   }
 
+  // During normal loop(), NEVER block Core 1 or beep — keep offline scanning 100% responsive!
+  if (!isBoot) {
+    Serial.println("[WIFI] Offline — issuing non-blocking WiFi.reconnect()...");
+    WiFi.reconnect();
+    return;
+  }
+
   Serial.printf("[WIFI] Connecting to %s...\n", WIFI_SSID);
   showOledStatus("CONNECTING WI-FI", WIFI_SSID, "2.4 GHz Network", "Please wait...");
 
@@ -1619,7 +1856,7 @@ void ensureWifiConnected(bool isBoot = false) {
   WiFi.setTxPower(WIFI_POWER_17dBm); // Prevents AMS1117 3.3V brownout spikes during RF association
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
-  const unsigned long timeoutMs = isBoot ? 20000 : 12000;
+  const unsigned long timeoutMs = 20000UL;
   unsigned long start = millis();
   int dots = 0;
   while (WiFi.status() != WL_CONNECTED && millis() - start < timeoutMs) {
@@ -1636,11 +1873,30 @@ void ensureWifiConnected(bool isBoot = false) {
   if (WiFi.status() == WL_CONNECTED) {
     Serial.printf("\n[WIFI] Connected! IP: %s | RSSI: %d dBm\n",
                   WiFi.localIP().toString().c_str(), WiFi.RSSI());
-    startNtpClockAsync();
     initOtaIfReady();
-    showOledStatus("WI-FI CONNECTED", "IP: " + WiFi.localIP().toString(), "OTA Ready (.local)", "Syncing EduStride...");
     beepEntry();
-    delay(900);
+
+    // Wait up to ~6 seconds for NTP sync on boot so clock is valid before first HTTPS TLS handshake
+    syncNtpClock(true);
+    unsigned long ntpStart = millis();
+    int ntpDots = 0;
+    while (!ntpSynced && millis() - ntpStart < 6000UL) {
+      time_t nowSec = 0;
+      time(&nowSec);
+      if (nowSec > 1700000000) {
+        syncNtpClock(false);
+        break;
+      }
+      ntpDots = (ntpDots + 1) % 4;
+      String ntpLine = "Syncing clock";
+      for (int i = 0; i < ntpDots; i++) ntpLine += ".";
+      showOledStatus("WI-FI CONNECTED", "IP: " + WiFi.localIP().toString(), ntpLine, "Securing HTTPS...");
+      if (otaInitialized) ArduinoOTA.handle();
+      delay(250);
+    }
+
+    showOledStatus("WI-FI CONNECTED", "IP: " + WiFi.localIP().toString(), "OTA Ready (.local)", ntpSynced ? "Clock & TLS Ready" : "Syncing EduStride...");
+    delay(500);
   } else {
     String errHint = "Check 2.4GHz SSID";
     if (WiFi.status() == WL_NO_SSID_AVAIL) errHint = "SSID Not Found!";
@@ -1650,28 +1906,38 @@ void ensureWifiConnected(bool isBoot = false) {
       errHint = "Reason code: " + String(lastWifiDisconnectReason);
     }
     Serial.printf("\n[WIFI] Failed! status=%d reason=%d\n", (int)WiFi.status(), lastWifiDisconnectReason);
-    showOledStatus("WI-FI FAILED", WIFI_SSID, errHint, "Will auto-retry...");
+    showOledStatus("WI-FI FAILED", WIFI_SSID, errHint, "Offline Mode Active");
     beepError();
-    messageHoldUntilMs = millis() + 3000;
+    setMessageHold(3000);
   }
 }
 
 // ============================================================================
 // SETUP & MAIN LOOP
 // ============================================================================
+// Match Core 1 loopTask stack to Core 0 heartbeatTask (16 KB) so mbedTLS Root CA handshakes never overflow stack!
+SET_LOOP_TASK_STACK_SIZE(16 * 1024);
+
 void setup() {
   Serial.begin(115200);
   delay(200);
-  Serial.println("\n=== EduStride Gate Scanner v2.3 ===");
+  Serial.printf("\n=== EduStride Gate Scanner %s ===\n", FIRMWARE_VERSION);
 
+  bootNonce = esp_random();
+
+  // Pre-set inactive buzzer level before enabling output to avoid boot chirp on active-LOW modules
+  buzzerOff();
   pinMode(BUZZER_PIN, OUTPUT);
   buzzerOff();
 
   Wire.begin(OLED_SDA_PIN, OLED_SCL_PIN);
-  if (display.begin(SSD1306_SWITCHCAPVCC, OLED_I2C_ADDR)) {
+  oledReady = display.begin(SSD1306_SWITCHCAPVCC, OLED_I2C_ADDR);
+  if (oledReady) {
     display.ssd1306_command(SSD1306_SETCONTRAST);
     display.ssd1306_command(0x55);
-    showOledStatus("EDUSTRIDE GATE", "Firmware v2.3", "Init R307S Sensor...", "");
+    showOledStatus("EDUSTRIDE GATE", "FW " + String(FIRMWARE_VERSION), "Init R307S Sensor...", "");
+  } else {
+    Serial.println("[OLED] SSD1306 not detected on I2C — continuing headless.");
   }
 
   netMutex = xSemaphoreCreateMutex();
@@ -1680,9 +1946,9 @@ void setup() {
 #if FP_USE_TOUCH_PIN
   calibrateTouchPin();
 #endif
+  // Configure UART2 with explicit custom pins and verify sensor directly (never call finger.begin() afterward!)
   fpSerial.begin(FP_BAUD_RATE, SERIAL_8N1, FP_RX_PIN, FP_TX_PIN);
   delay(300);
-  finger.begin(FP_BAUD_RATE);
 
   if (!initR307Sensor()) {
     Serial.println("[R307S] Sensor NOT detected! Check 5V->VIN, GND, TXD->16, RXD->17.");
@@ -1695,7 +1961,7 @@ void setup() {
   pollServerStatus();
   prevSensingObserved = sensingEnabled;
 
-  // 16 KB stack on Core 0 prevents mbedTLS Root CA verification stack overflows!
+  // 16 KB stack on Core 0 matches Core 1 (SET_LOOP_TASK_STACK_SIZE) for safe mbedTLS Root CA verification
   xTaskCreatePinnedToCore(heartbeatTask, "HeartbeatTask", 16384, nullptr, 1, nullptr, 0);
 
   nextBlinkMs = millis() + 2000;
@@ -1705,17 +1971,20 @@ void setup() {
 }
 
 void loop() {
-  if (otaInitialized && WiFi.status() == WL_CONNECTED) ArduinoOTA.handle();
+  if (WiFi.status() == WL_CONNECTED) {
+    initOtaIfReady();
+    if (otaInitialized) ArduinoOTA.handle();
+  }
   if (otaInProgress) { delay(5); return; }
 
   unsigned long now = millis();
 
-  if (WiFi.status() != WL_CONNECTED && now - lastWifiCheckMs > 18000) {
+  if (WiFi.status() != WL_CONNECTED && now - lastWifiCheckMs >= 30000UL) {
     lastWifiCheckMs = now;
     ensureWifiConnected(false);
   }
 
-  if (!sensorReady && now - lastSensorRetryMs >= 5000) {
+  if (!sensorReady && now - lastSensorRetryMs >= 5000UL) {
     lastSensorRetryMs = now;
     if (initR307Sensor()) {
       showIdleScreen();
@@ -1725,11 +1994,11 @@ void loop() {
   if (prevSensingObserved != sensingEnabled) {
     prevSensingObserved = sensingEnabled;
     beepNotice();
-    messageHoldUntilMs = 0;
+    clearMessageHold();
     showIdleScreen();
   }
 
-  // Execute queued remote ENROLL / DELETE / CLEAR_ALL command safely on Core 1
+  // Execute queued remote ENROLL / DELETE / SYNC_SLOTS / CLEAR_ALL command safely on Core 1
   String runCmdId = "", runAction = "NONE", runStudent = "";
   int runSlot = 0;
   if (stateMutex && xSemaphoreTake(stateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
@@ -1759,9 +2028,11 @@ void loop() {
     } else if (runAction == "CLEAR_ALL") {
       commandInProgress = true;
       showOledStatus("CLEARING MEMORY", "Erasing all prints", "Please wait...", "");
+      sendCommandAck("CLEAR_ALL", "IN_PROGRESS", 0, "Clearing all stored templates from R307S flash...", runCmdId, "CLEARING", 40);
       uint8_t clrErr = finger.emptyDatabase();
-      finger.getTemplateCount();
-      cachedTemplateCount = finger.templateCount;
+      if (finger.getTemplateCount() == FINGERPRINT_OK) {
+        cachedTemplateCount = finger.templateCount;
+      }
       if (clrErr == FINGERPRINT_OK) {
         sendCommandAck("CLEAR_ALL", "COMPLETED", 0, "Sensor memory cleared.", runCmdId, "DONE", 100);
         showOledStatus("MEMORY CLEARED", "All slots erased", "0 stored prints", "");
@@ -1771,13 +2042,17 @@ void loop() {
         showOledStatus("CLEAR FAILED", "Code: 0x" + String(clrErr, HEX), "", "");
         beepError();
       }
-      messageHoldUntilMs = millis() + 2500;
+      setMessageHold(2500);
       commandInProgress = false;
+    } else {
+      Serial.printf("[CMD] Rejected invalid command action=%s slot=%d\n", runAction.c_str(), runSlot);
+      sendCommandAck(runAction, "FAILED", runSlot, "Unsupported command or out-of-range slot #" + String(runSlot) + " (valid: 1..1000).", runCmdId, "FAILED", 0);
+      beepError();
     }
   }
 
-  if (messageHoldUntilMs > 0 && now >= messageHoldUntilMs) {
-    messageHoldUntilMs = 0;
+  if (messageHolding && deadlineReached(now, messageHoldUntilMs)) {
+    clearMessageHold();
     showIdleScreen();
   }
 
@@ -1785,7 +2060,7 @@ void loop() {
 
 #if FP_USE_TOUCH_PIN
   // Pure 6-Wire Touch Trigger: LED stays 100% DARK & cool while idle, flashes ONLY when finger touches!
-  if (sensingEnabled && sensorReady && messageHoldUntilMs == 0 && now - lastFpPollMs >= 20) {
+  if (sensingEnabled && sensorReady && !messageHolding && now - lastFpPollMs >= 20) {
     lastFpPollMs = now;
     if (touchPinTriggered()) {
       delay(15); // 15ms hardware debounce
@@ -1796,7 +2071,7 @@ void loop() {
   }
 #else
   // 4-Wire Fallback Mode: periodic optical polling without capacitive touch wire
-  if (sensingEnabled && sensorReady && messageHoldUntilMs == 0 && now - lastFpPollMs >= 250) {
+  if (sensingEnabled && sensorReady && !messageHolding && now - lastFpPollMs >= 250) {
     lastFpPollMs = now;
     if (finger.getImage() == FINGERPRINT_OK) {
       scanAndSubmitFingerprint();

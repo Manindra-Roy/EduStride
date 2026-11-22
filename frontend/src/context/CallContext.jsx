@@ -1,76 +1,251 @@
-import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
 import axios from 'axios';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { socket } from '../config/socket';
 import { useAuth } from './AuthContext';
+import { getDisplayName } from '../utils/istDate';
 import { Phone, Mic, MicOff, PhoneOff, Maximize2, Radio, MessageSquare, BookOpen, Bell, X } from 'lucide-react';
 
 const CallContext = createContext(null);
+
+const ICE_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' }
+];
+
+const RemoteAudioPlayer = ({ stream }) => {
+  const audioRef = useRef(null);
+
+  useEffect(() => {
+    const el = audioRef.current;
+    if (!el || !stream) return;
+    el.srcObject = stream;
+    const playPromise = el.play();
+    if (playPromise && typeof playPromise.catch === 'function') {
+      playPromise.catch(() => {});
+    }
+    return () => {
+      if (el) el.srcObject = null;
+    };
+  }, [stream]);
+
+  return <audio ref={audioRef} autoPlay playsInline className="hidden" />;
+};
 
 export const CallProvider = ({ children }) => {
   const { user } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
 
-  const [activeCall, setActiveCall] = useState(null); // { stream: MediaStream }
+  const [activeCall, setActiveCall] = useState(null); // { stream: MediaStream, room: string }
   const [isMuted, setIsMuted] = useState(false);
   const [callDuration, setCallDuration] = useState(0);
-  const [incomingCall, setIncomingCall] = useState(null); // { caller_name, class_level }
+  const [incomingCall, setIncomingCall] = useState(null); // { caller_name, class_level, hostEmail }
   const [activeRoomCall, setActiveRoomCall] = useState(null); // { caller_name, class_level, hostEmail }
   const [isCallHost, setIsCallHost] = useState(false);
   const [currentRoom, setCurrentRoom] = useState('');
+  const [remoteStreams, setRemoteStreams] = useState([]); // [{ socketId, name, role, stream }]
 
   const callTimerRef = useRef(null);
   const activeCallRef = useRef(null);
+  const activeCallRoomRef = useRef('');
+  const activeRoomCallRef = useRef(null);
   const isCallHostRef = useRef(false);
   const currentRoomRef = useRef('');
   const pathnameRef = useRef(location.pathname);
   const audioCtxRef = useRef(null);
   const toastTimersRef = useRef(new Map());
+  const userRef = useRef(user);
+  const peerConnectionsRef = useRef(new Map()); // Map<socketId, RTCPeerConnection>
+  const pendingIceCandidatesRef = useRef(new Map()); // Map<socketId, RTCIceCandidateInit[]>
+
+  useEffect(() => {
+    userRef.current = user;
+  }, [user]);
 
   useEffect(() => {
     pathnameRef.current = location.pathname;
   }, [location.pathname]);
 
   useEffect(() => {
-    return () => {
-      toastTimersRef.current.forEach((timerId) => clearTimeout(timerId));
-      toastTimersRef.current.clear();
-      if (audioCtxRef.current && audioCtxRef.current.state !== 'closed') {
-        audioCtxRef.current.close().catch(() => {});
-      }
-    };
-  }, []);
-
-  useEffect(() => {
     activeCallRef.current = activeCall;
   }, [activeCall]);
+
+  useEffect(() => {
+    activeRoomCallRef.current = activeRoomCall;
+  }, [activeRoomCall]);
 
   useEffect(() => {
     isCallHostRef.current = isCallHost;
   }, [isCallHost]);
 
+  const closePeerConnection = useCallback((socketId) => {
+    const pc = peerConnectionsRef.current.get(socketId);
+    if (pc) {
+      try {
+        pc.ontrack = null;
+        pc.onicecandidate = null;
+        pc.onconnectionstatechange = null;
+        pc.close();
+      } catch {
+        // ignore
+      }
+      peerConnectionsRef.current.delete(socketId);
+    }
+    pendingIceCandidatesRef.current.delete(socketId);
+    setRemoteStreams(prev => prev.filter(s => s.socketId !== socketId));
+  }, []);
+
+  const closeAllPeerConnections = useCallback(() => {
+    peerConnectionsRef.current.forEach((pc) => {
+      try {
+        pc.ontrack = null;
+        pc.onicecandidate = null;
+        pc.onconnectionstatechange = null;
+        pc.close();
+      } catch {
+        // ignore
+      }
+    });
+    peerConnectionsRef.current.clear();
+    pendingIceCandidatesRef.current.clear();
+    setRemoteStreams([]);
+  }, []);
+
+  const createPeerConnection = useCallback((targetSocketId, peerMeta, room) => {
+    closePeerConnection(targetSocketId);
+
+    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+
+    const localStream = activeCallRef.current?.stream;
+    if (localStream) {
+      localStream.getTracks().forEach(track => {
+        pc.addTrack(track, localStream);
+      });
+    }
+
+    pc.onicecandidate = (event) => {
+      if (event.candidate && socket.connected) {
+        socket.emit('webrtc_ice_candidate', {
+          class_level: room,
+          targetSocketId,
+          candidate: event.candidate
+        });
+      }
+    };
+
+    pc.ontrack = (event) => {
+      const remoteStream = event.streams?.[0];
+      if (!remoteStream) return;
+      setRemoteStreams(prev => {
+        const exists = prev.some(item => item.socketId === targetSocketId);
+        if (exists) {
+          return prev.map(item =>
+            item.socketId === targetSocketId
+              ? {
+                  ...item,
+                  stream: remoteStream,
+                  name: peerMeta?.name || item.name,
+                  role: peerMeta?.role || item.role
+                }
+              : item
+          );
+        }
+        return [
+          ...prev,
+          {
+            socketId: targetSocketId,
+            name: peerMeta?.name || 'Participant',
+            role: peerMeta?.role || '',
+            stream: remoteStream
+          }
+        ];
+      });
+    };
+
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+        closePeerConnection(targetSocketId);
+      }
+    };
+
+    peerConnectionsRef.current.set(targetSocketId, pc);
+    return pc;
+  }, [closePeerConnection]);
+
+  const handleEndCall = useCallback((terminateForAll = false) => {
+    const callRoom = activeCallRoomRef.current || currentRoomRef.current;
+
+    closeAllPeerConnections();
+
+    if (activeCallRef.current && activeCallRef.current.stream) {
+      activeCallRef.current.stream.getTracks().forEach(track => track.stop());
+    }
+    if (callTimerRef.current) {
+      clearInterval(callTimerRef.current);
+      callTimerRef.current = null;
+    }
+
+    if (socket.connected && activeCallRef.current && callRoom) {
+      if (terminateForAll && isCallHostRef.current) {
+        socket.emit('end_call', { class_level: callRoom });
+        setActiveRoomCall(null);
+      } else {
+        socket.emit('leave_call', { class_level: callRoom });
+      }
+    }
+
+    activeCallRef.current = null;
+    activeCallRoomRef.current = '';
+    isCallHostRef.current = false;
+    setActiveCall(null);
+    setCallDuration(0);
+    setIsCallHost(false);
+    setIsMuted(false);
+  }, [closeAllPeerConnections]);
+
+  useEffect(() => {
+    return () => {
+      toastTimersRef.current.forEach((timerId) => clearTimeout(timerId));
+      toastTimersRef.current.clear();
+      if (callTimerRef.current) clearInterval(callTimerRef.current);
+      closeAllPeerConnections();
+      if (activeCallRef.current && activeCallRef.current.stream) {
+        activeCallRef.current.stream.getTracks().forEach(track => track.stop());
+      }
+      if (audioCtxRef.current && audioCtxRef.current.state !== 'closed') {
+        audioCtxRef.current.close().catch(() => {});
+      }
+    };
+  }, [closeAllPeerConnections]);
+
   useEffect(() => {
     currentRoomRef.current = currentRoom;
-    if (activeCallRef.current) {
+    if (activeCallRef.current && activeCallRoomRef.current && currentRoom && activeCallRoomRef.current !== currentRoom) {
       handleEndCall(false);
     }
-    setIncomingCall(null);
-    setActiveRoomCall(null);
-  }, [currentRoom]);
+    setIncomingCall(prev => (prev && currentRoom && prev.class_level !== currentRoom ? null : prev));
+    setActiveRoomCall(prev => (prev && currentRoom && prev.class_level !== currentRoom ? null : prev));
+  }, [currentRoom, handleEndCall]);
 
   const [toasts, setToasts] = useState([]);
   const [allowOnScreenToasts, setAllowOnScreenToasts] = useState(() => localStorage.getItem('edustride_onscreen_toasts') !== 'false');
+  const allowOnScreenToastsRef = useRef(allowOnScreenToasts);
 
-  const toggleOnScreenToasts = React.useCallback(() => {
+  useEffect(() => {
+    allowOnScreenToastsRef.current = allowOnScreenToasts;
+  }, [allowOnScreenToasts]);
+
+  const toggleOnScreenToasts = useCallback(() => {
     setAllowOnScreenToasts(prev => {
       const nextVal = !prev;
+      allowOnScreenToastsRef.current = nextVal;
       localStorage.setItem('edustride_onscreen_toasts', nextVal.toString());
       return nextVal;
     });
   }, []);
 
-  const playNotificationSound = React.useCallback(() => {
+  const playNotificationSound = useCallback(() => {
     try {
       const AudioCtx = window.AudioContext || window.webkitAudioContext;
       if (!AudioCtx) return;
@@ -105,32 +280,52 @@ export const CallProvider = ({ children }) => {
       osc2.start(ctx.currentTime + 0.05);
       osc1.stop(ctx.currentTime + 0.32);
       osc2.stop(ctx.currentTime + 0.32);
-    } catch (e) {
+    } catch {
       // Audio autoplay policy catch
     }
   }, []);
 
-  const addToast = React.useCallback(({ id, title, description, type, link, class_level }) => {
-    if (!allowOnScreenToasts) return;
+  const clearAllToasts = useCallback(() => {
+    toastTimersRef.current.forEach((timerId) => clearTimeout(timerId));
+    toastTimersRef.current.clear();
+    setToasts([]);
+  }, []);
+
+  const removeToast = useCallback((id) => {
+    setToasts(prev => {
+      const target = prev.find(t => t.id === id);
+      if (target && target.timerKey && toastTimersRef.current.has(target.timerKey)) {
+        clearTimeout(toastTimersRef.current.get(target.timerKey));
+        toastTimersRef.current.delete(target.timerKey);
+      }
+      return prev.filter(t => t.id !== id);
+    });
+  }, []);
+
+  const addToast = useCallback(({ id, title, description, type, link, class_level }) => {
+    if (!allowOnScreenToastsRef.current) return;
     playNotificationSound();
 
-    const generatedId = id || `toast-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-    let targetToastId = generatedId;
+    const isCoalescedChat = type === 'chat' && Boolean(class_level);
+    const generatedId = isCoalescedChat
+      ? `chat-${class_level}`
+      : (id || `toast-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`);
+    const timerKey = generatedId;
+    const now = Date.now();
 
     setToasts(prev => {
-      // Coalesce chat messages for the same class level into 1 toast card
-      if (type === 'chat' && class_level) {
+      if (isCoalescedChat) {
         const existingIndex = prev.findIndex(t => t.type === 'chat' && t.class_level === class_level);
         if (existingIndex > -1) {
           const existing = prev[existingIndex];
-          targetToastId = existing.id;
           const count = (existing.count || 1) + 1;
           const updated = {
             ...existing,
             title: `${count} New Messages in Class ${class_level}`,
             description,
             count,
-            createdAt: Date.now()
+            timerKey,
+            createdAt: now
           };
           const copy = [...prev];
           copy[existingIndex] = updated;
@@ -139,26 +334,29 @@ export const CallProvider = ({ children }) => {
       }
 
       const filtered = prev.filter(t => t.id !== generatedId);
-      // Cap visible toast stack to MAX 2 items so screen is never cluttered
-      return [...filtered, { id: generatedId, title, description, type, link, class_level, count: 1, createdAt: Date.now() }].slice(-2);
+      return [...filtered, { id: generatedId, timerKey, title, description, type, link, class_level, count: 1, createdAt: now }].slice(-2);
     });
 
-    const timerKey = type === 'chat' && class_level ? `chat-${class_level}` : targetToastId;
     if (toastTimersRef.current.has(timerKey)) {
       clearTimeout(toastTimersRef.current.get(timerKey));
     }
     const timerHandle = setTimeout(() => {
       toastTimersRef.current.delete(timerKey);
-      setToasts(prev => prev.filter(t => (type === 'chat' && class_level ? !(t.type === 'chat' && t.class_level === class_level) : t.id !== targetToastId)));
+      setToasts(prev => prev.filter(t => t.timerKey !== timerKey));
     }, 4500);
     toastTimersRef.current.set(timerKey, timerHandle);
-  }, [allowOnScreenToasts, playNotificationSound]);
+  }, [playNotificationSound]);
 
-  const removeToast = React.useCallback((id) => {
-    setToasts(prev => prev.filter(t => t.id !== id));
-  }, []);
+  const sendBrowserNotification = useCallback((title, body, tag, icon, link) => {
+    if (window.AndroidNotificationBridge && typeof window.AndroidNotificationBridge.showNotification === 'function') {
+      try {
+        window.AndroidNotificationBridge.showNotification(title, body, tag || '');
+        return;
+      } catch (err) {
+        console.error('Failed to trigger Android notification bridge:', err);
+      }
+    }
 
-  const sendBrowserNotification = React.useCallback((title, body, tag, icon, link) => {
     if ('Notification' in window && Notification.permission === 'granted') {
       try {
         const notif = new Notification(title, {
@@ -170,8 +368,9 @@ export const CallProvider = ({ children }) => {
         notif.onclick = () => {
           window.focus();
           if (link) {
-            if (tag.startsWith('chat-') && tag.split('-')[1]) {
-              setCurrentRoom(tag.split('-')[1]);
+            if (tag && tag.startsWith('chat-')) {
+              const roomName = tag.slice(5);
+              if (roomName) setCurrentRoom(roomName);
             }
             navigate(link);
           }
@@ -183,19 +382,20 @@ export const CallProvider = ({ children }) => {
     }
   }, [navigate]);
 
-  // Clean up timers and call streams on provider unmount (e.g. logout)
-  useEffect(() => {
-    return () => {
-      if (callTimerRef.current) clearInterval(callTimerRef.current);
-      if (activeCallRef.current && activeCallRef.current.stream) {
-        activeCallRef.current.stream.getTracks().forEach(track => track.stop());
-      }
-    };
-  }, []);
+  const userId = user?.id || user?._id || null;
+  const userRole = user?.role || null;
+  const studentProfileId = user?.studentProfile?._id || (typeof user?.studentProfile === 'string' ? user.studentProfile : null);
+  const studentClassLevel = user?.studentProfile?.class_level || null;
 
-  // Global socket calling & notification events listener
+  // Global socket calling, WebRTC signaling & notification events listener
   useEffect(() => {
-    if (!user) {
+    if (!userId) {
+      handleEndCall(false);
+      setIncomingCall(null);
+      setActiveRoomCall(null);
+      setCurrentRoom('');
+      clearAllToasts();
+
       if (socket.connected) {
         socket.disconnect();
       }
@@ -214,16 +414,17 @@ export const CallProvider = ({ children }) => {
     }
 
     const syncNativeBridge = (roomsList) => {
-      if (window.AndroidNotificationBridge) {
+      const currentUser = userRef.current;
+      if (window.AndroidNotificationBridge && currentUser) {
         try {
-          const myName = user.studentProfile?.name || (user.role === 'SuperAdmin' ? 'Admin' : 'Teacher');
-          const roomValue = roomsList.length > 0 ? roomsList.join(',') : (user.studentProfile?.class_level || 'All');
+          const myName = getDisplayName(currentUser);
+          const roomValue = roomsList.length > 0 ? roomsList.join(',') : (currentUser.studentProfile?.class_level || 'All');
           const socketUrl = import.meta.env.VITE_API_URL || window.location.origin;
           const authToken = localStorage.getItem('token') || '';
           if (typeof window.AndroidNotificationBridge.registerUserWithToken === 'function') {
-            window.AndroidNotificationBridge.registerUserWithToken(user.email, roomValue, myName, socketUrl, authToken);
+            window.AndroidNotificationBridge.registerUserWithToken(currentUser.email, roomValue, myName, socketUrl, authToken);
           } else if (typeof window.AndroidNotificationBridge.registerUser === 'function') {
-            window.AndroidNotificationBridge.registerUser(user.email, roomValue, myName, socketUrl);
+            window.AndroidNotificationBridge.registerUser(currentUser.email, roomValue, myName, socketUrl);
           }
         } catch (err) {
           console.error('Failed to register native user:', err);
@@ -231,20 +432,17 @@ export const CallProvider = ({ children }) => {
       }
     };
 
-    // Join room(s)
     const joinClassrooms = async () => {
       const joinedRooms = new Set();
-      if (user.role === 'Student') {
-        const classLevel = user.studentProfile?.class_level;
-        if (classLevel) {
-          socket.emit('join_room', classLevel);
-          socket.emit('join_room', classLevel.trim().toUpperCase());
-          joinedRooms.add(classLevel.trim());
+      if (userRole === 'Student') {
+        if (studentClassLevel) {
+          socket.emit('join_room', studentClassLevel);
+          socket.emit('join_room', studentClassLevel.trim().toUpperCase());
+          joinedRooms.add(studentClassLevel.trim());
         }
-        const studentId = user.studentProfile?._id || (typeof user.studentProfile === 'string' ? user.studentProfile : null);
-        if (studentId) {
-          socket.emit('join_room', `USER_${studentId}`);
-          joinedRooms.add(`USER_${studentId}`);
+        if (studentProfileId) {
+          socket.emit('join_room', `USER_${studentProfileId}`);
+          joinedRooms.add(`USER_${studentProfileId}`);
         }
         try {
           const batchRes = await axios.get('/api/special-batches');
@@ -271,15 +469,13 @@ export const CallProvider = ({ children }) => {
               joinedRooms.add(room.trim());
             });
           } else {
-            const fallbackRooms = ['VII', 'VIII', 'IX', 'X'];
-            fallbackRooms.forEach(room => {
+            ['VII', 'VIII', 'IX', 'X'].forEach(room => {
               socket.emit('join_room', room);
               joinedRooms.add(room);
             });
           }
-        } catch (err) {
-          const fallbackRooms = ['VII', 'VIII', 'IX', 'X'];
-          fallbackRooms.forEach(room => {
+        } catch {
+          ['VII', 'VIII', 'IX', 'X'].forEach(room => {
             socket.emit('join_room', room);
             joinedRooms.add(room);
           });
@@ -303,25 +499,116 @@ export const CallProvider = ({ children }) => {
     joinClassrooms();
 
     const handleGlobalIncomingCall = (data) => {
+      if (!data) return;
       playNotificationSound();
-      if (pathnameRef.current !== '/chats') {
+      if (pathnameRef.current !== '/chats' || currentRoomRef.current !== data.class_level) {
         setIncomingCall(data);
       }
       setActiveRoomCall(data);
     };
 
     const handleGlobalCallEnded = (data) => {
+      if (!data) return;
       setIncomingCall(prev => (prev && prev.class_level === data.class_level ? null : prev));
       setActiveRoomCall(prev => (prev && prev.class_level === data.class_level ? null : prev));
-      
-      if (activeCallRef.current && currentRoomRef.current === data.class_level) {
+
+      if (activeCallRef.current && (activeCallRoomRef.current === data.class_level || currentRoomRef.current === data.class_level)) {
         handleEndCall(false);
       }
     };
 
+    const handleCallPeers = async (data) => {
+      if (!activeCallRef.current || !data || !Array.isArray(data.peers)) return;
+      const room = data.class_level || activeCallRoomRef.current || currentRoomRef.current;
+      for (const peer of data.peers) {
+        const targetId = peer?.socketId;
+        if (!targetId || targetId === socket.id) continue;
+        try {
+          const pc = createPeerConnection(targetId, peer, room);
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          socket.emit('webrtc_offer', {
+            class_level: room,
+            targetSocketId: targetId,
+            offer
+          });
+        } catch (err) {
+          console.error('Failed to initiate WebRTC offer:', err);
+        }
+      }
+    };
+
+    const handleWebRtcOffer = async (data) => {
+      if (!activeCallRef.current || !data?.fromSocketId || !data?.offer) return;
+      const room = data.class_level || activeCallRoomRef.current || currentRoomRef.current;
+      try {
+        const pc = createPeerConnection(
+          data.fromSocketId,
+          { name: data.fromName, role: data.fromRole },
+          room
+        );
+        await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
+
+        const queued = pendingIceCandidatesRef.current.get(data.fromSocketId) || [];
+        for (const cand of queued) {
+          await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(() => {});
+        }
+        pendingIceCandidatesRef.current.delete(data.fromSocketId);
+
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        socket.emit('webrtc_answer', {
+          class_level: room,
+          targetSocketId: data.fromSocketId,
+          answer
+        });
+      } catch (err) {
+        console.error('Failed to handle WebRTC offer:', err);
+      }
+    };
+
+    const handleWebRtcAnswer = async (data) => {
+      if (!data?.fromSocketId || !data?.answer) return;
+      const pc = peerConnectionsRef.current.get(data.fromSocketId);
+      if (!pc) return;
+      try {
+        await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+        const queued = pendingIceCandidatesRef.current.get(data.fromSocketId) || [];
+        for (const cand of queued) {
+          await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(() => {});
+        }
+        pendingIceCandidatesRef.current.delete(data.fromSocketId);
+      } catch (err) {
+        console.error('Failed to handle WebRTC answer:', err);
+      }
+    };
+
+    const handleWebRtcIceCandidate = async (data) => {
+      if (!data?.fromSocketId || !data?.candidate) return;
+      const pc = peerConnectionsRef.current.get(data.fromSocketId);
+      if (pc && pc.remoteDescription) {
+        await pc.addIceCandidate(new RTCIceCandidate(data.candidate)).catch(() => {});
+      } else {
+        const queued = pendingIceCandidatesRef.current.get(data.fromSocketId) || [];
+        queued.push(data.candidate);
+        pendingIceCandidatesRef.current.set(data.fromSocketId, queued);
+      }
+    };
+
+    const handleCallPeerLeft = (data) => {
+      if (data?.socketId) {
+        closePeerConnection(data.socketId);
+      }
+    };
+
     const handleNewMessageGlobal = (msg) => {
-      const myName = user.studentProfile?.name || (user.role === 'SuperAdmin' ? 'Admin' : 'Teacher');
-      if (msg.sender_name === myName) return;
+      const currentUser = userRef.current;
+      if (!currentUser || !msg) return;
+      const currentUserId = currentUser.id || currentUser._id;
+      const isSelf =
+        (msg.sender_id && currentUserId && String(msg.sender_id) === String(currentUserId)) ||
+        (!msg.sender_id && msg.sender_name === getDisplayName(currentUser));
+      if (isSelf) return;
 
       const isChatPage = pathnameRef.current === '/chats';
       const isCurrentRoom = msg.class_level === currentRoomRef.current;
@@ -330,11 +617,16 @@ export const CallProvider = ({ children }) => {
       const shouldShowInAppToast = !isChatPage || !isCurrentRoom;
       const shouldShowBrowserNotification = !isTabVisible || !isChatPage || !isCurrentRoom;
 
+      const previewText =
+        typeof msg.message_text === 'string' && msg.message_text.startsWith('{"isAttachment":true')
+          ? '📎 Sent an attachment'
+          : msg.message_text;
+
       if (shouldShowInAppToast) {
         addToast({
           id: `chat-${msg._id}-${Date.now()}`,
           title: `New Message in Class ${msg.class_level}`,
-          description: `${msg.sender_name}: ${msg.message_text}`,
+          description: `${msg.sender_name}: ${previewText}`,
           type: 'chat',
           link: '/chats',
           class_level: msg.class_level
@@ -344,54 +636,72 @@ export const CallProvider = ({ children }) => {
       if (shouldShowBrowserNotification) {
         sendBrowserNotification(
           `Class ${msg.class_level} Chat`,
-          `${msg.sender_name}: ${msg.message_text}`,
+          `${msg.sender_name}: ${previewText}`,
           `chat-${msg.class_level}`,
-          user.profile_pic,
+          null,
           '/chats'
         );
       }
     };
 
     const handleNewStudyMaterialGlobal = (data) => {
-      if (user.role === 'Student') {
-        const studentClass = user.studentProfile?.class_level;
-        if (studentClass && studentClass.trim().toUpperCase() !== data.class_level?.trim().toUpperCase()) return;
+      const currentUser = userRef.current;
+      if (!currentUser || !data) return;
+
+      const isSpecialBatch = Boolean(data.isSpecialBatch || data.batchId);
+
+      if (!isSpecialBatch && currentUser.role === 'Student') {
+        const studentClass = currentUser.studentProfile?.class_level;
+        if (studentClass && data.class_level && studentClass.trim().toUpperCase() !== data.class_level.trim().toUpperCase()) {
+          return;
+        }
       }
 
-      const isLmsPage = pathnameRef.current === '/lms';
+      const targetLink = isSpecialBatch
+        ? (currentUser.role === 'Student' ? '/' : '/special-batches')
+        : '/lms';
+      const isOnTargetPage = pathnameRef.current === targetLink;
       const isTabVisible = !document.hidden;
 
-      const shouldShowInAppToast = !isLmsPage;
-      const shouldShowBrowserNotification = !isTabVisible || !isLmsPage;
+      const shouldShowInAppToast = !isOnTargetPage;
+      const shouldShowBrowserNotification = !isTabVisible || !isOnTargetPage;
+
+      const batchLabel = data.batch_name || 'Special Batch';
+      const itemTitle = data.chapter_name || data.title || 'New Handout';
+      const subjectLabel = data.subject || 'General';
 
       if (shouldShowInAppToast) {
         addToast({
-          id: `lms-${data.material?._id || Date.now()}`,
-          title: `New Study Material for Class ${data.class_level}`,
-          description: `Subject: ${data.subject} - Title: ${data.chapter_name}`,
+          id: `lms-${data.material?._id || data.batchId || Date.now()}`,
+          title: isSpecialBatch
+            ? `New Material: ${batchLabel}`
+            : `New Study Material for Class ${data.class_level}`,
+          description: `Subject: ${subjectLabel} - ${itemTitle}`,
           type: 'lms',
-          link: '/lms'
+          link: targetLink
         });
       }
 
       if (shouldShowBrowserNotification) {
         sendBrowserNotification(
-          `New Notes: Class ${data.class_level}`,
-          `Subject: ${data.subject}\nChapter: ${data.chapter_name}`,
-          `lms-${data.class_level}`,
+          isSpecialBatch ? `New Notes: ${batchLabel}` : `New Notes: Class ${data.class_level}`,
+          `Subject: ${subjectLabel}\nTitle: ${itemTitle}`,
+          `lms-${isSpecialBatch ? (data.batchId || 'batch') : (data.class_level || 'all')}`,
           null,
-          '/lms'
+          targetLink
         );
       }
     };
 
     const handleNewNoticeGlobal = (data) => {
+      const currentUser = userRef.current;
+      if (!currentUser || !data) return;
       addToast({
         id: `notice-${Date.now()}`,
         title: `Academic Announcement: ${data.subject}`,
         description: data.body,
         type: 'notice',
-        link: user.role === 'SuperAdmin' ? '/automations' : '/'
+        link: currentUser.role === 'SuperAdmin' ? '/automations' : '/'
       });
       sendBrowserNotification(
         `EduStride Notice: ${data.subject}`,
@@ -420,6 +730,11 @@ export const CallProvider = ({ children }) => {
     socket.on('disconnect', handleDisconnect);
     socket.on('incoming_call', handleGlobalIncomingCall);
     socket.on('call_ended', handleGlobalCallEnded);
+    socket.on('call_peers', handleCallPeers);
+    socket.on('webrtc_offer', handleWebRtcOffer);
+    socket.on('webrtc_answer', handleWebRtcAnswer);
+    socket.on('webrtc_ice_candidate', handleWebRtcIceCandidate);
+    socket.on('call_peer_left', handleCallPeerLeft);
     socket.on('new_message', handleNewMessageGlobal);
     socket.on('new_study_material', handleNewStudyMaterialGlobal);
     socket.on('new_notice', handleNewNoticeGlobal);
@@ -430,42 +745,73 @@ export const CallProvider = ({ children }) => {
       socket.off('disconnect', handleDisconnect);
       socket.off('incoming_call', handleGlobalIncomingCall);
       socket.off('call_ended', handleGlobalCallEnded);
+      socket.off('call_peers', handleCallPeers);
+      socket.off('webrtc_offer', handleWebRtcOffer);
+      socket.off('webrtc_answer', handleWebRtcAnswer);
+      socket.off('webrtc_ice_candidate', handleWebRtcIceCandidate);
+      socket.off('call_peer_left', handleCallPeerLeft);
       socket.off('new_message', handleNewMessageGlobal);
       socket.off('new_study_material', handleNewStudyMaterialGlobal);
       socket.off('new_notice', handleNewNoticeGlobal);
     };
-  }, [user, user?.studentProfile?.class_level, addToast, sendBrowserNotification, playNotificationSound]);
+  }, [
+    userId,
+    userRole,
+    studentProfileId,
+    studentClassLevel,
+    addToast,
+    clearAllToasts,
+    sendBrowserNotification,
+    playNotificationSound,
+    createPeerConnection,
+    closePeerConnection,
+    handleEndCall
+  ]);
 
-  const handleStartCall = async (isHost = false) => {
+  const handleStartCall = useCallback(async (isHost = false, roomOverride = null) => {
+    const targetRoom = roomOverride || currentRoomRef.current;
+    const currentUser = userRef.current;
+    if (!targetRoom || !currentUser) return;
+
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: false,
         audio: true
       });
-      
-      setActiveCall({ stream });
+
+      const callObj = { stream, room: targetRoom };
+      activeCallRef.current = callObj;
+      activeCallRoomRef.current = targetRoom;
+      setActiveCall(callObj);
       setIsMuted(false);
       setCallDuration(0);
-      
-      // Auto-detect if we are the host of the active call (if rejoining)
-      const isActuallyHost = isHost || (activeRoomCall && activeRoomCall.hostEmail === user.email);
+
+      const currentRoomCall = activeRoomCallRef.current;
+      const isActuallyHost =
+        Boolean(isHost) ||
+        Boolean(currentRoomCall && currentRoomCall.class_level === targetRoom && currentRoomCall.hostEmail === currentUser.email);
+      isCallHostRef.current = isActuallyHost;
       setIsCallHost(isActuallyHost);
 
-      // Emit calling state to room ONLY if host
-      if (isActuallyHost && socket.connected) {
-        socket.emit('start_call', {
-          class_level: currentRoomRef.current,
-          caller_name: user.studentProfile?.name || (user.role === 'SuperAdmin' ? 'Admin' : 'Teacher'),
-          hostEmail: user.email
-        });
-        setActiveRoomCall({
-          class_level: currentRoomRef.current,
-          caller_name: user.studentProfile?.name || (user.role === 'SuperAdmin' ? 'Admin' : 'Teacher'),
-          hostEmail: user.email
-        });
+      const callerName = getDisplayName(currentUser);
+
+      if (socket.connected) {
+        if (isActuallyHost) {
+          socket.emit('start_call', {
+            class_level: targetRoom,
+            caller_name: callerName,
+            hostEmail: currentUser.email
+          });
+          setActiveRoomCall({
+            class_level: targetRoom,
+            caller_name: callerName,
+            hostEmail: currentUser.email
+          });
+        } else {
+          socket.emit('join_call', { class_level: targetRoom });
+        }
       }
 
-      // Start duration timer
       if (callTimerRef.current) clearInterval(callTimerRef.current);
       callTimerRef.current = setInterval(() => {
         setCallDuration(prev => prev + 1);
@@ -474,35 +820,24 @@ export const CallProvider = ({ children }) => {
       console.error('Failed to get media devices:', err);
       alert('Could not access microphone. Please check system permissions.');
     }
-  };
+  }, []);
 
-  const handleEndCall = (terminateForAll = false) => {
+  const joinCallInRoom = useCallback((room) => {
+    if (!room) return;
+    setCurrentRoom(room);
+    currentRoomRef.current = room;
+    return handleStartCall(false, room);
+  }, [handleStartCall]);
+
+  const toggleMute = useCallback(() => {
     if (activeCallRef.current && activeCallRef.current.stream) {
-      activeCallRef.current.stream.getTracks().forEach(track => track.stop());
-    }
-    if (callTimerRef.current) {
-      clearInterval(callTimerRef.current);
-      callTimerRef.current = null;
-    }
-    // Emit call end state to room ONLY if requested and they are the call host!
-    if (terminateForAll && socket.connected && activeCallRef.current && isCallHostRef.current) {
-      socket.emit('end_call', { class_level: currentRoomRef.current });
-      setActiveRoomCall(null);
-    }
-    setActiveCall(null);
-    setCallDuration(0);
-    setIsCallHost(false);
-  };
-
-  const toggleMute = () => {
-    if (activeCall && activeCall.stream) {
-      const audioTracks = activeCall.stream.getAudioTracks();
+      const audioTracks = activeCallRef.current.stream.getAudioTracks();
       audioTracks.forEach(track => {
         track.enabled = !track.enabled;
       });
-      setIsMuted(!isMuted);
+      setIsMuted(prev => !prev);
     }
-  };
+  }, []);
 
   const formatCallDuration = (seconds) => {
     const mins = Math.floor(seconds / 60);
@@ -522,7 +857,10 @@ export const CallProvider = ({ children }) => {
       isCallHost,
       currentRoom,
       setCurrentRoom,
+      remoteStreams,
+      remoteParticipants: remoteStreams.length,
       handleStartCall,
+      joinCallInRoom,
       handleEndCall,
       toggleMute,
       formatCallDuration,
@@ -533,53 +871,60 @@ export const CallProvider = ({ children }) => {
       toggleOnScreenToasts
     }}>
       {children}
-      
-      {/* Global Call Notification Toast */}
-      {/* Incoming Call Notification Banner */}
-      {incomingCall && location.pathname !== '/chats' && !activeCall && (
-        <div className="fixed top-4 sm:top-5 right-4 sm:right-5 z-[200] max-w-sm w-[calc(100vw-2rem)] sm:w-full bg-dark-900/90 backdrop-blur-md border border-emerald-500/30 p-3.5 sm:p-4 rounded-2xl flex items-center justify-between gap-3 sm:gap-4 shadow-2xl animate-scaleUp text-slate-100 select-none">
-          <div className="flex items-center gap-3 min-w-0">
-            <div className="p-3 sm:p-3.5 rounded-xl bg-emerald-600/10 text-emerald-400 border border-emerald-500/10 relative shrink-0">
-              <span className="absolute -top-0.5 -right-0.5 flex h-2 w-2">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-450 opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-              </span>
-              <Phone size={18} />
-            </div>
-            <div className="min-w-0">
-              <h4 className="text-xs font-bold text-white font-outfit truncate">Active Voice Call</h4>
-              <p className="text-[10px] text-slate-400 mt-0.5 leading-snug line-clamp-2">
-                {incomingCall.caller_name} is broadcasting in Class {incomingCall.class_level} Lounge.
-              </p>
-            </div>
-          </div>
-          <div className="flex flex-col gap-1.5 shrink-0">
-            <button
-              onClick={() => {
-                localStorage.setItem('autoJoinCall', 'true');
-                navigate('/chats');
-                setIncomingCall(null);
-              }}
-              className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-555 text-[10px] font-bold text-white transition cursor-pointer text-center active:scale-95"
-            >
-              Join Call
-            </button>
-            <button
-              onClick={() => setIncomingCall(null)}
-              className="px-3 py-1.5 rounded-lg bg-dark-955/60 border border-dark-800 hover:bg-dark-800 text-[10px] font-semibold text-slate-400 hover:text-white transition cursor-pointer text-center active:scale-95"
-            >
-              Dismiss
-            </button>
-          </div>
-        </div>
-      )}
 
-      {/* Toast Notifications Queue */}
+      {/* Hidden WebRTC Remote Audio Streams */}
+      {remoteStreams.map((rs) => (
+        <RemoteAudioPlayer key={rs.socketId} stream={rs.stream} />
+      ))}
+
+      {/* Unified Top-Right Notification Stack (Incoming Call Banner + Toasts) */}
       <div className="fixed top-4 sm:top-5 right-4 sm:right-6 z-[200] flex flex-col gap-2.5 max-w-xs sm:max-w-sm w-[calc(100%-2rem)] sm:w-80 pointer-events-none">
+        {/* Global Incoming Call Notification Banner */}
+        {incomingCall && location.pathname !== '/chats' && !activeCall && (
+          <div className="pointer-events-auto w-full bg-dark-900/95 backdrop-blur-md border border-emerald-500/30 p-3.5 sm:p-4 rounded-2xl flex items-center justify-between gap-3 sm:gap-4 shadow-2xl animate-scaleUp text-slate-100 select-none">
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="p-3 sm:p-3.5 rounded-xl bg-emerald-600/10 text-emerald-400 border border-emerald-500/10 relative shrink-0">
+                <span className="absolute -top-0.5 -right-0.5 flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-450 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                </span>
+                <Phone size={18} />
+              </div>
+              <div className="min-w-0">
+                <h4 className="text-xs font-bold text-white font-outfit truncate">Active Voice Call</h4>
+                <p className="text-[10px] text-slate-400 mt-0.5 leading-snug line-clamp-2">
+                  {incomingCall.caller_name} is broadcasting in Class {incomingCall.class_level} Lounge.
+                </p>
+              </div>
+            </div>
+            <div className="flex flex-col gap-1.5 shrink-0">
+              <button
+                onClick={() => {
+                  const targetRoom = incomingCall.class_level;
+                  setIncomingCall(null);
+                  navigate('/chats', {
+                    state: { targetRoom, autoJoinCall: true }
+                  });
+                }}
+                className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-555 text-[10px] font-bold text-white transition cursor-pointer text-center active:scale-95"
+              >
+                Join Call
+              </button>
+              <button
+                onClick={() => setIncomingCall(null)}
+                className="px-3 py-1.5 rounded-lg bg-dark-955/60 border border-dark-800 hover:bg-dark-800 text-[10px] font-semibold text-slate-400 hover:text-white transition cursor-pointer text-center active:scale-95"
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Toast Notifications Queue */}
         {toasts.length > 1 && (
           <div className="flex justify-end pointer-events-auto">
             <button
-              onClick={() => setToasts([])}
+              onClick={clearAllToasts}
               className="text-[9px] font-bold font-mono uppercase tracking-wider px-2 py-0.5 rounded-full bg-dark-900/90 border border-dark-800 text-slate-400 hover:text-white transition cursor-pointer shadow-md backdrop-blur-md"
             >
               Clear All ({toasts.length})
@@ -616,7 +961,7 @@ export const CallProvider = ({ children }) => {
                   </div>
                   <div className="overflow-hidden">
                     <div className="flex items-center gap-1.5 mb-0.5">
-                      <span className={`text-[8px] font-mono font-extrabold uppercase px-1.5 py-0.2 rounded border ${iconBg}`}>
+                      <span className={`text-[8px] font-mono font-extrabold uppercase px-1.5 py-0.5 rounded border ${iconBg}`}>
                         {categoryLabel}
                       </span>
                       <span className="text-[9px] font-mono text-slate-500">Just now</span>
@@ -642,20 +987,13 @@ export const CallProvider = ({ children }) => {
                 </button>
               </div>
 
-              {/* Progress bar countdown indicator line */}
+              {/* CSS-animated progress bar countdown indicator line */}
               <div className="w-full h-0.5 bg-dark-950 rounded-full overflow-hidden relative">
-                <div 
+                <div
+                  key={`${toast.id}-${toast.createdAt}`}
                   className={`h-full ${
                     toast.type === 'chat' ? 'bg-primary-500' : toast.type === 'notice' ? 'bg-amber-500' : 'bg-emerald-500'
-                  } rounded-full transition-all duration-[4500ms] ease-linear`}
-                  style={{ width: '0%' }}
-                  ref={(el) => {
-                    if (el) {
-                      requestAnimationFrame(() => {
-                        el.style.width = '100%';
-                      });
-                    }
-                  }}
+                  } rounded-full animate-toast-progress`}
                 />
               </div>
             </div>
@@ -678,7 +1016,7 @@ export const CallProvider = ({ children }) => {
             <div className="min-w-0">
               <h4 className="text-xs font-bold text-white font-outfit truncate">Lounge Call Active</h4>
               <p className="text-[10px] text-slate-400 font-medium font-mono mt-0.5 truncate">
-                ⏱ {formatCallDuration(callDuration)} • Class {currentRoom}
+                ⏱ {formatCallDuration(callDuration)} • {remoteStreams.length + 1} in call • Class {activeCall.room || currentRoom}
               </p>
             </div>
           </div>

@@ -1,11 +1,15 @@
-# Proguard Rules for EduStride Native App
+# ProGuard / R8 Rules for EduStride Android App
 
-# Keep Retrofit data models so they are not obfuscated during serialization/deserialization
--keep class com.edustride.app.data.models.** { *; }
+# Preserve generic signatures and inner/enclosing class metadata
+-keepattributes Signature, InnerClasses, EnclosingMethod
 
-# Keep Socket.io client library references
+# Keep WebView @JavascriptInterface methods so JS bridge calls are never stripped or obfuscated
+-keepclassmembers class * {
+    @android.webkit.JavascriptInterface <methods>;
+}
+
+# Keep Socket.io client library and JSON references
 -keep class io.socket.** { *; }
-
-# Keep Glide annotations and classes
--keep public class * extends com.bumptech.glide.module.AppGlideModule
--keep class com.bumptech.glide.GeneratedAppGlideModuleImpl
+-dontwarn io.socket.**
+-keep class org.json.** { *; }
+-dontwarn org.json.**

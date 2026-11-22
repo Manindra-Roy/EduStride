@@ -11,6 +11,7 @@ export const themes = {
       600: '#4f46e5',
       700: '#4338ca',
       800: '#3730a3',
+      900: '#312e81',
       950: '#1e1b4b',
     }
   },
@@ -26,7 +27,8 @@ export const themes = {
       600: '#059669',
       700: '#047857',
       800: '#065f46',
-      950: '#064e3b',
+      900: '#064e3b',
+      950: '#022c22',
     }
   },
   amber: {
@@ -41,7 +43,8 @@ export const themes = {
       600: '#d97706',
       700: '#b45309',
       800: '#92400e',
-      950: '#78350f',
+      900: '#78350f',
+      950: '#451a03',
     }
   },
   rose: {
@@ -56,7 +59,8 @@ export const themes = {
       600: '#e11d48',
       700: '#be123c',
       800: '#9f1239',
-      950: '#881337',
+      900: '#881337',
+      950: '#4c0519',
     }
   },
   violet: {
@@ -71,7 +75,8 @@ export const themes = {
       600: '#7c3aed',
       700: '#6d28d9',
       800: '#5b21b6',
-      950: '#4c1d95',
+      900: '#4c1d95',
+      950: '#2e1065',
     }
   },
   cyan: {
@@ -86,18 +91,31 @@ export const themes = {
       600: '#0891b2',
       700: '#0e7490',
       800: '#155e75',
-      950: '#164e63',
+      900: '#164e63',
+      950: '#083344',
     }
   }
 };
 
+const hexToRgbChannels = (hex) => {
+  if (typeof hex !== 'string') return '99 102 241';
+  const cleaned = hex.replace('#', '').trim();
+  if (cleaned.length !== 6) return '99 102 241';
+  const r = parseInt(cleaned.slice(0, 2), 16);
+  const g = parseInt(cleaned.slice(2, 4), 16);
+  const b = parseInt(cleaned.slice(4, 6), 16);
+  if ([r, g, b].some(Number.isNaN)) return '99 102 241';
+  return `${r} ${g} ${b}`;
+};
+
 export const applyThemeAccent = (colorKey) => {
   const root = document.documentElement;
-  const theme = themes[colorKey] || themes.indigo;
+  const resolvedKey = themes[colorKey] ? colorKey : 'indigo';
+  const theme = themes[resolvedKey];
   Object.keys(theme.colors).forEach(key => {
-    root.style.setProperty(`--color-primary-${key}`, theme.colors[key]);
+    root.style.setProperty(`--color-primary-${key}`, hexToRgbChannels(theme.colors[key]));
   });
-  localStorage.setItem('edustride_theme_color', colorKey);
+  localStorage.setItem('edustride_theme_color', resolvedKey);
 };
 
 export const getSavedThemeAccent = () => {

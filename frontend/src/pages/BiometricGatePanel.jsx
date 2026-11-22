@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import axios from 'axios';
 import { useAuth } from '../context/AuthContext';
 import { socket } from '../config/socket';
+import { getTodayIST } from '../utils/istDate';
 import {
   Fingerprint,
   Power,
@@ -40,11 +41,6 @@ import {
   Activity,
   Radio
 } from 'lucide-react';
-
-const getTodayIST = () => {
-  const ist = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
-  return ist.toISOString().split('T')[0];
-};
 
 const formatISTTime = (isoDate) => {
   if (!isoDate) return '-';
@@ -123,6 +119,15 @@ const BiometricGatePanel = () => {
 
   // Feedback banners
   const [feedback, setFeedback] = useState({ type: '', text: '' });
+  const feedbackTimerRef = useRef(null);
+  const copyTimerRef = useRef(null);
+
+  useEffect(() => {
+    return () => {
+      if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+    };
+  }, []);
 
   const activeDevice = useMemo(
     () => devices.find(d => d.device_id === selectedDeviceId) || devices[0] || null,
@@ -133,9 +138,16 @@ const BiometricGatePanel = () => {
     setPinnedSessionInput(activeDevice?.pinned_session_name || '');
   }, [activeDevice?.device_id, activeDevice?.pinned_session_name]);
 
+  // Reset live command when switching gate scanner device
+  useEffect(() => {
+    setLiveCommand(null);
+  }, [selectedDeviceId]);
+
   const showToastBanner = (type, text) => {
     setFeedback({ type, text });
-    setTimeout(() => {
+    if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
+    feedbackTimerRef.current = setTimeout(() => {
+      feedbackTimerRef.current = null;
       setFeedback(prev => (prev.text === text ? { type: '', text: '' } : prev));
     }, 5000);
   };
@@ -254,17 +266,40 @@ const BiometricGatePanel = () => {
     };
   }, [isStaff, isCommandInFlight, fetchDevices]);
 
+  // Keep filter & callback refs up to date so Socket.IO listeners never tear down on search keystrokes
+  const selectedDateRef = useRef(selectedDate);
+  const classFilterRef = useRef(classFilter);
+  const eventFilterRef = useRef(eventFilter);
+  const searchQueryRef = useRef(searchQuery);
+  const activeTabRef = useRef(activeTab);
+  const selectedDeviceIdRef = useRef(selectedDeviceId);
+  const fetchLogsRef = useRef(fetchLogs);
+  const fetchDevicesRef = useRef(fetchDevices);
+  const fetchEnrollmentDataRef = useRef(fetchEnrollmentData);
+
+  useEffect(() => { selectedDateRef.current = selectedDate; }, [selectedDate]);
+  useEffect(() => { classFilterRef.current = classFilter; }, [classFilter]);
+  useEffect(() => { eventFilterRef.current = eventFilter; }, [eventFilter]);
+  useEffect(() => { searchQueryRef.current = searchQuery; }, [searchQuery]);
+  useEffect(() => { activeTabRef.current = activeTab; }, [activeTab]);
+  useEffect(() => { selectedDeviceIdRef.current = selectedDeviceId; }, [selectedDeviceId]);
+  useEffect(() => { fetchLogsRef.current = fetchLogs; }, [fetchLogs]);
+  useEffect(() => { fetchDevicesRef.current = fetchDevices; }, [fetchDevices]);
+  useEffect(() => { fetchEnrollmentDataRef.current = fetchEnrollmentData; }, [fetchEnrollmentData]);
+
+  const userId = user?.id || user?._id || null;
+  const studentProfileId = user?.studentProfile?._id || (typeof user?.studentProfile === 'string' ? user.studentProfile : null);
+
   // Subscribe to Socket.IO for live scan, attendance & enrollment updates (Staff + Students)
   useEffect(() => {
-    if (!user) return;
+    if (!userId) return;
     if (!socket.connected) socket.connect();
 
     const joinLiveRooms = () => {
       if (isStaff) {
         socket.emit('join_room', 'GATE_MONITOR');
-      } else {
-        const sid = user.studentProfile?._id || (typeof user.studentProfile === 'string' ? user.studentProfile : null);
-        if (sid) socket.emit('join_room', `USER_${sid}`);
+      } else if (studentProfileId) {
+        socket.emit('join_room', `USER_${studentProfileId}`);
       }
     };
 
@@ -272,11 +307,13 @@ const BiometricGatePanel = () => {
 
     const handleScanEvent = (newLog) => {
       if (!newLog) return;
-      if (newLog.date === selectedDate) {
-        const matchesClass = !isStaff || classFilter === 'All' ||
-          newLog.student?.class_level?.toUpperCase() === classFilter.trim().toUpperCase();
-        const matchesEvent = !isStaff || eventFilter === 'All' || newLog.event_type === eventFilter;
-        const q = searchQuery.trim().toLowerCase();
+      if (newLog.date === selectedDateRef.current) {
+        const curClassFilter = classFilterRef.current;
+        const curEventFilter = eventFilterRef.current;
+        const q = searchQueryRef.current.trim().toLowerCase();
+        const matchesClass = !isStaff || curClassFilter === 'All' ||
+          newLog.student?.class_level?.toUpperCase() === curClassFilter.trim().toUpperCase();
+        const matchesEvent = !isStaff || curEventFilter === 'All' || newLog.event_type === curEventFilter;
         const matchesSearch = !isStaff || !q ||
           newLog.student?.name?.toLowerCase().includes(q) ||
           newLog.student?.roll_number?.toLowerCase().includes(q);
@@ -291,7 +328,7 @@ const BiometricGatePanel = () => {
         if (liveLogSyncTimerRef.current) clearTimeout(liveLogSyncTimerRef.current);
         liveLogSyncTimerRef.current = setTimeout(() => {
           liveLogSyncTimerRef.current = null;
-          fetchLogs(true);
+          fetchLogsRef.current(true);
         }, 1200);
       }
     };
@@ -301,16 +338,17 @@ const BiometricGatePanel = () => {
       setDevices(prev => prev.map(d => (d.device_id === updatedDev.device_id ? { ...d, ...updatedDev } : d)));
     };
 
-        const handleCommandUpdate = (cmdData) => {
-      if (!isStaff) return;
+    const handleCommandUpdate = (cmdData) => {
+      if (!isStaff || !cmdData) return;
+      if (cmdData.device_id && cmdData.device_id !== selectedDeviceIdRef.current) return;
       if (cmdData.status === 'IDLE') {
         setLiveCommand(null);
       } else {
         setLiveCommand(cmdData);
       }
       if (cmdData.status === 'COMPLETED' || cmdData.status === 'FAILED' || cmdData.status === 'IDLE') {
-        fetchDevices(true);
-        if (activeTab === 'enroll') fetchEnrollmentData();
+        fetchDevicesRef.current(true);
+        if (activeTabRef.current === 'enroll') fetchEnrollmentDataRef.current();
       }
     };
 
@@ -329,7 +367,7 @@ const BiometricGatePanel = () => {
       socket.off('gate_device_updated', handleDeviceUpdated);
       socket.off('gate_command_update', handleCommandUpdate);
     };
-  }, [user, isStaff, selectedDate, activeTab, classFilter, eventFilter, searchQuery, fetchLogs, fetchDevices, fetchEnrollmentData]);
+  }, [userId, studentProfileId, isStaff]);
 
   // Toggle Fingerprint Sensing ON / OFF remotely
   const handleToggleSensing = async () => {
@@ -379,7 +417,19 @@ const BiometricGatePanel = () => {
     const fingerLabel = fingerIndex === 2 ? 'Backup Finger' : 'Primary Finger';
     setEnrollWizardStudent(student);
     setEnrollWizardFingerIndex(fingerIndex);
-    setShowEnrollWizard(true);
+    // Reset to a clean PENDING placeholder before opening / retrying so stale COMPLETED/FAILED never flashes
+    setLiveCommand({
+      action: 'ENROLL',
+      status: 'PENDING',
+      step: '',
+      progress: 12,
+      device_id: activeDevice.device_id,
+      student_id: student._id,
+      student_name: student.name,
+      finger_index: fingerIndex,
+      finger_label: fingerLabel,
+      message: 'Sending enrollment command to ESP32 scanner...'
+    });
     try {
       const res = await axios.post(`/api/biometric/devices/${activeDevice.device_id}/enroll`, {
         student_id: student._id,
@@ -387,10 +437,18 @@ const BiometricGatePanel = () => {
         finger_label: fingerLabel
       });
       if (res.data.success) {
-        setLiveCommand(res.data.data.pending_command);
+        if (res.data.data?.pending_command) {
+          setLiveCommand(res.data.data.pending_command);
+        }
+        if (!res.data.data?.queued) {
+          setShowEnrollWizard(true);
+        } else {
+          setShowEnrollWizard(false);
+        }
         showToastBanner('success', res.data.message);
       }
     } catch (err) {
+      setLiveCommand(null);
       setShowEnrollWizard(false);
       showToastBanner('error', err.response?.data?.message || 'Failed to queue fingerprint enrollment');
     }
@@ -505,7 +563,11 @@ const BiometricGatePanel = () => {
     if (!value) return;
     navigator.clipboard?.writeText(value);
     setCopiedField(label);
-    setTimeout(() => setCopiedField(''), 2000);
+    if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+    copyTimerRef.current = setTimeout(() => {
+      copyTimerRef.current = null;
+      setCopiedField('');
+    }, 2000);
   };
 
   // Map studentId -> array of enrolled templates (Primary=1, Backup=2) for Multi-Finger support
@@ -1113,7 +1175,16 @@ const BiometricGatePanel = () => {
             {liveCommand.action === 'ENROLL' && !showEnrollWizard && (
               <button
                 type="button"
-                onClick={() => setShowEnrollWizard(true)}
+                onClick={() => {
+                  if (liveCommand?.student_id) {
+                    const matched = allStudents.find(s => String(s._id) === String(liveCommand.student_id));
+                    if (matched) setEnrollWizardStudent(matched);
+                  }
+                  if (liveCommand?.finger_index) {
+                    setEnrollWizardFingerIndex(liveCommand.finger_index);
+                  }
+                  setShowEnrollWizard(true);
+                }}
                 className="px-3 py-1.5 rounded-xl bg-primary-600 hover:bg-primary-500 text-[11px] font-bold text-white transition"
               >
                 Open Wizard
@@ -1623,8 +1694,9 @@ const BiometricGatePanel = () => {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               {filteredEnrollStudents.map(student => {
                 const studentTemplates = templatesByStudentId.get(String(student._id)) || [];
-                const primaryTmpl = studentTemplates.find(t => (t.finger_index || 1) === 1) || studentTemplates[0] || null;
+                const primaryTmpl = studentTemplates.find(t => (t.finger_index || 1) === 1) || null;
                 const backupTmpl = studentTemplates.find(t => t.finger_index === 2) || null;
+                const hasAnyPrint = Boolean(primaryTmpl || backupTmpl);
                 return (
                   <div
                     key={student._id}
@@ -1635,7 +1707,7 @@ const BiometricGatePanel = () => {
                       <div className="flex items-center gap-3 min-w-0">
                         <div
                           className={`w-10 h-10 rounded-xl border flex items-center justify-center font-bold text-xs shrink-0 ${
-                            primaryTmpl
+                            hasAnyPrint
                               ? 'bg-emerald-500/12 border-emerald-500/30 text-emerald-300'
                               : 'bg-dark-950 border-dark-800 text-slate-400'
                           }`}
@@ -1652,12 +1724,12 @@ const BiometricGatePanel = () => {
 
                       <span
                         className={`text-[10px] font-bold px-2 py-0.5 rounded-full border shrink-0 ${
-                          primaryTmpl
+                          hasAnyPrint
                             ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/25'
                             : 'bg-dark-950 text-slate-500 border-dark-800'
                         }`}
                       >
-                        {studentTemplates.length === 2 ? '2 Prints' : primaryTmpl ? '1 Print' : 'Pending'}
+                        {studentTemplates.length >= 2 ? '2 Prints' : hasAnyPrint ? '1 Print' : 'Pending'}
                       </span>
                     </div>
 
@@ -1693,7 +1765,7 @@ const BiometricGatePanel = () => {
                         <button
                           type="button"
                           onClick={() => handleStartEnroll(student, 1)}
-                          className="sm:col-span-2 w-full px-3 py-2.5 rounded-xl bg-primary-600 hover:bg-primary-500 active:scale-[0.99] text-white text-xs font-bold transition flex items-center justify-center gap-2 shadow-md shadow-primary-600/20"
+                          className={`${backupTmpl ? '' : 'sm:col-span-2'} w-full px-3 py-2.5 rounded-xl bg-primary-600 hover:bg-primary-500 active:scale-[0.99] text-white text-xs font-bold transition flex items-center justify-center gap-2 shadow-md shadow-primary-600/20`}
                         >
                           <Fingerprint size={14} />
                           <span>Enroll Primary Finger</span>
@@ -1701,7 +1773,7 @@ const BiometricGatePanel = () => {
                       )}
 
                       {/* Slot 2: Optional Backup Finger */}
-                      {primaryTmpl && (
+                      {(primaryTmpl || backupTmpl) && (
                         backupTmpl ? (
                           <div className="flex items-center justify-between gap-1.5 px-2.5 py-2 rounded-xl bg-cyan-500/[0.07] border border-cyan-500/25">
                             <div className="min-w-0">

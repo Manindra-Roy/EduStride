@@ -55,8 +55,9 @@ const LmsDownload = () => {
     if (!selectedClass) return;
     const fetchFilterSubjects = async () => {
       try {
-        const url = selectedClass === 'All' ? '/api/subjects' : `/api/subjects?class_level=${selectedClass}`;
-        const res = await axios.get(url);
+        const res = selectedClass === 'All'
+          ? await axios.get('/api/subjects')
+          : await axios.get('/api/subjects', { params: { class_level: selectedClass } });
         if (res.data.success && Array.isArray(res.data.data)) {
           const subjectNames = [...new Set(res.data.data.map(s => s.name))];
           setFilterSubjects(subjectNames);
@@ -71,12 +72,21 @@ const LmsDownload = () => {
   // Fetch upload subjects based on the form class level target
   useEffect(() => {
     const fetchUploadSubjects = async () => {
+      if (!uploadForm.class_level) {
+        setUploadSubjects([]);
+        setUploadForm(prev => ({ ...prev, subject: '' }));
+        return;
+      }
       try {
-        const res = await axios.get(`/api/subjects?class_level=${uploadForm.class_level}`);
+        const res = await axios.get('/api/subjects', {
+          params: { class_level: uploadForm.class_level }
+        });
         if (res.data.success && Array.isArray(res.data.data)) {
           const subjectNames = res.data.data.map(s => s.name);
           setUploadSubjects(subjectNames);
-          if (subjectNames.length > 0 && !subjectNames.includes(uploadForm.subject)) {
+          if (subjectNames.length === 0) {
+            setUploadForm(prev => ({ ...prev, subject: '' }));
+          } else if (!subjectNames.includes(uploadForm.subject)) {
             setUploadForm(prev => ({ ...prev, subject: subjectNames[0] }));
           }
         }
@@ -112,14 +122,14 @@ const LmsDownload = () => {
   const fetchMaterials = async () => {
     setLoading(true);
     try {
-      let url = '/api/study-materials?';
+      const params = {};
       if (user.role !== 'Student' && selectedClass !== 'All') {
-        url += `class_level=${selectedClass}&`;
+        params.class_level = selectedClass;
       }
       if (selectedSubject !== 'All') {
-        url += `subject=${selectedSubject}&`;
+        params.subject = selectedSubject;
       }
-      const res = await axios.get(url);
+      const res = await axios.get('/api/study-materials', { params });
       if (res.data.success) {
         setMaterials(res.data.data);
       }
@@ -134,9 +144,21 @@ const LmsDownload = () => {
     fetchMaterials();
   }, [selectedClass, selectedSubject]);
 
-  // File selection
+  // File selection with 10 MB client-side validation
   const handleFileChange = (e) => {
-    setSelectedFile(e.target.files[0]);
+    const file = e.target.files?.[0];
+    if (!file) {
+      setSelectedFile(null);
+      return;
+    }
+    if (file.size > 10 * 1024 * 1024) {
+      setError('File size exceeds the 10 MB maximum upload limit.');
+      setSelectedFile(null);
+      e.target.value = '';
+      return;
+    }
+    setError('');
+    setSelectedFile(file);
   };
 
   // Submit Multer upload
@@ -319,7 +341,7 @@ const LmsDownload = () => {
                 <div className="space-y-4">
                   {/* Subject & Class Headers */}
                   <div className="flex justify-between items-center">
-                    <span className="px-2 py-0.5 rounded bg-primary-950/60 border border-primary-850/40 text-[10px] font-bold text-primary-400">
+                    <span className="px-2 py-0.5 rounded bg-primary-950/60 border border-primary-800/40 text-[10px] font-bold text-primary-400">
                       {material.subject}
                     </span>
                     <span className="text-[10px] text-slate-450 font-bold uppercase tracking-wider font-mono">Class {material.class_level}</span>
@@ -459,6 +481,7 @@ const LmsDownload = () => {
                   <input
                     type="file"
                     required
+                    accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg"
                     onChange={handleFileChange}
                     className="w-full text-slate-500 text-xs mt-1.5 file:mr-2 file:py-1 file:px-2.5 file:rounded-md file:border-0 file:bg-dark-900 file:text-slate-300 file:hover:bg-dark-800 file:cursor-pointer outline-none"
                   />

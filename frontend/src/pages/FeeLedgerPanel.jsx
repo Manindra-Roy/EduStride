@@ -26,25 +26,25 @@ import {
   Tooltip 
 } from 'recharts';
 
+const CustomFeeTooltip = ({ active, payload, chartTab }) => {
+  if (active && payload && payload.length) {
+    const data = payload[0].payload;
+    return (
+      <div className="glass-panel p-2.5 rounded-xl border border-primary-500/20 bg-dark-950/95 shadow-2xl relative z-50">
+        <div className="flex items-center gap-2">
+          <span className="w-2 h-2 rounded-full" style={{ backgroundColor: data.color }}></span>
+          <p className="text-[10px] font-bold text-white uppercase tracking-wide">
+            {data.name}: <span className="font-black text-xs">{chartTab === 'revenue' ? `₹${(data.value || 0).toLocaleString()}` : `${data.value || 0} Months`}</span>
+          </p>
+        </div>
+      </div>
+    );
+  }
+  return null;
+};
+
 const FeeLedgerPanel = () => {
   const { user } = useAuth();
-
-  const CustomFeeTooltip = ({ active, payload }) => {
-    if (active && payload && payload.length) {
-      const data = payload[0].payload;
-      return (
-        <div className="glass-panel p-2.5 rounded-xl border border-primary-500/20 bg-dark-950/95 shadow-2xl relative z-50">
-          <div className="flex items-center gap-2">
-            <span className="w-2 h-2 rounded-full" style={{ backgroundColor: data.color }}></span>
-            <p className="text-[10px] font-bold text-white uppercase tracking-wide">
-              {data.name}: <span className="font-black text-xs">{chartTab === 'revenue' ? `₹${data.value.toLocaleString()}` : `${data.value} Months`}</span>
-            </p>
-          </div>
-        </div>
-      );
-    }
-    return null;
-  };
   
   const [ledgers, setLedgers] = useState([]);
   const [stats, setStats] = useState({
@@ -110,8 +110,13 @@ const FeeLedgerPanel = () => {
     setLoading(true);
     try {
       if (user.role === 'Student') {
-        // Fetch personal ledger
-        const res = await axios.get(`/api/fees/ledger/${user.studentProfile._id}`);
+        // Fetch personal ledger safely
+        const studentId = user.studentProfile?._id || (typeof user.studentProfile === 'string' ? user.studentProfile : null);
+        if (!studentId) {
+          setSelectedLedger(null);
+          return;
+        }
+        const res = await axios.get(`/api/fees/ledger/${studentId}`);
         if (res.data.success) {
           setSelectedLedger(res.data.data);
         }
@@ -158,7 +163,9 @@ const FeeLedgerPanel = () => {
             });
           });
 
-          const totalExpected = studentList.reduce((sum, s) => sum + ((s.is_free_tier ? 0 : (s.monthly_fee || 0)) * 12), 0);
+          const totalExpected = studentList
+            .filter(s => s.status === 'Active')
+            .reduce((sum, s) => sum + ((s.is_free_tier ? 0 : (s.monthly_fee || 0)) * 12), 0);
           setStats({
             totalExpectedRevenue: totalExpected,
             actualCollectedRevenue: collected,
@@ -202,42 +209,6 @@ const FeeLedgerPanel = () => {
       return matchesSearch && matchesClass;
     });
   }, [ledgers, searchQuery, selectedClassFilter]);
-
-  // Trigger Mock Webhook Payment Confirmation (Student Gateway Checkout simulation)
-  const handleCheckoutPayment = async () => {
-    const targetStudent =
-      (selectedLedger?.student_id && typeof selectedLedger.student_id === 'object'
-        ? selectedLedger.student_id
-        : null) || user.studentProfile;
-    const targetStudentId = targetStudent?._id || (typeof selectedLedger?.student_id === 'string' ? selectedLedger.student_id : null);
-
-    if (!targetStudentId) {
-      alert('Please select a student ledger first.');
-      return;
-    }
-
-    setSubmitting(true);
-    try {
-      const payload = {
-        student_id: targetStudentId,
-        month_name: payingMonth,
-        amount: targetStudent?.is_free_tier ? 0 : (targetStudent?.monthly_fee || 0),
-        payment_method: 'Stripe Gateway Hook',
-        receipt_id: `TXN-STripe-${Date.now().toString().substring(5)}`
-      };
-
-      // Firing to public webhook endpoint to simulate external hooks
-      const res = await axios.post('/api/fees/webhook', payload);
-      if (res.data.success) {
-        setShowPayModal(false);
-        fetchData();
-      }
-    } catch (err) {
-      alert('Mock payment processing failed.');
-    } finally {
-      setSubmitting(false);
-    }
-  };
 
   // Submit Manual override
   const handleManualOverride = async (e) => {
@@ -357,7 +328,7 @@ const FeeLedgerPanel = () => {
                       type="button"
                       onClick={() => setChartTab('breakdown')}
                       className={`px-2 py-0.5 rounded text-[9px] font-extrabold tracking-wide uppercase transition ${
-                        chartTab === 'breakdown' ? 'bg-primary-600 text-white' : 'text-slate-500 hover:text-slate-355'
+                        chartTab === 'breakdown' ? 'bg-primary-600 text-white' : 'text-slate-500 hover:text-slate-300'
                       }`}
                     >
                       Status
@@ -397,7 +368,7 @@ const FeeLedgerPanel = () => {
                               <Cell key={`cell-${index}`} fill={entry.color} style={{ outline: 'none' }} />
                             ))}
                           </Pie>
-                          <Tooltip content={<CustomFeeTooltip />} />
+                          <Tooltip content={<CustomFeeTooltip chartTab={chartTab} />} />
                         </PieChart>
                       </ResponsiveContainer>
                     </>
@@ -507,7 +478,7 @@ const FeeLedgerPanel = () => {
                                     <div className="font-semibold text-white group-hover:text-primary-400 transition flex items-center gap-1.5">
                                       <span>{ledger.student_id?.name || 'Unknown Student'}</span>
                                       {ledger.student_id?.is_free_tier && (
-                                        <span className="px-1.5 py-0.2 rounded text-[8px] font-extrabold bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">Free Tier</span>
+                                        <span className="px-1.5 py-0.5 rounded text-[8px] font-extrabold bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">Free Tier</span>
                                       )}
                                     </div>
                                   </div>
@@ -747,6 +718,16 @@ const FeeLedgerPanel = () => {
       )}
 
       {/* --- STUDENT PORTAL LAYOUT --- */}
+      {user.role === 'Student' && !loading && !selectedLedger && (
+        <div className="glass-panel p-8 sm:p-12 rounded-3xl border border-dark-800 text-center max-w-2xl mx-auto space-y-3 shadow-2xl my-6">
+          <AlertTriangle size={28} className="text-amber-400 mx-auto" />
+          <h2 className="text-lg font-bold text-white font-outfit">Fee Ledger Unavailable</h2>
+          <p className="text-slate-400 text-xs leading-relaxed max-w-md mx-auto">
+            Your student profile is not linked to a tuition ledger yet. Please contact your institution administrator to bind your account.
+          </p>
+        </div>
+      )}
+
       {user.role === 'Student' && selectedLedger && (
         (selectedLedger.student_id?.is_free_tier || user.studentProfile?.is_free_tier) ? (
           <div className="glass-panel p-8 sm:p-12 rounded-3xl border border-indigo-500/20 text-center max-w-2xl mx-auto space-y-4 shadow-2xl bg-gradient-to-b from-indigo-950/20 to-dark-950 my-6">
@@ -837,15 +818,15 @@ const FeeLedgerPanel = () => {
                     <div className="grid grid-cols-2 gap-2 text-[10px]">
                       <div>
                         <span className="text-slate-500 block">Amount Paid</span>
-                        <span className="font-bold text-white font-mono">₹{m.amount_paid.toLocaleString()}</span>
+                        <span className="font-bold text-white font-mono">₹{(m.amount_paid || 0).toLocaleString()}</span>
                       </div>
                       <div>
                         <span className="text-slate-500 block">Method</span>
-                        <span className="text-slate-350">{m.transaction_method}</span>
+                        <span className="text-slate-350">{m.transaction_method || 'N/A'}</span>
                       </div>
                       <div className="col-span-2">
                         <span className="text-slate-500 block">Settlement Date</span>
-                        <span className="text-slate-350">{new Date(m.payment_date).toLocaleString()}</span>
+                        <span className="text-slate-350">{m.payment_date ? new Date(m.payment_date).toLocaleString() : 'N/A'}</span>
                       </div>
                     </div>
                   </div>
@@ -911,93 +892,29 @@ const FeeLedgerPanel = () => {
                 </button>
               </div>
 
-              {/* Online simulator view */}
+              {/* Online payment instructions view */}
               {paymentType === 'online' ? (
-                user.role === 'Student' ? (
-                  /* Restricted warning view for Student accounts */
-                  <div className="space-y-4 animate-fadeIn">
-                    <div className="p-5.5 rounded-2xl bg-rose-500/5 border border-rose-500/20 text-center space-y-3.5 shadow-md relative overflow-hidden">
-                      <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_120%,rgba(244,63,94,0.05),transparent)] pointer-events-none" />
-                      <div className="w-12 h-12 rounded-full bg-rose-500/10 text-rose-450 border border-rose-500/20 flex items-center justify-center text-xl mx-auto shadow-sm">
-                        ⚠️
-                      </div>
-                      <div className="space-y-1 relative z-10">
-                        <h4 className="text-xs font-bold text-white uppercase tracking-wider font-outfit">Online Transactions Restricted</h4>
-                        <p className="text-[10.5px] text-slate-400 font-medium font-sans leading-relaxed px-1">
-                          Online checkouts are currently locked for this portal account. Please visit the institution's main desk during operating hours to settle fees in cash or request direct billing support.
-                        </p>
-                      </div>
+                <div className="space-y-4 animate-fadeIn">
+                  <div className="p-5 rounded-2xl bg-rose-500/5 border border-rose-500/20 text-center space-y-3.5 shadow-md relative overflow-hidden">
+                    <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_120%,rgba(244,63,94,0.05),transparent)] pointer-events-none" />
+                    <div className="w-12 h-12 rounded-full bg-rose-500/10 text-rose-450 border border-rose-500/20 flex items-center justify-center text-xl mx-auto shadow-sm">
+                      ⚠️
                     </div>
-                    <button
-                      type="button"
-                      disabled
-                      className="w-full py-2.5 rounded-xl bg-dark-950 border border-dark-850/80 text-slate-550 font-bold text-xs text-center cursor-not-allowed select-none border-dashed"
-                    >
-                      Gateway Payments Offline
-                    </button>
-                  </div>
-                ) : (
-                  /* Standard simulator view for Admins/Teachers */
-                  <div className="space-y-4">
-                    {/* Simulated Premium Glass Credit Card */}
-                    <div className="relative h-44 rounded-2xl bg-gradient-to-br from-indigo-600/90 to-purple-800/90 border border-indigo-500/30 p-5 text-white flex flex-col justify-between shadow-xl shadow-indigo-950/20 overflow-hidden font-mono select-none">
-                      <div className="absolute top-0 right-0 p-6 opacity-5 pointer-events-none">
-                        <CreditCard size={150} />
-                      </div>
-                      <div className="flex justify-between items-center">
-                        <span className="text-[10px] font-bold uppercase tracking-wider bg-white/10 px-2 py-0.5 rounded">Stripe Simulator</span>
-                        <div className="w-8 h-6 rounded bg-amber-500/80 border border-amber-400/40 relative overflow-hidden flex items-center justify-center">
-                          <div className="w-full h-0.5 bg-dark-900/10 absolute top-1.5" />
-                          <div className="w-full h-0.5 bg-dark-900/10 absolute top-3" />
-                        </div>
-                      </div>
-                      <div className="text-base font-bold tracking-widest text-center text-slate-100">
-                        4242 •••• •••• {Date.now().toString().substring(9)}
-                      </div>
-                      <div className="flex justify-between items-end text-[10px]">
-                        <div>
-                          <span className="text-slate-400 block text-[8px] uppercase tracking-wider font-semibold">Cardholder</span>
-                          <span className="font-semibold text-slate-200">{user.studentProfile?.name || 'STUDENT USER'}</span>
-                        </div>
-                        <div className="flex gap-4 font-mono">
-                          <div>
-                            <span className="text-slate-400 block text-[8px] uppercase tracking-wider font-semibold">Expiry</span>
-                            <span className="font-semibold text-slate-200">12/28</span>
-                          </div>
-                          <div>
-                            <span className="text-slate-400 block text-[8px] uppercase tracking-wider font-semibold">CVV</span>
-                            <span className="font-semibold text-slate-200">•••</span>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="p-3 rounded-xl bg-primary-950/40 border border-primary-800/30 space-y-1.5">
-                      <p className="text-[11px] text-slate-350 leading-relaxed">
-                        Settle this ledger month instantly by firing a transaction to the public webhook API.
+                    <div className="space-y-1 relative z-10">
+                      <h4 className="text-xs font-bold text-white uppercase tracking-wider font-outfit">Online Transactions Restricted</h4>
+                      <p className="text-[10.5px] text-slate-400 font-medium font-sans leading-relaxed px-1">
+                        Online checkouts are currently locked for this portal account. Please visit the institution's main desk during operating hours to settle fees in cash or request direct billing support.
                       </p>
                     </div>
-
-                    <button 
-                      type="button"
-                      onClick={handleCheckoutPayment}
-                      disabled={submitting}
-                      className="w-full py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs transition duration-150 flex items-center justify-center gap-1.5 shadow-md shadow-emerald-500/10 disabled:opacity-40"
-                    >
-                      {submitting ? (
-                        <>
-                          <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                          <span>Simulating webhook hook...</span>
-                        </>
-                      ) : (
-                        <>
-                          <CheckCircle size={14} />
-                          <span>Authorize Stripe Webhook Checkout</span>
-                        </>
-                      )}
-                    </button>
                   </div>
-                )
+                  <button
+                    type="button"
+                    disabled
+                    className="w-full py-2.5 rounded-xl bg-dark-950 border border-dark-850/80 text-slate-500 font-bold text-xs text-center cursor-not-allowed select-none border-dashed"
+                  >
+                    Gateway Payments Offline
+                  </button>
+                </div>
               ) : (
                 /* Cash offline instructions view */
                 <div className="space-y-4 animate-fadeIn">

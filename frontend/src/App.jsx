@@ -24,18 +24,73 @@ import TimetablePage from './pages/TimetablePage';
 import SpecialBatchesPanel from './pages/SpecialBatchesPanel';
 import BiometricGatePanel from './pages/BiometricGatePanel';
 
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, errorMessage: '' };
+  }
+
+  static getDerivedStateFromError(error) {
+    return {
+      hasError: true,
+      errorMessage: error?.message || 'An unexpected rendering error occurred.'
+    };
+  }
+
+  componentDidCatch(error, errorInfo) {
+    console.error('App ErrorBoundary caught error:', error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="min-h-[100dvh] flex items-center justify-center bg-[#07080a] text-slate-100 p-6">
+          <div className="glass-panel max-w-md w-full p-6 rounded-2xl border border-rose-500/30 text-center space-y-4 shadow-2xl">
+            <div className="w-12 h-12 rounded-2xl bg-rose-500/15 border border-rose-500/30 text-rose-400 flex items-center justify-center mx-auto text-xl font-bold">
+              !
+            </div>
+            <div className="space-y-1.5">
+              <h2 className="text-lg font-bold text-white font-outfit">Something went wrong</h2>
+              <p className="text-xs text-slate-400 leading-relaxed">
+                {this.state.errorMessage}
+              </p>
+            </div>
+            <div className="flex items-center justify-center gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => window.location.assign('/')}
+                className="px-4 py-2 rounded-xl bg-dark-900 hover:bg-dark-800 border border-dark-800 text-xs font-semibold text-slate-200 transition cursor-pointer"
+              >
+                Go Home
+              </button>
+              <button
+                type="button"
+                onClick={() => window.location.reload()}
+                className="px-4 py-2 rounded-xl bg-primary-600 hover:bg-primary-500 text-xs font-bold text-white transition cursor-pointer"
+              >
+                Reload Portal
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 const ProtectedRoute = ({ children, allowedRoles }) => {
   const { user, token, loading } = useAuth();
 
   if (loading) {
-    return <Preloader loading={loading} />;
+    return null;
   }
 
-  if (!token) {
+  if (!token || !user) {
     return <Navigate to="/login" replace />;
   }
 
-  if (allowedRoles && user && !allowedRoles.includes(user.role)) {
+  if (allowedRoles && !allowedRoles.includes(user.role)) {
     return <Navigate to="/" replace />;
   }
 
@@ -63,7 +118,7 @@ const Layout = () => {
   }, [location.pathname, isChatPage]);
 
   useEffect(() => {
-    if (!window.visualViewport) return;
+    if (!isChatPage || !window.visualViewport) return;
 
     const handleResize = () => {
       setViewportHeight(`${window.visualViewport.height}px`);
@@ -75,7 +130,7 @@ const Layout = () => {
     return () => {
       window.visualViewport.removeEventListener('resize', handleResize);
     };
-  }, []);
+  }, [isChatPage]);
 
   return (
     <div 
@@ -171,7 +226,7 @@ const Layout = () => {
 };
 
 const AppContent = () => {
-  const { user, loading } = useAuth();
+  const { user, token, loading } = useAuth();
   const [showPreloader, setShowPreloader] = useState(true);
 
   useEffect(() => {
@@ -225,7 +280,7 @@ const AppContent = () => {
         <CallProvider>
           <Routes>
             <Route path="/login" element={<Login />} />
-            {!user ? (
+            {!loading && !user && !token ? (
               <Route path="/register" element={<Register />} />
             ) : null}
             <Route path="*" element={
@@ -242,9 +297,11 @@ const AppContent = () => {
 
 function App() {
   return (
-    <AuthProvider>
-      <AppContent />
-    </AuthProvider>
+    <ErrorBoundary>
+      <AuthProvider>
+        <AppContent />
+      </AuthProvider>
+    </ErrorBoundary>
   );
 }
 

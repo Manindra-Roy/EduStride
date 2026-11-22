@@ -173,8 +173,8 @@ export default function ClassTimetable({
     if (currentTimeMinutes >= startMins && currentTimeMinutes <= endMins) {
       const total = endMins - startMins;
       const elapsed = currentTimeMinutes - startMins;
-      const progress = Math.min(100, Math.max(0, Math.round((elapsed / total) * 100)));
-      const remainingMins = endMins - currentTimeMinutes;
+      const progress = total > 0 ? Math.min(100, Math.max(0, Math.round((elapsed / total) * 100))) : 100;
+      const remainingMins = Math.max(0, endMins - currentTimeMinutes);
       return { status: 'LIVE', label: 'LIVE NOW', progress, remainingMins };
     } else if (currentTimeMinutes < startMins) {
       const startInMins = startMins - currentTimeMinutes;
@@ -364,7 +364,7 @@ export default function ClassTimetable({
             >
               <span>All Classes</span>
               {gradeSlotCounts.ALL > 0 && (
-                <span className={`text-[9px] px-1.5 py-0.2 rounded-full font-mono font-black ${
+                <span className={`text-[9px] px-1.5 py-0.5 rounded-full font-mono font-black ${
                   selectedGradeFilter === 'ALL' ? 'bg-white/20 text-white' : 'bg-dark-950 text-slate-400'
                 }`}>
                   {gradeSlotCounts.ALL}
@@ -388,7 +388,7 @@ export default function ClassTimetable({
                 >
                   <span>Class {c}</span>
                   {count > 0 && (
-                    <span className={`text-[9px] px-1.5 py-0.2 rounded-full font-mono font-black ${
+                    <span className={`text-[9px] px-1.5 py-0.5 rounded-full font-mono font-black ${
                       isSelected ? 'bg-white/20 text-white' : 'bg-dark-950 text-slate-400'
                     }`}>
                       {count}
@@ -445,7 +445,7 @@ export default function ClassTimetable({
                     <span className={`w-1.5 h-1.5 rounded-full ${isSelected ? 'bg-white' : 'bg-emerald-400 animate-ping'}`} />
                   )}
                   {count > 0 && (
-                    <span className={`text-[9px] px-1.5 py-0.2 rounded-full font-mono font-black ${
+                    <span className={`text-[9px] px-1.5 py-0.5 rounded-full font-mono font-black ${
                       isSelected ? 'bg-white/20 text-white' : 'bg-dark-950 text-slate-400'
                     }`}>
                       {count}
@@ -551,7 +551,7 @@ export default function ClassTimetable({
 
       {/* Weekly Matrix View (Full 7-Day Grid for Admins/Teachers) */}
       {viewMode === 'weekly' && userRole !== 'Student' && (
-        <div className="overflow-x-auto no-scrollbar border border-dark-850 rounded-xl bg-dark-905">
+        <div className="overflow-x-auto no-scrollbar border border-dark-850 rounded-xl bg-dark-900">
           <table className="w-full text-left text-xs border-collapse">
             <thead>
               <tr className="bg-dark-900 border-b border-dark-850 text-slate-400 uppercase text-[10px] font-bold font-outfit tracking-wider">
@@ -570,7 +570,7 @@ export default function ClassTimetable({
                       <div className="flex items-center gap-1.5">
                         <span>{dayName}</span>
                         {isToday && (
-                          <span className="text-[9px] font-mono font-bold text-emerald-400 bg-emerald-950 border border-emerald-800 px-1.5 py-0.2 rounded">
+                          <span className="text-[9px] font-mono font-bold text-emerald-400 bg-emerald-950 border border-emerald-800 px-1.5 py-0.5 rounded">
                             Today
                           </span>
                         )}
@@ -590,7 +590,7 @@ export default function ClassTimetable({
                                 {slot.time}
                               </span>
                               <span className="font-bold text-white">{slot.subject}</span>
-                              <span className="text-[9px] text-slate-400 bg-dark-950 px-1 py-0.2 rounded font-mono">
+                              <span className="text-[9px] text-slate-400 bg-dark-950 px-1 py-0.5 rounded font-mono">
                                 {slot.grade?.startsWith('Class') ? slot.grade : `Class ${slot.grade}`}
                               </span>
                               <span className="text-[10px] text-slate-400 border-l border-dark-800 pl-1.5">

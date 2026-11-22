@@ -1,5 +1,5 @@
 import express from 'express';
-import fs from 'fs';
+import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { protect, authorize } from '../middleware/auth.js';
@@ -10,55 +10,87 @@ const router = express.Router();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+const fileExists = async (p) => {
+  try {
+    await fs.access(p);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 // @desc    Download updated EduStride Android App (APK)
 // @route   GET /api/system/download-apk
 // @access  Public
-router.get('/download-apk', (req, res) => {
-  // Prefer the newest versioned EduStride-v*.apk in frontend/public or android/releases, then fall back to EduStride.apk
-  const searchDirs = [
-    path.resolve(__dirname, '../../frontend/public'),
-    path.resolve(__dirname, '../../android/releases'),
-    path.resolve(__dirname, '../../android')
-  ];
-
-  let apkPath = null;
-  let apkFilename = 'EduStride.apk';
-
-  for (const dir of searchDirs) {
-    if (!fs.existsSync(dir)) continue;
-    const versioned = fs.readdirSync(dir)
-      .filter(f => /^EduStride-v\d+\.\d+\.\d+\.apk$/i.test(f))
-      .sort((a, b) => {
-        const va = a.match(/v(\d+)\.(\d+)\.(\d+)/i).slice(1).map(Number);
-        const vb = b.match(/v(\d+)\.(\d+)\.(\d+)/i).slice(1).map(Number);
-        for (let i = 0; i < 3; i++) {
-          if (vb[i] !== va[i]) return vb[i] - va[i];
-        }
-        return 0;
-      });
-    if (versioned.length > 0) {
-      apkFilename = versioned[0];
-      apkPath = path.join(dir, apkFilename);
-      break;
-    }
-  }
-
-  if (!apkPath) {
-    const fallbacks = [
-      path.resolve(__dirname, '../../android/EduStride.apk'),
-      path.resolve(__dirname, '../../frontend/public/EduStride.apk')
+router.get('/download-apk', async (req, res, next) => {
+  try {
+    // Collect versioned EduStride-v*.apk across ALL searchDirs and pick highest semver
+    const searchDirs = [
+      path.resolve(__dirname, '../../frontend/public'),
+      path.resolve(__dirname, '../../android/releases'),
+      path.resolve(__dirname, '../../android')
     ];
-    apkPath = fallbacks.find(p => fs.existsSync(p)) || null;
-  }
 
-  if (apkPath) {
+    const candidates = [];
+
+    for (const dir of searchDirs) {
+      let entries;
+      try {
+        entries = await fs.readdir(dir);
+      } catch {
+        continue;
+      }
+
+      for (const file of entries) {
+        const match = file.match(/^EduStride-v(\d+)\.(\d+)\.(\d+)\.apk$/i);
+        if (match) {
+          candidates.push({
+            filename: file,
+            fullPath: path.join(dir, file),
+            version: [Number(match[1]), Number(match[2]), Number(match[3])]
+          });
+        }
+      }
+    }
+
+    candidates.sort((a, b) => {
+      for (let i = 0; i < 3; i++) {
+        if (b.version[i] !== a.version[i]) return b.version[i] - a.version[i];
+      }
+      return 0;
+    });
+
+    let apkPath = candidates.length > 0 ? candidates[0].fullPath : null;
+    let apkFilename = candidates.length > 0 ? candidates[0].filename : 'EduStride.apk';
+
+    if (!apkPath) {
+      const fallbacks = [
+        path.resolve(__dirname, '../../android/EduStride.apk'),
+        path.resolve(__dirname, '../../frontend/public/EduStride.apk')
+      ];
+      for (const p of fallbacks) {
+        if (await fileExists(p)) {
+          apkPath = p;
+          break;
+        }
+      }
+    }
+
+    if (!apkPath) {
+      return res.status(404).json({ success: false, message: 'APK file not found' });
+    }
+
     res.setHeader('Content-Type', 'application/vnd.android.package-archive');
     res.setHeader('Content-Disposition', `attachment; filename="${apkFilename}"`);
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Cache-Control', 'no-cache');
-    res.sendFile(apkPath);
-  } else {
-    res.status(404).json({ success: false, message: 'APK file not found' });
+    res.sendFile(apkPath, (err) => {
+      if (err && !res.headersSent) {
+        next(err);
+      }
+    });
+  } catch (error) {
+    next(error);
   }
 });
 
@@ -80,7 +112,7 @@ router.get('/theme', async (req, res, next) => {
 // @access  Private (SuperAdmin or Teacher)
 router.put('/theme', protect, authorize('SuperAdmin', 'Teacher'), async (req, res, next) => {
   try {
-    const { theme_color } = req.body;
+    const { theme_color } = req.body || {};
     if (!theme_color) {
       res.status(400);
       throw new Error('Theme color is required');

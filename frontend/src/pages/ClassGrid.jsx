@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { useAuth } from '../context/AuthContext';
 import { socket } from '../config/socket';
+import { getTodayIST, getCurrentMonthIST } from '../utils/istDate';
 import { 
   Plus, 
   Search, 
@@ -64,7 +65,7 @@ const ClassGrid = () => {
   const [showEditModal, setShowEditModal] = useState(false);
   const [showTestModal, setShowTestModal] = useState(false);
   const [showAttendanceModal, setShowAttendanceModal] = useState(false);
-  const [attendanceDate, setAttendanceDate] = useState(new Date().toISOString().split('T')[0]);
+  const [attendanceDate, setAttendanceDate] = useState(getTodayIST());
   const [detailedAttendance, setDetailedAttendance] = useState([]);
   const [attendanceViewTab, setAttendanceViewTab] = useState('monthly'); // 'monthly' or 'daily'
 
@@ -87,7 +88,7 @@ const ClassGrid = () => {
     test_name: '',
     marks_obtained: '',
     total_marks: '',
-    date: new Date().toISOString().substring(0, 10)
+    date: getTodayIST()
   });
 
   const [performanceTab, setPerformanceTab] = useState('school'); // 'school' or 'tuition'
@@ -104,20 +105,66 @@ const ClassGrid = () => {
   const [addingSubject, setAddingSubject] = useState(false);
   const [savingSubjectId, setSavingSubjectId] = useState(null);
   const [savedSubjectId, setSavedSubjectId] = useState(null);
+  const [subjectChapterDrafts, setSubjectChapterDrafts] = useState({});
+  const savedSubjectTimerRef = useRef(null);
+  const fetchStudentsSeqRef = useRef(0);
+
+  useEffect(() => {
+    return () => {
+      if (savedSubjectTimerRef.current) clearTimeout(savedSubjectTimerRef.current);
+    };
+  }, []);
 
   const fetchClassSubjects = async () => {
     try {
-      const res = await axios.get(`/api/subjects?class_level=${class_level}`);
+      const res = await axios.get('/api/subjects', { params: { class_level } });
       if (res.data.success && Array.isArray(res.data.data)) {
         const subjectNames = res.data.data.map(s => s.name);
         setSubjects(subjectNames);
         setSubjectsList(res.data.data);
+        const drafts = {};
+        res.data.data.forEach(s => {
+          drafts[s._id] = String(s.total_chapters || 4);
+        });
+        setSubjectChapterDrafts(drafts);
         if (subjectNames.length > 0 && !subjectNames.includes(testForm.subject)) {
           setTestForm(prev => ({ ...prev, subject: subjectNames[0] }));
         }
       }
     } catch (err) {
       console.error('Failed to load subjects:', err);
+    }
+  };
+
+  const handleSaveSubjectChapters = async (sub) => {
+    const rawDraft = subjectChapterDrafts[sub._id];
+    const parsedTotal = parseInt(rawDraft, 10);
+    const prevTotal = sub.total_chapters || 4;
+    if (isNaN(parsedTotal) || parsedTotal < 1) {
+      setSubjectChapterDrafts(prev => ({ ...prev, [sub._id]: String(prevTotal) }));
+      return;
+    }
+    if (parsedTotal === prevTotal) return;
+
+    setSubjectError('');
+    setSavingSubjectId(sub._id);
+    setSubjectsList(prev => prev.map(item => (item._id === sub._id ? { ...item, total_chapters: parsedTotal } : item)));
+    try {
+      await axios.put(`/api/subjects/${sub._id}`, { total_chapters: parsedTotal });
+      setSavingSubjectId(null);
+      setSavedSubjectId(sub._id);
+      if (savedSubjectTimerRef.current) clearTimeout(savedSubjectTimerRef.current);
+      savedSubjectTimerRef.current = setTimeout(() => {
+        savedSubjectTimerRef.current = null;
+        setSavedSubjectId(null);
+      }, 1200);
+    } catch (err) {
+      setSavingSubjectId(null);
+      // Rollback on failure
+      setSubjectsList(prev => prev.map(item => (item._id === sub._id ? { ...item, total_chapters: prevTotal } : item)));
+      setSubjectChapterDrafts(prev => ({ ...prev, [sub._id]: String(prevTotal) }));
+      setSubjectError(err.response?.data?.message || 'Failed to update total chapters');
+      console.error('Failed to update chapters', err);
     }
   };
 
@@ -177,12 +224,17 @@ const ClassGrid = () => {
   const [submitError, setSubmitError] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
-  // Fetch student listings for this class level
+  // Fetch student listings for this class level with cancellation guard against rapid class switches
   const fetchStudents = async (silent = false) => {
+    const requestSeq = ++fetchStudentsSeqRef.current;
     if (!silent) setLoading(true);
     try {
-      // Students request
-      const res = await axios.get(`/api/students?class_level=${class_level}&limit=1000`);
+      const res = await axios.get('/api/students', {
+        params: { class_level, limit: 1000 }
+      });
+      if (requestSeq !== fetchStudentsSeqRef.current) {
+        return [];
+      }
       if (res.data.success) {
         const list = res.data.data || [];
         setStudents(list);
@@ -197,10 +249,12 @@ const ClassGrid = () => {
       }
       return [];
     } catch (err) {
-      console.error('Failed to load class students:', err);
+      if (requestSeq === fetchStudentsSeqRef.current) {
+        console.error('Failed to load class students:', err);
+      }
       return [];
     } finally {
-      if (!silent) setLoading(false);
+      if (!silent && requestSeq === fetchStudentsSeqRef.current) setLoading(false);
     }
   };
 
@@ -366,13 +420,14 @@ const ClassGrid = () => {
 
   // Open Edit Student Modal
   const openEditModal = (student) => {
+    setSubmitError('');
     setStudentForm({
       name: student.name,
       roll_number: student.roll_number,
       parent_name: student.parent_name,
       parent_email: student.parent_email || '',
       primary_contact: student.primary_contact,
-      secondary_contact: student.secondary_contact,
+      secondary_contact: student.secondary_contact || '',
       status: student.status,
       monthly_fee: student.is_free_tier ? 0 : (student.monthly_fee !== undefined ? student.monthly_fee : 0),
       is_free_tier: Boolean(student.is_free_tier)
@@ -424,6 +479,7 @@ const ClassGrid = () => {
 
   // Open Add Test Marks Modal
   const openTestModal = (student) => {
+    setSubmitError('');
     setSelectedStudent(student);
     setTestForm({
       type: 'school',
@@ -431,7 +487,7 @@ const ClassGrid = () => {
       test_name: '',
       marks_obtained: '',
       total_marks: '',
-      date: new Date().toISOString().substring(0, 10)
+      date: getTodayIST()
     });
     setShowTestModal(true);
   };
@@ -459,9 +515,16 @@ const ClassGrid = () => {
       if (res.data.success) {
         setShowTestModal(false);
         fetchStudents();
-        // Refresh selected student details
+        // Refresh selected student details while preserving fee_status & ledger
         const detailsRes = await axios.get(`/api/students/${selectedStudent._id}`);
-        setSelectedStudent(detailsRes.data.data);
+        if (detailsRes.data?.data) {
+          setSelectedStudent(prev => prev ? {
+            ...prev,
+            ...detailsRes.data.data,
+            fee_status: detailsRes.data.data.fee_status ?? prev.fee_status,
+            ledger: detailsRes.data.data.ledger ?? prev.ledger
+          } : detailsRes.data.data);
+        }
       }
     } catch (err) {
       setSubmitError(err.response?.data?.message || 'Failed to add test score');
@@ -471,16 +534,32 @@ const ClassGrid = () => {
   };
 
   // Fetch Saved Attendance for a Date & Session (Integrated with Timetable Schedule)
-  const fetchAttendanceForDate = async (targetDate, targetSession = attendanceSession, studentsOverride = null) => {
+  const fetchAttendanceForDate = async (targetDate, targetSession = '', studentsOverride = null) => {
     try {
-      const sessNameParam = typeof targetSession === 'string' ? targetSession : (targetSession?.session_name || 'Session 1');
-      const res = await axios.get(`/api/students/attendance/bulk?class_level=${class_level}&date=${targetDate}&session_name=${encodeURIComponent(sessNameParam)}`);
+      const sessNameParam = typeof targetSession === 'string' ? targetSession.trim() : (targetSession?.session_name || '').trim();
+      const params = { class_level, date: targetDate };
+      if (sessNameParam) {
+        params.session_name = sessNameParam;
+      }
+      const res = await axios.get('/api/students/attendance/bulk', { params });
       const sourceStudents = Array.isArray(studentsOverride) && studentsOverride.length > 0 ? studentsOverride : students;
       const activeStudents = sourceStudents.filter(s => s.status === 'Active');
       if (res.data.success) {
-        const returnedSessions = res.data.available_sessions || [];
-        setAvailableSessions(returnedSessions);
+        const returnedSessions = Array.isArray(res.data.available_sessions) ? [...res.data.available_sessions] : [];
         const resolvedSessionName = res.data.session_name || sessNameParam || 'Session 1';
+
+        // Keep newly added custom/extra session pill visible client-side even before it is committed to DB
+        if (
+          sessNameParam &&
+          !returnedSessions.some(item => {
+            const name = typeof item === 'string' ? item : item?.session_name;
+            return name && name.toLowerCase() === sessNameParam.toLowerCase();
+          })
+        ) {
+          returnedSessions.push({ session_name: sessNameParam, is_scheduled: false, is_logged: false });
+        }
+
+        setAvailableSessions(returnedSessions);
         setAttendanceSession(resolvedSessionName);
 
         if (res.data.exists) {
@@ -516,15 +595,16 @@ const ClassGrid = () => {
 
   const handleAttendanceDateChange = (newDate) => {
     setAttendanceDate(newDate);
-    fetchAttendanceForDate(newDate, attendanceSession);
+    setAttendanceSession('');
+    fetchAttendanceForDate(newDate, '');
   };
 
   // Open Bulk Attendance Sheet
   const openAttendanceModal = () => {
-    const todayStr = new Date().toISOString().split('T')[0];
+    const todayStr = getTodayIST();
     setAttendanceDate(todayStr);
-    setAttendanceSession('Session 1');
-    fetchAttendanceForDate(todayStr, 'Session 1');
+    setAttendanceSession('');
+    fetchAttendanceForDate(todayStr, '');
     setShowAttendanceModal(true);
   };
 
@@ -566,8 +646,13 @@ const ClassGrid = () => {
         fetchStudents();
         if (selectedStudent) {
           const detailsRes = await axios.get(`/api/students/${selectedStudent._id}`);
-          if (detailsRes.data.success) {
-            setSelectedStudent(detailsRes.data.data);
+          if (detailsRes.data.success && detailsRes.data.data) {
+            setSelectedStudent(prev => prev ? {
+              ...prev,
+              ...detailsRes.data.data,
+              fee_status: detailsRes.data.data.fee_status ?? prev.fee_status,
+              ledger: detailsRes.data.data.ledger ?? prev.ledger
+            } : detailsRes.data.data);
           }
         }
       }
@@ -589,7 +674,7 @@ const ClassGrid = () => {
   })).slice(-8);
 
   const getAttendanceRate = (student) => {
-    const currentMonthStr = new Date().toISOString().substring(0, 7);
+    const currentMonthStr = getCurrentMonthIST();
     const history = student.attendance_history?.find(h => h.month === currentMonthStr);
     if (!history || history.total_classes === 0) return 100;
     return Math.round((history.attended / history.total_classes) * 100);
@@ -650,7 +735,7 @@ const ClassGrid = () => {
                         <div
                           key={student._id}
                           onClick={() => setSelectedStudent(student)}
-                          className={`p-4 cursor-pointer transition duration-155 flex items-center justify-between hover:bg-dark-900/30 ${
+                          className={`p-4 cursor-pointer transition duration-150 flex items-center justify-between hover:bg-dark-900/30 ${
                             selectedStudent?._id === student._id 
                               ? 'bg-primary-600/10 border-l-4 border-l-primary-500' 
                               : ''
@@ -658,7 +743,7 @@ const ClassGrid = () => {
                         >
                           <div className="flex items-center gap-3">
                             <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-primary-600 to-indigo-400 flex items-center justify-center font-bold text-white text-xs">
-                              {student.name[0].toUpperCase()}
+                              {(student.name?.[0] || '?').toUpperCase()}
                             </div>
                             <div>
                               <div className="font-semibold text-white text-xs flex items-center gap-1.5">
@@ -699,7 +784,7 @@ const ClassGrid = () => {
                 {/* Header Profile details */}
                 <div className="flex items-center gap-4">
                   <div className="w-14 h-14 rounded-xl bg-gradient-to-tr from-primary-600 to-indigo-400 flex items-center justify-center font-bold text-white text-xl shadow">
-                    {selectedStudent.name[0].toUpperCase()}
+                    {(selectedStudent.name?.[0] || '?').toUpperCase()}
                   </div>
                   <div>
                     <div className="flex items-center gap-2">
@@ -836,7 +921,7 @@ const ClassGrid = () => {
                             className={`px-2 py-0.5 rounded text-[10px] font-bold transition ${
                               attendanceViewTab === 'monthly'
                                 ? 'bg-primary-600 text-white'
-                                : 'text-slate-550 hover:text-slate-350'
+                                : 'text-slate-500 hover:text-slate-350'
                             }`}
                           >
                             Monthly
@@ -847,7 +932,7 @@ const ClassGrid = () => {
                             className={`px-2 py-0.5 rounded text-[10px] font-bold transition ${
                               attendanceViewTab === 'daily'
                                 ? 'bg-primary-600 text-white'
-                                : 'text-slate-550 hover:text-slate-350'
+                                : 'text-slate-500 hover:text-slate-350'
                             }`}
                           >
                             Daily Logs
@@ -861,7 +946,7 @@ const ClassGrid = () => {
                             selectedStudent.attendance_history.map((h, i) => {
                               const rate = h.total_classes > 0 ? Math.round((h.attended / h.total_classes) * 100) : 0;
                               return (
-                                <div key={i} className="flex justify-between items-center p-2 rounded-lg bg-dark-905 border border-dark-900 font-mono">
+                                <div key={i} className="flex justify-between items-center p-2 rounded-lg bg-dark-900 border border-dark-900 font-mono">
                                   <span className="text-xs text-slate-350 font-bold">{h.month}</span>
                                   <div className="flex items-center gap-3">
                                     <span className="text-[10px] text-slate-500">{h.attended} / {h.total_classes} classes</span>
@@ -901,7 +986,7 @@ const ClassGrid = () => {
                     {/* Academic Session History */}
                     {selectedStudent.academic_history?.length > 0 && (
                       <div className="pt-4 border-t border-dark-800/60 space-y-3 animate-fadeIn">
-                        <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-405 flex items-center gap-1.5 font-outfit">
+                        <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-1.5 font-outfit">
                           <History size={14} className="text-primary-500" />
                           <span>Session Archives (Academic History)</span>
                         </h3>
@@ -929,7 +1014,7 @@ const ClassGrid = () => {
                                   <span className={`px-2 py-0.5 rounded text-[9px] font-extrabold ${
                                     record.promotion_status === 'Promoted' || record.promotion_status === 'Graduated'
                                       ? 'bg-emerald-500/10 text-emerald-450 border border-emerald-500/20'
-                                      : 'bg-amber-500/10 text-amber-450 border border-amber-500/20'
+                                      : 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
                                   }`}>
                                     {record.promotion_status}
                                   </span>
@@ -945,7 +1030,7 @@ const ClassGrid = () => {
                                   </div>
                                   <div>
                                     <span className="text-slate-500 block">Attendance Rate</span>
-                                    <span className={`font-bold ${attendanceRate !== null ? (attendanceRate >= 75 ? 'text-emerald-400' : 'text-amber-400') : 'text-slate-250'}`}>
+                                    <span className={`font-bold ${attendanceRate !== null ? (attendanceRate >= 75 ? 'text-emerald-400' : 'text-amber-400') : 'text-slate-200'}`}>
                                       {attendanceRate !== null ? `${attendanceRate}%` : 'N/A'}
                                     </span>
                                   </div>
@@ -1013,7 +1098,7 @@ const ClassGrid = () => {
             Class Dashboard
           </span>
           <h1 className="text-3xl font-extrabold tracking-tight text-white font-outfit mt-1">Class {class_level} Roster & Logs</h1>
-          <p className="text-slate-405 text-xs sm:text-sm max-w-2xl">
+          <p className="text-slate-400 text-xs sm:text-sm max-w-2xl">
             Manage student academic profiles, record daily attendance compliance metrics, update grading matrices, and allocate handouts.
           </p>
         </div>
@@ -1056,7 +1141,7 @@ const ClassGrid = () => {
                 setSubmitError('');
                 setShowAddModal(true);
               }}
-              className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-primary-600 hover:bg-primary-500 active:bg-primary-750 text-white transition font-bold text-[10px] uppercase tracking-wider shadow-lg shadow-primary-500/10"
+              className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-primary-600 hover:bg-primary-500 active:bg-primary-700 text-white transition font-bold text-[10px] uppercase tracking-wider shadow-lg shadow-primary-500/10"
             >
               <Plus size={14} />
               <span>Add Student</span>
@@ -1334,7 +1419,7 @@ const ClassGrid = () => {
               <div className="flex justify-between items-start">
                 <div>
                   <div className="w-12 h-12 rounded-xl bg-gradient-to-tr from-primary-600 to-indigo-400 flex items-center justify-center font-bold text-white text-lg mb-3 shadow">
-                    {selectedStudent.name[0].toUpperCase()}
+                    {(selectedStudent.name?.[0] || '?').toUpperCase()}
                   </div>
                   <h2 className="text-lg font-bold text-white font-outfit">{selectedStudent.name}</h2>
                   <p className="text-slate-400 text-xs mt-1">Roll No: {selectedStudent.roll_number} • Class {selectedStudent.class_level}</p>
@@ -1401,7 +1486,7 @@ const ClassGrid = () => {
                       className={`px-2 py-0.5 rounded text-[10px] font-bold transition ${
                         performanceTab === 'school'
                           ? 'bg-primary-600 text-white'
-                          : 'text-slate-550 hover:text-slate-350'
+                          : 'text-slate-500 hover:text-slate-350'
                       }`}
                     >
                       School
@@ -1412,7 +1497,7 @@ const ClassGrid = () => {
                       className={`px-2 py-0.5 rounded text-[10px] font-bold transition ${
                         performanceTab === 'tuition'
                           ? 'bg-primary-600 text-white'
-                          : 'text-slate-550 hover:text-slate-350'
+                          : 'text-slate-500 hover:text-slate-350'
                       }`}
                     >
                       Tuition
@@ -1475,7 +1560,7 @@ const ClassGrid = () => {
                       selectedStudent.attendance_history.map((h, i) => {
                         const rate = h.total_classes > 0 ? Math.round((h.attended / h.total_classes) * 100) : 0;
                         return (
-                          <div key={i} className="flex justify-between items-center p-2 rounded-lg bg-dark-905 border border-dark-900 font-mono">
+                          <div key={i} className="flex justify-between items-center p-2 rounded-lg bg-dark-900 border border-dark-900 font-mono">
                             <span className="text-xs text-slate-350 font-bold">{h.month}</span>
                             <div className="flex items-center gap-3">
                               <span className="text-[10px] text-slate-500">{h.attended} / {h.total_classes} classes</span>
@@ -1492,13 +1577,13 @@ const ClassGrid = () => {
                   <div className="space-y-2 max-h-32 overflow-y-auto pr-1">
                     {detailedAttendance.length > 0 ? (
                       detailedAttendance.map((log, i) => (
-                        <div key={i} className="flex justify-between items-center p-2 rounded-lg bg-dark-905 border border-dark-900 font-mono">
+                        <div key={i} className="flex justify-between items-center p-2 rounded-lg bg-dark-900 border border-dark-900 font-mono">
                           <div className="flex items-center gap-2">
                             <span className="text-xs text-slate-350 font-bold">
                               {new Date(log.date).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}
                             </span>
                             {log.session_name && (
-                              <span className="text-[9px] font-bold text-primary-400 bg-primary-950/80 border border-primary-900 px-1.5 py-0.2 rounded">
+                              <span className="text-[9px] font-bold text-primary-400 bg-primary-950/80 border border-primary-900 px-1.5 py-0.5 rounded">
                                 {log.session_name}
                               </span>
                             )}
@@ -1550,7 +1635,7 @@ const ClassGrid = () => {
                             <span className={`px-2 py-0.5 rounded text-[9px] font-extrabold ${
                               record.promotion_status === 'Promoted' || record.promotion_status === 'Graduated'
                                 ? 'bg-emerald-500/10 text-emerald-450 border border-emerald-500/20'
-                                : 'bg-amber-500/10 text-amber-450 border border-amber-500/20'
+                                : 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
                             }`}>
                               {record.promotion_status}
                             </span>
@@ -1565,7 +1650,7 @@ const ClassGrid = () => {
                               <span className="font-bold text-slate-200">{avgScore !== null ? `${avgScore}%` : 'N/A'}</span>
                             </div>
                             <div>
-                              <span className="text-slate-550 block">Attendance Rate</span>
+                              <span className="text-slate-500 block">Attendance Rate</span>
                               <span className={`font-bold ${attendanceRate !== null ? (attendanceRate >= 75 ? 'text-emerald-400' : 'text-amber-400') : 'text-slate-200'}`}>
                                 {attendanceRate !== null ? `${attendanceRate}%` : 'N/A'}
                               </span>
@@ -1816,17 +1901,28 @@ const ClassGrid = () => {
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-semibold text-slate-400 mb-1.5">Status</label>
-                  <select
-                    name="status"
-                    value={studentForm.status}
+                  <label className="block text-xs font-semibold text-slate-400 mb-1.5">Emergency Contact</label>
+                  <input
+                    type="text"
+                    name="secondary_contact"
+                    value={studentForm.secondary_contact || ''}
                     onChange={handleStudentFormChange}
-                    className="w-full px-3.5 py-2.5 rounded-lg bg-dark-900 border border-dark-850 text-white text-xs outline-none focus:border-primary-500"
-                  >
-                    <option value="Active">Active</option>
-                    <option value="Inactive">Inactive</option>
-                  </select>
+                    className="w-full px-3.5 py-2.5 rounded-lg bg-dark-900 border border-dark-850 text-white text-xs outline-none focus:border-primary-500 font-mono"
+                  />
                 </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-400 mb-1.5">Status</label>
+                <select
+                  name="status"
+                  value={studentForm.status}
+                  onChange={handleStudentFormChange}
+                  className="w-full px-3.5 py-2.5 rounded-lg bg-dark-900 border border-dark-850 text-white text-xs outline-none focus:border-primary-500"
+                >
+                  <option value="Active">Active</option>
+                  <option value="Inactive">Inactive</option>
+                </select>
               </div>
 
               <div className="space-y-2">
@@ -2018,7 +2114,7 @@ const ClassGrid = () => {
                     type="date"
                     required
                     value={attendanceDate}
-                    max={new Date().toISOString().split('T')[0]}
+                    max={getTodayIST()}
                     onChange={(e) => handleAttendanceDateChange(e.target.value)}
                     className="px-2 py-1 rounded bg-dark-950 border border-dark-800 text-white text-xs outline-none focus:border-primary-500 font-mono"
                   />
@@ -2100,7 +2196,7 @@ const ClassGrid = () => {
                 </div>
               </div>
 
-              <div className="border border-dark-850 rounded-xl overflow-hidden bg-dark-905">
+              <div className="border border-dark-850 rounded-xl overflow-hidden bg-dark-900">
                 <div className="grid grid-cols-12 bg-dark-900 border-b border-dark-850 p-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">
                   <div className="col-span-2 text-center">Roll</div>
                   <div className="col-span-7">Student Name</div>
@@ -2210,7 +2306,7 @@ const ClassGrid = () => {
               </form>
 
               {/* Subjects List */}
-              <div className="border border-dark-850 rounded-xl overflow-hidden bg-dark-905 max-h-60 overflow-y-auto">
+              <div className="border border-dark-850 rounded-xl overflow-hidden bg-dark-900 max-h-60 overflow-y-auto">
                 <div className="bg-dark-900 border-b border-dark-850 p-3 text-xs font-semibold text-slate-450 uppercase tracking-wider">
                   Active Subjects
                 </div>
@@ -2229,21 +2325,15 @@ const ClassGrid = () => {
                             <input
                               type="number"
                               min="1"
-                              value={sub.total_chapters || 4}
-                              onChange={async (e) => {
-                                const newTotal = parseInt(e.target.value, 10);
-                                if (!isNaN(newTotal) && newTotal >= 1) {
-                                  try {
-                                    setSavingSubjectId(sub._id);
-                                    setSubjectsList(prev => prev.map(item => item._id === sub._id ? { ...item, total_chapters: newTotal } : item));
-                                    await axios.put(`/api/subjects/${sub._id}`, { total_chapters: newTotal });
-                                    setSavingSubjectId(null);
-                                    setSavedSubjectId(sub._id);
-                                    setTimeout(() => setSavedSubjectId(null), 1000);
-                                  } catch (err) {
-                                    setSavingSubjectId(null);
-                                    console.error('Failed to update chapters', err);
-                                  }
+                              value={subjectChapterDrafts[sub._id] ?? String(sub.total_chapters || 4)}
+                              onChange={(e) => {
+                                setSubjectChapterDrafts(prev => ({ ...prev, [sub._id]: e.target.value }));
+                              }}
+                              onBlur={() => handleSaveSubjectChapters(sub)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  e.preventDefault();
+                                  e.currentTarget.blur();
                                 }
                               }}
                               className={`w-12 px-1 py-0.5 rounded text-white text-[10px] text-center outline-none transition-all duration-300 font-semibold border ${
@@ -2258,7 +2348,7 @@ const ClassGrid = () => {
                           <button
                             type="button"
                             onClick={() => handleDeleteSubject(sub._id, sub.name)}
-                            className="p-1 rounded text-rose-450 hover:bg-rose-500/10 hover:text-rose-305 transition animate-fadeIn"
+                            className="p-1 rounded text-rose-450 hover:bg-rose-500/10 hover:text-rose-300 transition animate-fadeIn"
                             title={`Delete ${sub.name}`}
                           >
                             <Trash2 size={14} />

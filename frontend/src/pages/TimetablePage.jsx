@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useMemo } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import axios from 'axios';
 import { useAuth } from '../context/AuthContext';
@@ -38,6 +38,13 @@ const TimetablePage = () => {
   const [savingTimetable, setSavingTimetable] = useState(false);
   const [timetableError, setTimetableError] = useState('');
   const [timetableSuccess, setTimetableSuccess] = useState('');
+  const successTimerRef = useRef(null);
+
+  useEffect(() => {
+    return () => {
+      if (successTimerRef.current) clearTimeout(successTimerRef.current);
+    };
+  }, []);
 
   const fetchTimetableData = async () => {
     try {
@@ -111,19 +118,38 @@ const TimetablePage = () => {
     if (e) e.preventDefault();
     setTimetableError('');
     setTimetableSuccess('');
+
+    for (let i = 0; i < tempSlots.length; i++) {
+      const slot = tempSlots[i];
+      if (!slot.grade?.trim() || !slot.time?.trim() || !slot.subject?.trim()) {
+        setTimetableError(`Slot #${i + 1} requires a non-empty class grade, time frame, and subject.`);
+        return;
+      }
+    }
+
+    const sanitizedSlots = tempSlots.map(slot => ({
+      ...slot,
+      grade: slot.grade.trim(),
+      time: slot.time.trim(),
+      subject: slot.subject.trim(),
+      teacher: (slot.teacher || '').trim()
+    }));
+
     setSavingTimetable(true);
 
     try {
       const hasDay = timetable.some(t => t.day === editingDay);
       const updatedTimetable = hasDay
-        ? timetable.map(t => (t.day === editingDay ? { ...t, slots: tempSlots } : t))
-        : [...timetable, { day: editingDay, slots: tempSlots }];
+        ? timetable.map(t => (t.day === editingDay ? { ...t, slots: sanitizedSlots } : t))
+        : [...timetable, { day: editingDay, slots: sanitizedSlots }];
 
       const res = await axios.put('/api/timetable', { data: updatedTimetable });
       if (res.data.success) {
         setTimetable(res.data.data);
         setTimetableSuccess(`Timetable for ${editingDay} updated successfully!`);
-        setTimeout(() => {
+        if (successTimerRef.current) clearTimeout(successTimerRef.current);
+        successTimerRef.current = setTimeout(() => {
+          successTimerRef.current = null;
           setTimetableSuccess('');
         }, 3000);
       }
@@ -180,7 +206,8 @@ const TimetablePage = () => {
               </button>
             </div>
 
-            <div className="p-4 sm:p-6 overflow-y-auto flex-1 space-y-4">
+            <form onSubmit={handleSaveTimetable} className="flex flex-col flex-1 overflow-hidden min-h-0">
+              <div className="p-4 sm:p-6 overflow-y-auto flex-1 space-y-4">
               {timetableError && (
                 <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-2">
                   <AlertTriangle size={16} className="shrink-0 text-rose-400" />
@@ -316,24 +343,24 @@ const TimetablePage = () => {
               </div>
             </div>
 
-            {/* Modal Footer */}
-            <div className="p-4 sm:p-6 border-t border-dark-800 flex justify-between items-center bg-dark-950/60 shrink-0">
-              <button
-                type="button"
-                onClick={() => setShowTimetableModal(false)}
-                className="px-4 py-2 rounded-xl bg-dark-900 border border-dark-800 text-slate-400 hover:text-white text-xs font-semibold transition"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={handleSaveTimetable}
-                disabled={savingTimetable}
-                className="px-5 py-2 rounded-xl bg-primary-600 hover:bg-primary-500 text-white text-xs font-bold transition flex items-center gap-1.5 shadow-lg shadow-primary-500/20 disabled:opacity-50"
-              >
-                {savingTimetable ? 'Saving...' : 'Save Schedule Changes'}
-              </button>
-            </div>
+              {/* Modal Footer */}
+              <div className="p-4 sm:p-6 border-t border-dark-800 flex justify-between items-center bg-dark-950/60 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setShowTimetableModal(false)}
+                  className="px-4 py-2 rounded-xl bg-dark-900 border border-dark-800 text-slate-400 hover:text-white text-xs font-semibold transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingTimetable}
+                  className="px-5 py-2 rounded-xl bg-primary-600 hover:bg-primary-500 text-white text-xs font-bold transition flex items-center gap-1.5 shadow-lg shadow-primary-500/20 disabled:opacity-50"
+                >
+                  {savingTimetable ? 'Saving...' : 'Save Schedule Changes'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>,
         document.body

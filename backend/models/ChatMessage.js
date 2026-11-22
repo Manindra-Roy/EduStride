@@ -5,6 +5,11 @@ const chatMessageSchema = new mongoose.Schema({
     type: String,
     required: true
   },
+  sender_id: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null
+  },
   sender_name: {
     type: String,
     required: true
@@ -26,7 +31,11 @@ const chatMessageSchema = new mongoose.Schema({
   reactions: [
     {
       emoji: String,
-      sender_name: String
+      sender_name: String,
+      sender_id: {
+        type: String,
+        default: ''
+      }
     }
   ],
   created_at: {

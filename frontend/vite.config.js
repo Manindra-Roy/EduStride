@@ -7,7 +7,8 @@ const apkHeadersPlugin = () => ({
   configureServer(server) {
     server.middlewares.use((req, res, next) => {
       if (req.url && req.url.split('?')[0].toLowerCase().endsWith('.apk')) {
-        const filename = req.url.split('?')[0].split('/').pop() || 'EduStride.apk';
+        const rawFilename = req.url.split('?')[0].split('/').pop() || 'EduStride.apk';
+        const filename = rawFilename.replace(/[^a-zA-Z0-9._-]/g, '_') || 'EduStride.apk';
         res.setHeader('Content-Type', 'application/vnd.android.package-archive');
         res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
         res.setHeader('X-Content-Type-Options', 'nosniff');

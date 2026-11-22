@@ -26,11 +26,38 @@ const getCachedTimetableData = async () => {
   return cachedTimetableData;
 };
 
+// Generic keyed async mutex for serializing Attendance sheet mutations
+const sheetLocks = new Map();
+const withSheetLock = async (key, fn) => {
+  const prev = sheetLocks.get(key) || Promise.resolve();
+  let release;
+  const next = new Promise(resolve => { release = resolve; });
+  const chained = prev.catch(() => {}).then(() => next);
+  sheetLocks.set(key, chained);
+  await prev.catch(() => {});
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (sheetLocks.get(key) === chained) {
+      sheetLocks.delete(key);
+    }
+  }
+};
+
 /**
  * Broadcast real-time attendance update event over Socket.IO so ClassGrid,
  * Dashboard (Admin/Teacher/Student), and Gate Scanner update live without refresh.
  */
-export const emitAttendanceUpdated = ({ class_level, date, session_name, student_id = null, student_name = '', source = 'manual' }) => {
+export const emitAttendanceUpdated = ({
+  class_level,
+  date,
+  session_name,
+  student_id = null,
+  student_ids = null,
+  student_name = '',
+  source = 'manual'
+}) => {
   try {
     const io = getIO();
     if (!io || !class_level) return;
@@ -45,9 +72,13 @@ export const emitAttendanceUpdated = ({ class_level, date, session_name, student
       source,
       timestamp: new Date()
     };
-    const emitter = io.to(cleanClass).to(upperClass).to('GATE_MONITOR');
-    if (student_id) {
-      emitter.to(`USER_${student_id}`);
+    let emitter = io.to(cleanClass).to(upperClass).to('GATE_MONITOR');
+    if (Array.isArray(student_ids) && student_ids.length > 0) {
+      for (const sid of student_ids) {
+        if (sid) emitter = emitter.to(`USER_${sid}`);
+      }
+    } else if (student_id) {
+      emitter = emitter.to(`USER_${student_id}`);
     }
     emitter.emit('attendance_updated', payload);
   } catch (err) {
@@ -231,11 +262,11 @@ export const recalculateRollNumbers = async (class_level) => {
   return job;
 };
 
-/**
- * Recalculate monthly attendance_history for all active students in a class for YYYY-MM
- * using lean queries + a single batched Student.bulkWrite (instead of N round-trips).
- */
-export const recalculateMonthlyAttendance = async (class_level, trackingMonth) => {
+// Per-(class_level, trackingMonth) serialization + coalescing for monthly attendance aggregation
+const monthlyRecalcActive = new Map();
+const monthlyRecalcDirty = new Set();
+
+const runRecalculateMonthlyAttendance = async (class_level, trackingMonth) => {
   const startOfMonth = new Date(`${trackingMonth}-01T00:00:00.000Z`);
   const year = parseInt(trackingMonth.split('-')[0], 10);
   const month = parseInt(trackingMonth.split('-')[1], 10);
@@ -300,9 +331,10 @@ export const recalculateMonthlyAttendance = async (class_level, trackingMonth) =
         }
       });
     } else {
+      // Guard $push with $ne so concurrent writers can never push duplicate month entries
       bulkOps.push({
         updateOne: {
-          filter: { _id: student._id },
+          filter: { _id: student._id, 'attendance_history.month': { $ne: trackingMonth } },
           update: {
             $push: {
               attendance_history: {
@@ -323,38 +355,83 @@ export const recalculateMonthlyAttendance = async (class_level, trackingMonth) =
   await recalculateRollNumbers(class_level);
 };
 
+/**
+ * Recalculate monthly attendance_history for all active students in a class for YYYY-MM
+ * serialized per (class_level, trackingMonth).
+ */
+export const recalculateMonthlyAttendance = async (class_level, trackingMonth) => {
+  if (!class_level || !trackingMonth) return;
+  const key = `${String(class_level).trim().toUpperCase()}::${trackingMonth}`;
+
+  if (monthlyRecalcActive.has(key)) {
+    monthlyRecalcDirty.add(key);
+    return monthlyRecalcActive.get(key);
+  }
+
+  const job = (async () => {
+    try {
+      do {
+        monthlyRecalcDirty.delete(key);
+        await runRecalculateMonthlyAttendance(class_level, trackingMonth);
+      } while (monthlyRecalcDirty.has(key));
+    } catch (error) {
+      console.error(`Error recalculating monthly attendance for ${key}:`, error);
+    } finally {
+      monthlyRecalcActive.delete(key);
+    }
+  })();
+
+  monthlyRecalcActive.set(key, job);
+  return job;
+};
+
 // Debounced per-(class_level, month) background recalculation so ESP32 gate scans respond in ~100ms
-// and burst arrivals coalesce into a single DB recalculation + Socket.IO broadcast.
-const biometricRecalcTimers = new Map();
+// and burst arrivals coalesce into a single DB recalculation while notifying ALL scanned students.
+const biometricRecalcState = new Map(); // key -> { timer, studentIds: Set<string>, lastMeta }
 
 const scheduleBiometricPostSync = ({ class_level, trackingMonth, dateStr, session_name, student_id, student_name }) => {
   const key = `${String(class_level).trim().toUpperCase()}::${trackingMonth}`;
-  if (biometricRecalcTimers.has(key)) {
-    clearTimeout(biometricRecalcTimers.get(key));
+  let entry = biometricRecalcState.get(key);
+  if (!entry) {
+    entry = { timer: null, studentIds: new Set(), lastMeta: null };
+    biometricRecalcState.set(key, entry);
   }
-  const timer = setTimeout(async () => {
-    biometricRecalcTimers.delete(key);
+  if (student_id) {
+    entry.studentIds.add(String(student_id));
+  }
+  entry.lastMeta = { class_level, trackingMonth, dateStr, session_name, student_id, student_name };
+
+  if (entry.timer) {
+    clearTimeout(entry.timer);
+  }
+
+  entry.timer = setTimeout(async () => {
+    const current = biometricRecalcState.get(key);
+    biometricRecalcState.delete(key);
+    if (!current || !current.lastMeta) return;
+    const meta = current.lastMeta;
+    const allStudentIds = Array.from(current.studentIds);
     try {
-      await recalculateMonthlyAttendance(class_level, trackingMonth);
+      await recalculateMonthlyAttendance(meta.class_level, meta.trackingMonth);
       emitAttendanceUpdated({
-        class_level,
-        date: dateStr,
-        session_name,
-        student_id,
-        student_name,
+        class_level: meta.class_level,
+        date: meta.dateStr,
+        session_name: meta.session_name,
+        student_id: meta.student_id,
+        student_ids: allStudentIds,
+        student_name: meta.student_name,
         source: 'biometric'
       });
     } catch (err) {
       console.error('[Biometric Post-Sync Error]:', err.message);
     }
   }, 450);
-  biometricRecalcTimers.set(key, timer);
 };
 
 /**
  * Determine which session_name in today's Timetable matches a biometric scan.
- * Matches within ±45 minutes of a scheduled slot start, or falls back to the single slot of the day,
- * or 'Session 1' if no slot matches.
+ * Matches within ±45 minutes of a scheduled slot start, or falls back to the nearest slot
+ * by time distance, or 'Session 1' if no slot exists.
  */
 export const resolveActiveSessionForClass = async (class_level, dateStr, istMinutesNow, sessionOverride = '') => {
   if (sessionOverride && sessionOverride.trim()) {
@@ -379,22 +456,31 @@ export const resolveActiveSessionForClass = async (class_level, dateStr, istMinu
         }
 
         if (classSlots.length > 1) {
-          let bestSlot = null;
-          let bestDiff = Infinity;
+          let bestWindowSlot = null;
+          let bestWindowDiff = Infinity;
+          let nearestSlot = null;
+          let nearestDiff = Infinity;
+
           for (const slot of classSlots) {
             const startMins = parseSlotStartMinutes(slot.time);
             if (startMins !== null) {
               const diff = Math.abs(istMinutesNow - startMins);
-              if (diff <= 45 && diff < bestDiff) {
-                bestDiff = diff;
-                bestSlot = slot;
+              if (diff < nearestDiff) {
+                nearestDiff = diff;
+                nearestSlot = slot;
+              }
+              if (diff <= 45 && diff < bestWindowDiff) {
+                bestWindowDiff = diff;
+                bestWindowSlot = slot;
               }
             }
           }
-          if (bestSlot) {
-            return `${bestSlot.time} - ${bestSlot.subject}`;
+          if (bestWindowSlot) {
+            return `${bestWindowSlot.time} - ${bestWindowSlot.subject}`;
           }
-          // Fallback to first scheduled slot if none within 45 min
+          if (nearestSlot) {
+            return `${nearestSlot.time} - ${nearestSlot.subject}`;
+          }
           return `${classSlots[0].time} - ${classSlots[0].subject}`;
         }
       }
@@ -408,59 +494,75 @@ export const resolveActiveSessionForClass = async (class_level, dateStr, istMinu
 
 /**
  * Automatically mark a scanned student as Present in the existing Attendance collection,
- * preserving all classmates' existing manual statuses and scheduling debounced monthly/roll sync
- * so the ESP32 scanner receives instant feedback without waiting on class-wide recalculation.
+ * serialized per (class_level, dateStr, session_name) with E11000 retry protection.
  */
 export const markBiometricAttendancePresent = async (student, dateStr, time12Str, istMinutesNow, sessionOverride = '') => {
   const class_level = student.class_level;
   const normalizedDate = new Date(`${dateStr}T00:00:00.000Z`);
   const trackingMonth = dateStr.substring(0, 7);
   const session_name = await resolveActiveSessionForClass(class_level, dateStr, istMinutesNow, sessionOverride);
+  const lockKey = `${String(class_level).trim().toUpperCase()}::${dateStr}::${session_name}`;
 
-  let sheet = await Attendance.findOne({ class_level, date: normalizedDate, session_name });
-  const entryRemark = `Biometric Entry ${time12Str}`;
+  await withSheetLock(lockKey, async () => {
+    const entryRemark = `Biometric Entry ${time12Str}`;
 
-  if (!sheet) {
-    // First student of this class for this session today: initialize sheet with all active classmates
-    const activeStudents = await Student.find({ class_level, status: 'Active' }).select('_id').lean();
-    const records = activeStudents.map(s => ({
-      student: s._id,
-      status: s._id.toString() === student._id.toString() ? 'Present' : 'Absent',
-      remarks: s._id.toString() === student._id.toString() ? entryRemark : ''
-    }));
+    const applyUpdateToSheet = async (sheet) => {
+      const existingRec = sheet.records.find(r => r.student.toString() === student._id.toString());
+      if (existingRec) {
+        existingRec.status = 'Present';
+        existingRec.remarks = existingRec.remarks
+          ? (existingRec.remarks.includes('Biometric Entry') ? existingRec.remarks : `${existingRec.remarks} | ${entryRemark}`)
+          : entryRemark;
+      } else {
+        sheet.records.push({
+          student: student._id,
+          status: 'Present',
+          remarks: entryRemark
+        });
+      }
+      await sheet.save();
+    };
 
-    // Ensure scanned student is included even if status changed
-    if (!records.some(r => r.student.toString() === student._id.toString())) {
-      records.push({
-        student: student._id,
-        status: 'Present',
-        remarks: entryRemark
-      });
-    }
+    let sheet = await Attendance.findOne({ class_level, date: normalizedDate, session_name });
 
-    sheet = await Attendance.create({
-      class_level,
-      date: normalizedDate,
-      session_name,
-      records
-    });
-  } else {
-    // Sheet already exists (biometric or manual): update ONLY this student without overwriting anyone else
-    const existingRec = sheet.records.find(r => r.student.toString() === student._id.toString());
-    if (existingRec) {
-      existingRec.status = 'Present';
-      existingRec.remarks = existingRec.remarks
-        ? (existingRec.remarks.includes('Biometric Entry') ? existingRec.remarks : `${existingRec.remarks} | ${entryRemark}`)
-        : entryRemark;
+    if (!sheet) {
+      const activeStudents = await Student.find({ class_level, status: 'Active' }).select('_id').lean();
+      const records = activeStudents.map(s => ({
+        student: s._id,
+        status: s._id.toString() === student._id.toString() ? 'Present' : 'Absent',
+        remarks: s._id.toString() === student._id.toString() ? entryRemark : ''
+      }));
+
+      if (!records.some(r => r.student.toString() === student._id.toString())) {
+        records.push({
+          student: student._id,
+          status: 'Present',
+          remarks: entryRemark
+        });
+      }
+
+      try {
+        await Attendance.create({
+          class_level,
+          date: normalizedDate,
+          session_name,
+          records
+        });
+      } catch (createErr) {
+        // Handle E11000 duplicate-key race (e.g. concurrent teacher manual sheet save)
+        if (createErr?.code === 11000) {
+          sheet = await Attendance.findOne({ class_level, date: normalizedDate, session_name });
+          if (sheet) {
+            await applyUpdateToSheet(sheet);
+          }
+        } else {
+          throw createErr;
+        }
+      }
     } else {
-      sheet.records.push({
-        student: student._id,
-        status: 'Present',
-        remarks: entryRemark
-      });
+      await applyUpdateToSheet(sheet);
     }
-    await sheet.save();
-  }
+  });
 
   scheduleBiometricPostSync({
     class_level,
@@ -475,33 +577,39 @@ export const markBiometricAttendancePresent = async (student, dateStr, time12Str
 };
 
 /**
- * Append biometric exit time into today's Attendance record remark (keeps status 'Present' intact).
+ * Append biometric exit time into today's Attendance record remark (keeps status 'Present' intact),
+ * serialized with entry updates for the same sheet.
  */
 export const appendBiometricExitRemark = async (student, dateStr, time12Str, sessionName) => {
   try {
     const normalizedDate = new Date(`${dateStr}T00:00:00.000Z`);
-    const query = sessionName
-      ? { class_level: student.class_level, date: normalizedDate, session_name: sessionName }
-      : { class_level: student.class_level, date: normalizedDate };
+    const resolvedSession = sessionName || '';
+    const lockKey = `${String(student.class_level).trim().toUpperCase()}::${dateStr}::${resolvedSession || '*'}`;
 
-    const sheet = await Attendance.findOne(query).sort({ updatedAt: -1 });
-    if (!sheet) return;
+    await withSheetLock(lockKey, async () => {
+      const query = resolvedSession
+        ? { class_level: student.class_level, date: normalizedDate, session_name: resolvedSession }
+        : { class_level: student.class_level, date: normalizedDate };
 
-    const existingRec = sheet.records.find(r => r.student.toString() === student._id.toString());
-    if (existingRec) {
-      const exitNote = `Exit ${time12Str}`;
-      existingRec.remarks = existingRec.remarks ? `${existingRec.remarks} | ${exitNote}` : exitNote;
-      await sheet.save();
+      const sheet = await Attendance.findOne(query).sort({ updatedAt: -1 });
+      if (!sheet) return;
 
-      emitAttendanceUpdated({
-        class_level: student.class_level,
-        date: dateStr,
-        session_name: sheet.session_name,
-        student_id: student._id,
-        student_name: student.name,
-        source: 'biometric_exit'
-      });
-    }
+      const existingRec = sheet.records.find(r => r.student.toString() === student._id.toString());
+      if (existingRec) {
+        const exitNote = `Exit ${time12Str}`;
+        existingRec.remarks = existingRec.remarks ? `${existingRec.remarks} | ${exitNote}` : exitNote;
+        await sheet.save();
+
+        emitAttendanceUpdated({
+          class_level: student.class_level,
+          date: dateStr,
+          session_name: sheet.session_name,
+          student_id: student._id,
+          student_name: student.name,
+          source: 'biometric_exit'
+        });
+      }
+    });
   } catch (err) {
     console.error('[Biometric Exit Remark Error]:', err.message);
   }

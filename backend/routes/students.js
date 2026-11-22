@@ -4,20 +4,40 @@ import FeeLedger from '../models/FeeLedger.js';
 import User from '../models/User.js';
 import Attendance from '../models/Attendance.js';
 import Timetable from '../models/Timetable.js';
+import ClassLevel from '../models/ClassLevel.js';
+import SpecialBatch from '../models/SpecialBatch.js';
 import { protect, authorize } from '../middleware/auth.js';
 import { deleteFromCloud } from '../services/cloudStorage.js';
-import { recalculateRollNumbers, recalculateMonthlyAttendance, emitAttendanceUpdated } from '../services/attendanceSync.js';
+import {
+  getISTParts,
+  recalculateRollNumbers,
+  recalculateMonthlyAttendance,
+  emitAttendanceUpdated
+} from '../services/attendanceSync.js';
 import { enqueueHardwareDeletesForStudent } from './biometric.js';
 
 const router = express.Router();
 const DAYS_OF_WEEK_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const MONTH_NAMES = [
+  'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December'
+];
+const ALLOWED_ATTENDANCE_STATUSES = ['Present', 'Absent', 'Late', 'Excused'];
+const ALLOWED_PROMOTION_STATUSES = ['Promoted', 'Retained', 'Graduated'];
 
-// Helper to initialize 12-month ledger for a student
+const parseValidDateString = (rawDate) => {
+  if (typeof rawDate !== 'string') return null;
+  const cleanDateStr = rawDate.trim().split('T')[0];
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(cleanDateStr)) return null;
+  const normalizedDate = new Date(`${cleanDateStr}T00:00:00.000Z`);
+  if (isNaN(normalizedDate.getTime())) return null;
+  if (normalizedDate.toISOString().slice(0, 10) !== cleanDateStr) return null;
+  return { cleanDateStr, normalizedDate };
+};
+
+// Helper to initialize 12-month ledger for a student (queries unique student_id)
 const initializeFeeLedger = async (studentId, year = new Date().getFullYear()) => {
-  const months = [
-    'January', 'February', 'March', 'April', 'May', 'June',
-    'July', 'August', 'September', 'October', 'November', 'December'
-  ].map(m => ({
+  const months = MONTH_NAMES.map(m => ({
     month_name: m,
     status: 'Unpaid',
     amount_paid: 0,
@@ -26,7 +46,7 @@ const initializeFeeLedger = async (studentId, year = new Date().getFullYear()) =
     transaction_method: null
   }));
 
-  const exists = await FeeLedger.findOne({ student_id: studentId, year });
+  const exists = await FeeLedger.findOne({ student_id: studentId });
   if (!exists) {
     await FeeLedger.create({
       student_id: studentId,
@@ -38,10 +58,7 @@ const initializeFeeLedger = async (studentId, year = new Date().getFullYear()) =
 
 // Helper to reset an existing fee ledger or create it if missing (avoids unique student_id violations)
 const resetOrCreateFeeLedger = async (studentId, year) => {
-  const months = [
-    'January', 'February', 'March', 'April', 'May', 'June',
-    'July', 'August', 'September', 'October', 'November', 'December'
-  ].map(m => ({
+  const months = MONTH_NAMES.map(m => ({
     month_name: m,
     status: 'Unpaid',
     amount_paid: 0,
@@ -70,23 +87,25 @@ const resetOrCreateFeeLedger = async (studentId, year) => {
 router.get('/', protect, async (req, res, next) => {
   try {
     const { class_level, search, fee_status, page = 1, limit = 10 } = req.query;
+    const cleanSearch = typeof search === 'string' && search.trim() ? search.trim() : '';
+    const cleanClassLevel = typeof class_level === 'string' && class_level.trim() ? class_level.trim().toUpperCase() : '';
+    const cleanFeeStatus = typeof fee_status === 'string' && ['Paid', 'Unpaid', 'Partial/Pending'].includes(fee_status)
+      ? fee_status
+      : '';
 
     const query = {};
 
     // Enforce class isolation for Student role
     if (req.user.role === 'Student') {
       if (req.user.studentProfile) {
-        // Find the student profile to retrieve class_level
         const selfStudent = await Student.findById(req.user.studentProfile);
         if (!selfStudent) {
           return res.json({ success: true, count: 0, pages: 1, data: [] });
         }
-        // Force the class_level query to match the student's class
         query.class_level = selfStudent.class_level;
-        
-        // Allow search on classmates
-        if (search) {
-          const escapedSearch = String(search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+        if (cleanSearch) {
+          const escapedSearch = cleanSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
           query.$or = [
             { name: { $regex: escapedSearch, $options: 'i' } },
             { roll_number: { $regex: escapedSearch, $options: 'i' } }
@@ -97,11 +116,11 @@ router.get('/', protect, async (req, res, next) => {
       }
     } else {
       // Admin/Teacher filtering
-      if (class_level) {
-        query.class_level = class_level;
+      if (cleanClassLevel && cleanClassLevel !== 'ALL') {
+        query.class_level = cleanClassLevel;
       }
-      if (search) {
-        const escapedSearch = String(search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      if (cleanSearch) {
+        const escapedSearch = cleanSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         query.$or = [
           { name: { $regex: escapedSearch, $options: 'i' } },
           { roll_number: { $regex: escapedSearch, $options: 'i' } }
@@ -109,30 +128,28 @@ router.get('/', protect, async (req, res, next) => {
       }
     }
 
-    // Handle fee status filter (Only for Admin/Teacher)
-    if (fee_status && req.user.role !== 'Student') {
-      const currentMonthName = [
-        'January', 'February', 'March', 'April', 'May', 'June',
-        'July', 'August', 'September', 'October', 'November', 'December'
-      ][new Date().getMonth()];
+    const ist = getISTParts();
+    const currentMonthName = MONTH_NAMES[Number(ist.dateStr.slice(5, 7)) - 1];
 
+    // Handle fee status filter (Only for Admin/Teacher)
+    if (cleanFeeStatus && req.user.role !== 'Student') {
       const ledgers = await FeeLedger.find({
-        'months': {
+        months: {
           $elemMatch: {
             month_name: currentMonthName,
-            status: fee_status
+            status: cleanFeeStatus
           }
         }
-      });
+      }).select('student_id').lean();
       const studentIds = ledgers.map(l => l.student_id);
       query._id = { $in: studentIds };
-      if (fee_status === 'Unpaid') {
+      if (cleanFeeStatus === 'Unpaid') {
         query.is_free_tier = { $ne: true };
       }
     }
 
     const pageNum = Math.max(1, parseInt(page, 10) || 1);
-    const limitNum = Math.max(1, parseInt(limit, 10) || 10);
+    const limitNum = Math.min(1000, Math.max(1, parseInt(limit, 10) || 10));
     const count = await Student.countDocuments(query);
     const pages = Math.max(1, Math.ceil(count / limitNum));
     const skip = (pageNum - 1) * limitNum;
@@ -143,7 +160,7 @@ router.get('/', protect, async (req, res, next) => {
       .limit(limitNum)
       .lean();
 
-    // Batch-fetch all required FeeLedgers in ONE MongoDB query (eliminates N+1 query storm)
+    // Batch-fetch all required FeeLedgers in ONE MongoDB query
     const isStudent = req.user.role === 'Student';
     const selfIdStr = req.user.studentProfile?.toString() || '';
     const ledgerTargetIds = students
@@ -156,8 +173,6 @@ router.get('/', protect, async (req, res, next) => {
       ledgers.forEach(l => ledgerMap.set(l.student_id.toString(), l));
     }
 
-    const currentMonthIndex = new Date().getMonth();
-
     // Attach fee status to results for tables, with role-based redactions
     const studentDataWithFees = students.map((student) => {
       const isSelf = isStudent && selfIdStr === student._id.toString();
@@ -169,7 +184,8 @@ router.get('/', protect, async (req, res, next) => {
         currentFeeStatus = 'Exempt';
       } else if (!isStudent || isSelf) {
         ledger = ledgerMap.get(student._id.toString()) || null;
-        currentFeeStatus = ledger?.months?.[currentMonthIndex]?.status || 'Unpaid';
+        const monthEntry = ledger?.months?.find(m => m.month_name === currentMonthName);
+        currentFeeStatus = monthEntry?.status || 'Unpaid';
       }
 
       const studentObj = { ...student };
@@ -241,7 +257,25 @@ router.get('/:id', protect, async (req, res, next) => {
 // @access  Private (Admin/Teacher)
 router.post('/', protect, authorize('SuperAdmin', 'Teacher'), async (req, res, next) => {
   try {
-    const { name, class_level, parent_name, parent_email, primary_contact, secondary_contact, status, joining_date, monthly_fee, is_free_tier } = req.body;
+    const {
+      name,
+      class_level,
+      parent_name,
+      parent_email,
+      primary_contact,
+      secondary_contact,
+      status,
+      joining_date,
+      monthly_fee,
+      is_free_tier
+    } = req.body || {};
+
+    if (typeof class_level !== 'string' || !class_level.trim()) {
+      res.status(400);
+      throw new Error('A valid class_level is required');
+    }
+
+    const cleanClassLevel = class_level.trim().toUpperCase();
 
     // Generate a temporary unique roll number since it will be auto-recalculated
     const uniqueTempRoll = `NEW_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
@@ -252,7 +286,7 @@ router.post('/', protect, authorize('SuperAdmin', 'Teacher'), async (req, res, n
     const student = await Student.create({
       name,
       roll_number: uniqueTempRoll,
-      class_level,
+      class_level: cleanClassLevel,
       parent_name,
       parent_email: parent_email ? String(parent_email).trim().toLowerCase() : '',
       primary_contact,
@@ -267,7 +301,7 @@ router.post('/', protect, authorize('SuperAdmin', 'Teacher'), async (req, res, n
     await initializeFeeLedger(student._id);
 
     // Recalculate roll numbers for the class level
-    await recalculateRollNumbers(class_level);
+    await recalculateRollNumbers(cleanClassLevel);
 
     // Fetch the updated student profile with the correct roll number
     const updatedStudent = await Student.findById(student._id);
@@ -281,7 +315,7 @@ router.post('/', protect, authorize('SuperAdmin', 'Teacher'), async (req, res, n
   }
 });
 
-// @desc    Update a student
+// @desc    Update a student (whitelisted fields only)
 // @route   PUT /api/students/:id
 // @access  Private (Admin/Teacher)
 router.put('/:id', protect, authorize('SuperAdmin', 'Teacher'), async (req, res, next) => {
@@ -294,37 +328,87 @@ router.put('/:id', protect, authorize('SuperAdmin', 'Teacher'), async (req, res,
 
     const oldClassLevel = student.class_level;
     const oldStatus = student.status;
-    const { class_level, status } = req.body;
+    const {
+      name,
+      class_level,
+      parent_name,
+      parent_email,
+      primary_contact,
+      secondary_contact,
+      status,
+      joining_date,
+      monthly_fee,
+      is_free_tier
+    } = req.body || {};
 
-    // Remove roll_number from update payload since it's auto-calculated
-    if ('roll_number' in req.body) {
-      delete req.body.roll_number;
+    const updateFields = {};
+    if (typeof name === 'string' && name.trim()) {
+      updateFields.name = name.trim();
     }
-
-    // If class level is changing, temporarily set roll number to a unique string to avoid unique key index clashes
-    if (class_level && class_level !== oldClassLevel) {
-      req.body.roll_number = `TEMP_${Date.now()}_${student._id}_MOVE`;
+    if (typeof parent_name === 'string' && parent_name.trim()) {
+      updateFields.parent_name = parent_name.trim();
     }
-
-    // Handle free tier status and monthly fee logic
-    if (req.body.is_free_tier !== undefined) {
-      req.body.is_free_tier = Boolean(req.body.is_free_tier);
-      if (req.body.is_free_tier) {
-        req.body.monthly_fee = 0;
+    if (parent_email !== undefined) {
+      updateFields.parent_email = typeof parent_email === 'string' ? parent_email.trim().toLowerCase() : '';
+    }
+    if (typeof primary_contact === 'string' && primary_contact.trim()) {
+      updateFields.primary_contact = primary_contact.trim();
+    }
+    if (typeof secondary_contact === 'string' && secondary_contact.trim()) {
+      updateFields.secondary_contact = secondary_contact.trim();
+    }
+    if (typeof status === 'string' && ['Active', 'Inactive'].includes(status)) {
+      updateFields.status = status;
+    }
+    if (joining_date !== undefined) {
+      const parsedJoin = new Date(joining_date);
+      if (!isNaN(parsedJoin.getTime())) {
+        updateFields.joining_date = parsedJoin;
       }
     }
 
-    const updatedStudent = await Student.findByIdAndUpdate(req.params.id, req.body, {
-      new: true,
-      runValidators: true
-    });
+    let cleanClassLevel = null;
+    if (typeof class_level === 'string' && class_level.trim()) {
+      cleanClassLevel = class_level.trim().toUpperCase();
+      updateFields.class_level = cleanClassLevel;
+      if (cleanClassLevel !== oldClassLevel) {
+        updateFields.roll_number = `TEMP_${Date.now()}_${student._id}_MOVE`;
+      }
+    }
+
+    if (is_free_tier !== undefined) {
+      updateFields.is_free_tier = Boolean(is_free_tier);
+      if (updateFields.is_free_tier) {
+        updateFields.monthly_fee = 0;
+      } else if (monthly_fee !== undefined) {
+        const parsedFee = Number(monthly_fee);
+        if (!Number.isFinite(parsedFee) || parsedFee < 0) {
+          res.status(400);
+          throw new Error('monthly_fee must be a non-negative number');
+        }
+        updateFields.monthly_fee = parsedFee;
+      }
+    } else if (monthly_fee !== undefined) {
+      const parsedFee = Number(monthly_fee);
+      if (!Number.isFinite(parsedFee) || parsedFee < 0) {
+        res.status(400);
+        throw new Error('monthly_fee must be a non-negative number');
+      }
+      updateFields.monthly_fee = student.is_free_tier ? 0 : parsedFee;
+    }
+
+    const updatedStudent = await Student.findByIdAndUpdate(
+      req.params.id,
+      { $set: updateFields },
+      { new: true, runValidators: true }
+    );
 
     // Deduplicate classes needing roll number recalculation
     const classesToRecalc = new Set([oldClassLevel]);
-    if (class_level && class_level !== oldClassLevel) {
-      classesToRecalc.add(class_level);
+    if (cleanClassLevel && cleanClassLevel !== oldClassLevel) {
+      classesToRecalc.add(cleanClassLevel);
     }
-    if (status && status !== oldStatus && updatedStudent?.class_level) {
+    if (updateFields.status && updateFields.status !== oldStatus && updatedStudent?.class_level) {
       classesToRecalc.add(updatedStudent.class_level);
     }
     for (const cls of classesToRecalc) {
@@ -342,7 +426,7 @@ router.put('/:id', protect, authorize('SuperAdmin', 'Teacher'), async (req, res,
   }
 });
 
-// @desc    Delete a student
+// @desc    Delete a student (and clean up all references)
 // @route   DELETE /api/students/:id
 // @access  Private (Admin/Teacher)
 router.delete('/:id', protect, authorize('SuperAdmin', 'Teacher'), async (req, res, next) => {
@@ -354,20 +438,38 @@ router.delete('/:id', protect, authorize('SuperAdmin', 'Teacher'), async (req, r
     }
 
     const classLevel = student.class_level;
+    const studentObjectId = student._id;
 
     await Student.findByIdAndDelete(req.params.id);
-    // Delete their Fee Ledger, remove biometric mappings, AND queue hardware R307S slot deletions
-    await FeeLedger.deleteOne({ student_id: req.params.id });
-    await enqueueHardwareDeletesForStudent(req.params.id, student.name);
+    // Delete Fee Ledger, remove biometric mappings + queue hardware R307S slot deletions,
+    // and clean up SpecialBatch & Attendance references
+    await Promise.all([
+      FeeLedger.deleteOne({ student_id: studentObjectId }),
+      enqueueHardwareDeletesForStudent(studentObjectId, student.name),
+      SpecialBatch.updateMany(
+        {},
+        {
+          $pull: {
+            students: studentObjectId,
+            'attendance_records.$[].records': { student: studentObjectId },
+            'test_scores.$[].scores': { student: studentObjectId }
+          }
+        }
+      ),
+      Attendance.updateMany(
+        { 'records.student': studentObjectId },
+        { $pull: { records: { student: studentObjectId } } }
+      )
+    ]);
 
     // Delete associated User accounts if any
-    const associatedUsers = await User.find({ studentProfile: req.params.id });
+    const associatedUsers = await User.find({ studentProfile: studentObjectId });
     for (const user of associatedUsers) {
       if (user.profile_pic) {
         await deleteFromCloud(user.profile_pic);
       }
     }
-    await User.deleteMany({ studentProfile: req.params.id });
+    await User.deleteMany({ studentProfile: studentObjectId });
 
     // Recalculate rolls for the class level
     await recalculateRollNumbers(classLevel);
@@ -387,13 +489,19 @@ router.delete('/:id', protect, authorize('SuperAdmin', 'Teacher'), async (req, r
 router.get('/attendance/bulk', protect, authorize('SuperAdmin', 'Teacher'), async (req, res, next) => {
   try {
     const { class_level, date, session_name } = req.query;
-    if (!class_level || !date) {
+    if (typeof class_level !== 'string' || !class_level.trim() || typeof date !== 'string' || !date.trim()) {
       res.status(400);
-      throw new Error('Please provide class_level and date');
+      throw new Error('Please provide valid class_level and date');
     }
 
-    const cleanDateStr = date ? String(date).split('T')[0] : new Date().toISOString().split('T')[0];
-    const normalizedDate = new Date(`${cleanDateStr}T00:00:00.000Z`);
+    const parsedDate = parseValidDateString(date);
+    if (!parsedDate) {
+      res.status(400);
+      throw new Error('Invalid date format. Expected YYYY-MM-DD');
+    }
+
+    const cleanClassLevel = class_level.trim().toUpperCase();
+    const { normalizedDate } = parsedDate;
     const dayOfWeekName = DAYS_OF_WEEK_NAMES[normalizedDate.getUTCDay()];
 
     // Fetch timetable schedule to discover scheduled periods for this class & day
@@ -403,7 +511,7 @@ router.get('/attendance/bulk', protect, authorize('SuperAdmin', 'Teacher'), asyn
       if (timetableDoc && Array.isArray(timetableDoc.data)) {
         const dayData = timetableDoc.data.find(d => d.day.toLowerCase() === dayOfWeekName.toLowerCase());
         if (dayData && Array.isArray(dayData.slots)) {
-          const classSlots = dayData.slots.filter(s => s.grade?.trim().toUpperCase() === class_level.trim().toUpperCase());
+          const classSlots = dayData.slots.filter(s => s.grade?.trim().toUpperCase() === cleanClassLevel);
           scheduledSessions = classSlots.map(slot => ({
             session_name: `${slot.time} - ${slot.subject}`,
             time: slot.time,
@@ -418,7 +526,7 @@ router.get('/attendance/bulk', protect, authorize('SuperAdmin', 'Teacher'), asyn
 
     // Find all attendance sheets logged for this class and date
     const allSheets = await Attendance.find({
-      class_level,
+      class_level: cleanClassLevel,
       date: normalizedDate
     }).sort({ createdAt: 1 });
 
@@ -466,7 +574,9 @@ router.get('/attendance/bulk', protect, authorize('SuperAdmin', 'Teacher'), asyn
       });
     }
 
-    const targetSession = session_name || sessionsList[0].session_name;
+    const targetSession = (typeof session_name === 'string' && session_name.trim())
+      ? session_name.trim()
+      : sessionsList[0].session_name;
     const attendanceSheet = allSheets.find(s => (s.session_name || 'Session 1').toLowerCase() === targetSession.toLowerCase());
 
     if (!attendanceSheet) {
@@ -482,6 +592,7 @@ router.get('/attendance/bulk', protect, authorize('SuperAdmin', 'Teacher'), asyn
     const records = attendanceSheet.records.map(r => ({
       student_id: r.student,
       status: r.status,
+      remarks: r.remarks || '',
       attended: r.status === 'Present' || r.status === 'Late'
     }));
 
@@ -502,20 +613,26 @@ router.get('/attendance/bulk', protect, authorize('SuperAdmin', 'Teacher'), asyn
 // @access  Private (Admin/Teacher)
 router.post('/attendance/bulk', protect, authorize('SuperAdmin', 'Teacher'), async (req, res, next) => {
   try {
-    const { class_level, date, session_name, attendance_list } = req.body;
-    if (!class_level || !attendance_list || !Array.isArray(attendance_list) || !date) {
+    const { class_level, date, session_name, attendance_list } = req.body || {};
+    if (typeof class_level !== 'string' || !class_level.trim() || !Array.isArray(attendance_list) || typeof date !== 'string' || !date.trim()) {
       res.status(400);
       throw new Error('Invalid attendance data or date missing');
     }
 
-    const cleanDateStr = date ? String(date).split('T')[0] : new Date().toISOString().split('T')[0];
-    const normalizedDate = new Date(`${cleanDateStr}T00:00:00.000Z`);
+    const parsedDate = parseValidDateString(date);
+    if (!parsedDate) {
+      res.status(400);
+      throw new Error('Invalid date format. Expected YYYY-MM-DD');
+    }
+
+    const cleanClassLevel = class_level.trim().toUpperCase();
+    const { cleanDateStr, normalizedDate } = parsedDate;
     const trackingMonth = cleanDateStr.substring(0, 7); // format: YYYY-MM
-    const cleanSession = session_name?.trim() || 'Session 1';
+    const cleanSession = (typeof session_name === 'string' && session_name.trim()) ? session_name.trim() : 'Session 1';
 
     // Preserve any existing biometric entry/exit remarks when teachers save manual attendance
     const existingSheet = await Attendance.findOne({
-      class_level,
+      class_level: cleanClassLevel,
       date: normalizedDate,
       session_name: cleanSession
     });
@@ -528,27 +645,32 @@ router.post('/attendance/bulk', protect, authorize('SuperAdmin', 'Teacher'), asy
       });
     }
 
-    // Prepare records for the Attendance model
-    const records = attendance_list.map(record => ({
-      student: record.student_id,
-      status: record.attended ? 'Present' : 'Absent',
-      remarks: record.remarks !== undefined
-        ? String(record.remarks)
-        : (existingRemarksByStudent.get(String(record.student_id)) || '')
-    }));
+    // Prepare records for the Attendance model (preserving explicit Late/Excused status when sent)
+    const records = attendance_list.map(record => {
+      const explicitStatus = typeof record.status === 'string' && ALLOWED_ATTENDANCE_STATUSES.includes(record.status)
+        ? record.status
+        : null;
+      return {
+        student: record.student_id,
+        status: explicitStatus || (record.attended ? 'Present' : 'Absent'),
+        remarks: record.remarks !== undefined
+          ? String(record.remarks)
+          : (existingRemarksByStudent.get(String(record.student_id)) || '')
+      };
+    });
 
     // Upsert attendance sheet for this specific session
     await Attendance.findOneAndUpdate(
-      { class_level, date: normalizedDate, session_name: cleanSession },
-      { class_level, date: normalizedDate, session_name: cleanSession, records },
+      { class_level: cleanClassLevel, date: normalizedDate, session_name: cleanSession },
+      { class_level: cleanClassLevel, date: normalizedDate, session_name: cleanSession, records },
       { upsert: true, new: true }
     );
 
     // Recalculate monthly attendance & dynamic roll numbers for all active students in the class
-    await recalculateMonthlyAttendance(class_level, trackingMonth);
+    await recalculateMonthlyAttendance(cleanClassLevel, trackingMonth);
 
     emitAttendanceUpdated({
-      class_level,
+      class_level: cleanClassLevel,
       date: cleanDateStr,
       session_name: cleanSession,
       source: 'manual'
@@ -556,7 +678,7 @@ router.post('/attendance/bulk', protect, authorize('SuperAdmin', 'Teacher'), asy
 
     res.json({
       success: true,
-      message: `Attendance logged for ${cleanSession} (${class_level})`
+      message: `Attendance logged for ${cleanSession} (${cleanClassLevel})`
     });
   } catch (error) {
     next(error);
@@ -584,7 +706,8 @@ router.get('/:id/attendance', protect, async (req, res, next) => {
       return {
         date: sheet.date,
         session_name: sheet.session_name || 'Session 1',
-        status: record ? record.status : 'Absent'
+        status: record ? record.status : 'Absent',
+        remarks: record ? (record.remarks || '') : ''
       };
     });
 
@@ -602,7 +725,7 @@ router.get('/:id/attendance', protect, async (req, res, next) => {
 // @access  Private (Admin/Teacher)
 router.post('/:id/test-scores', protect, authorize('SuperAdmin', 'Teacher'), async (req, res, next) => {
   try {
-    const { subject, test_name, marks_obtained, total_marks, date } = req.body;
+    const { subject, test_name, marks_obtained, total_marks, date } = req.body || {};
 
     if (!subject || !test_name || marks_obtained === undefined || total_marks === undefined) {
       res.status(400);
@@ -612,7 +735,7 @@ router.post('/:id/test-scores', protect, authorize('SuperAdmin', 'Teacher'), asy
     const marksNum = Number(marks_obtained);
     const totalNum = Number(total_marks);
 
-    if (isNaN(marksNum) || isNaN(totalNum)) {
+    if (!Number.isFinite(marksNum) || !Number.isFinite(totalNum)) {
       res.status(400);
       throw new Error('Marks obtained and total marks must be valid numbers');
     }
@@ -648,7 +771,7 @@ router.post('/:id/test-scores', protect, authorize('SuperAdmin', 'Teacher'), asy
 
     await student.save();
 
-    // Recalculate roll numbers for this class since test scores changed
+    // Recalculate roll numbers for this class since school test scores changed
     await recalculateRollNumbers(student.class_level);
 
     const finalStudent = await Student.findById(req.params.id);
@@ -667,7 +790,7 @@ router.post('/:id/test-scores', protect, authorize('SuperAdmin', 'Teacher'), asy
 // @access  Private (Admin/Teacher)
 router.post('/:id/tuition-test-scores', protect, authorize('SuperAdmin', 'Teacher'), async (req, res, next) => {
   try {
-    const { subject, test_name, marks_obtained, total_marks, date } = req.body;
+    const { subject, test_name, marks_obtained, total_marks, date } = req.body || {};
 
     if (!subject || !test_name || marks_obtained === undefined || total_marks === undefined) {
       res.status(400);
@@ -677,7 +800,7 @@ router.post('/:id/tuition-test-scores', protect, authorize('SuperAdmin', 'Teache
     const marksNum = Number(marks_obtained);
     const totalNum = Number(total_marks);
 
-    if (isNaN(marksNum) || isNaN(totalNum)) {
+    if (!Number.isFinite(marksNum) || !Number.isFinite(totalNum)) {
       res.status(400);
       throw new Error('Marks obtained and total marks must be valid numbers');
     }
@@ -713,14 +836,9 @@ router.post('/:id/tuition-test-scores', protect, authorize('SuperAdmin', 'Teache
 
     await student.save();
 
-    // Recalculate roll numbers for this class since test scores changed
-    await recalculateRollNumbers(student.class_level);
-
-    const finalStudent = await Student.findById(req.params.id);
-
     res.status(201).json({
       success: true,
-      data: finalStudent
+      data: student
     });
   } catch (error) {
     next(error);
@@ -732,11 +850,25 @@ router.post('/:id/tuition-test-scores', protect, authorize('SuperAdmin', 'Teache
 // @access  Private (SuperAdmin only)
 router.post('/promote', protect, authorize('SuperAdmin'), async (req, res, next) => {
   try {
-    const { studentIds, sourceClass, targetClass, promotionStatus = 'Promoted', newAcademicYear } = req.body;
+    const { studentIds, sourceClass, targetClass, promotionStatus = 'Promoted', newAcademicYear } = req.body || {};
 
-    if (!targetClass) {
+    if (typeof targetClass !== 'string' || !targetClass.trim()) {
       res.status(400);
       throw new Error('Please specify target class level');
+    }
+
+    if (typeof promotionStatus !== 'string' || !ALLOWED_PROMOTION_STATUSES.includes(promotionStatus)) {
+      res.status(400);
+      throw new Error(`Invalid promotionStatus. Must be one of: ${ALLOWED_PROMOTION_STATUSES.join(', ')}`);
+    }
+
+    const cleanTargetClass = targetClass.toUpperCase().trim();
+    if (cleanTargetClass !== 'GRADUATED') {
+      const targetExists = await ClassLevel.findOne({ name: cleanTargetClass });
+      if (!targetExists) {
+        res.status(400);
+        throw new Error(`Target class level '${cleanTargetClass}' does not exist`);
+      }
     }
 
     const parsedYear = Number(newAcademicYear);
@@ -746,10 +878,16 @@ router.post('/promote', protect, authorize('SuperAdmin'), async (req, res, next)
     }
 
     let query = {};
-    if (studentIds && studentIds.length > 0) {
+    let cleanSourceClass = '';
+    if (Array.isArray(studentIds) && studentIds.length > 0) {
+      if (!studentIds.every(id => typeof id === 'string' && id.trim())) {
+        res.status(400);
+        throw new Error('studentIds must be an array of valid student IDs');
+      }
       query = { _id: { $in: studentIds } };
-    } else if (sourceClass) {
-      query = { class_level: sourceClass, status: 'Active' };
+    } else if (typeof sourceClass === 'string' && sourceClass.trim()) {
+      cleanSourceClass = sourceClass.toUpperCase().trim();
+      query = { class_level: cleanSourceClass, status: 'Active' };
     } else {
       res.status(400);
       throw new Error('Please specify studentIds or sourceClass for promotion');
@@ -763,71 +901,71 @@ router.post('/promote', protect, authorize('SuperAdmin'), async (req, res, next)
 
     const processedStudents = [];
     const affectedClasses = new Set();
-    if (sourceClass) affectedClasses.add(sourceClass);
-    const archivedYear = parsedYear - 1;
+    if (cleanSourceClass) affectedClasses.add(cleanSourceClass);
+    affectedClasses.add(cleanTargetClass);
 
-    for (const student of students) {
-      // Fetch the student's current fee ledger to archive
-      const currentLedger = await FeeLedger.findOne({ student_id: student._id });
-      const ledgerMonths = currentLedger ? currentLedger.months : [];
+    try {
+      for (const student of students) {
+        const currentLedger = await FeeLedger.findOne({ student_id: student._id });
+        const ledgerMonths = currentLedger ? currentLedger.months : [];
+        const archivedYear = currentLedger?.year ?? (parsedYear - 1);
 
-      // 1. Archive current academic and fee data
-      const archiveRecord = {
-        class_level: student.class_level,
-        academic_year: archivedYear,
-        roll_number: student.roll_number,
-        attendance_history: student.attendance_history || [],
-        test_scores: student.test_scores || [],
-        tuition_test_scores: student.tuition_test_scores || [],
-        fee_ledger: ledgerMonths,
-        promotion_status: promotionStatus,
-        promoted_at: new Date()
-      };
+        // 1. Archive current academic and fee data
+        const archiveRecord = {
+          class_level: student.class_level,
+          academic_year: archivedYear,
+          roll_number: student.roll_number,
+          attendance_history: student.attendance_history || [],
+          test_scores: student.test_scores || [],
+          tuition_test_scores: student.tuition_test_scores || [],
+          fee_ledger: ledgerMonths,
+          promotion_status: promotionStatus,
+          promoted_at: new Date()
+        };
 
-      // Push to academic_history
-      student.academic_history = student.academic_history || [];
-      student.academic_history.push(archiveRecord);
+        student.academic_history = student.academic_history || [];
+        student.academic_history.push(archiveRecord);
 
-      // 2. Clear current session data
-      student.test_scores = [];
-      student.attendance_history = [];
-      student.tuition_test_scores = []; // clear tuition scores after archiving
+        // 2. Clear current session data
+        student.test_scores = [];
+        student.attendance_history = [];
+        student.tuition_test_scores = [];
 
-      // 3. Move to target class
-      const oldClass = student.class_level;
-      affectedClasses.add(oldClass);
-      student.class_level = targetClass.toUpperCase().trim();
+        // 3. Move to target class
+        const oldClass = student.class_level;
+        affectedClasses.add(oldClass);
+        student.class_level = cleanTargetClass;
 
-      if (promotionStatus === 'Graduated' || targetClass.toUpperCase().trim() === 'GRADUATED') {
-        student.status = 'Inactive';
+        if (promotionStatus === 'Graduated' || cleanTargetClass === 'GRADUATED') {
+          student.status = 'Inactive';
+        }
+
+        // 4. Temporary roll number to avoid index collision during batch update
+        student.roll_number = `TEMP_PROMOTE_${Date.now()}_${student._id}`;
+
+        await student.save();
+
+        // 5. Update/Reset Fee Ledger for the new academic year
+        await resetOrCreateFeeLedger(student._id, parsedYear);
+
+        processedStudents.push({
+          _id: student._id,
+          name: student.name,
+          oldClass,
+          newClass: student.class_level,
+          status: student.status
+        });
       }
-
-      // 4. Temporary roll number to avoid index collision during batch update
-      student.roll_number = `TEMP_PROMOTE_${Date.now()}_${student._id}`;
-
-      await student.save();
-
-      // 5. Update/Reset Fee Ledger for the new academic year
-      await resetOrCreateFeeLedger(student._id, parsedYear);
-
-      processedStudents.push({
-        _id: student._id,
-        name: student.name,
-        oldClass,
-        newClass: student.class_level,
-        status: student.status
-      });
-    }
-
-    // 6. Recalculate roll numbers for all affected source and target classes
-    affectedClasses.add(targetClass.toUpperCase().trim());
-    for (const cls of affectedClasses) {
-      await recalculateRollNumbers(cls);
+    } finally {
+      // 6. Always recalculate roll numbers for all affected classes so no student stays on TEMP_PROMOTE_*
+      for (const cls of affectedClasses) {
+        await recalculateRollNumbers(cls);
+      }
     }
 
     res.json({
       success: true,
-      message: `Successfully processed promotion for ${processedStudents.length} student(s) to Class ${targetClass}`,
+      message: `Successfully processed promotion for ${processedStudents.length} student(s) to Class ${cleanTargetClass}`,
       data: processedStudents
     });
   } catch (error) {

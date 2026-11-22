@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import { useNavigate, Link, Navigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { Mail, Lock, ArrowRight, BookOpen, Eye, EyeOff, Smartphone } from 'lucide-react';
 import Logo from '../components/Logo';
@@ -13,8 +13,12 @@ const Login = () => {
   const [showPassword, setShowPassword] = useState(false);
   const [emailFocused, setEmailFocused] = useState(false);
   const [passwordFocused, setPasswordFocused] = useState(false);
-  const { login } = useAuth();
+  const { login, token, user, loading } = useAuth();
   const navigate = useNavigate();
+
+  if (!loading && token && user) {
+    return <Navigate to="/" replace />;
+  }
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -96,7 +100,7 @@ const Login = () => {
                 <span>Password</span>
               </label>
               <div className="relative group">
-                <span className={`absolute inset-y-0 left-0 pl-4 flex items-center transition-colors duration-200 ${passwordFocused ? 'text-primary-400' : 'text-slate-550'}`}>
+                <span className={`absolute inset-y-0 left-0 pl-4 flex items-center transition-colors duration-200 ${passwordFocused ? 'text-primary-400' : 'text-slate-500'}`}>
                   <Lock size={16} />
                 </span>
                 <input
@@ -164,7 +168,7 @@ const Login = () => {
         >
           <p className="text-slate-400 text-xs">
             Need student credentials?{' '}
-            <Link to="/register" className="text-primary-450 hover:text-primary-350 font-bold transition">
+            <Link to="/register" className="text-primary-450 hover:text-primary-300 font-bold transition">
               Create Account
             </Link>
           </p>
@@ -177,7 +181,7 @@ const Login = () => {
               href="https://manindra.in" 
               target="_blank" 
               rel="noreferrer" 
-              className="text-primary-400 hover:text-primary-350 hover:underline transition font-bold"
+              className="text-primary-400 hover:text-primary-300 hover:underline transition font-bold"
             >
               manindra.in
             </a>

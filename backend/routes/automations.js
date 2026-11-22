@@ -2,6 +2,8 @@ import express from 'express';
 import os from 'os';
 import mongoose from 'mongoose';
 import { sendEmail, verifyMailConfig } from '../services/mailService.js';
+import { getISTParts } from '../services/attendanceSync.js';
+import { escapeHtml } from '../utils/html.js';
 import { protect, authorize } from '../middleware/auth.js';
 import Student from '../models/Student.js';
 import User from '../models/User.js';
@@ -12,9 +14,34 @@ import { getIO } from '../config/socket.js';
 
 const router = express.Router();
 
-// Helper to test mail service configuration
-const testMailerConfig = async () => {
-  return await verifyMailConfig();
+const MONTH_NAMES = [
+  'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December'
+];
+
+const batchFetchUserEmails = async (studentIds) => {
+  const map = new Map();
+  if (!studentIds || studentIds.length === 0) return map;
+  const users = await User.find({ studentProfile: { $in: studentIds } })
+    .select('studentProfile email')
+    .lean();
+  for (const u of users) {
+    if (u.studentProfile && u.email) {
+      map.set(String(u.studentProfile), u.email);
+    }
+  }
+  return map;
+};
+
+const resolveRecipientEmail = (student, userEmailMap) => {
+  if (student.parent_email && student.parent_email.includes('@')) {
+    return student.parent_email.trim();
+  }
+  const linked = userEmailMap.get(String(student._id));
+  if (linked && linked.includes('@')) {
+    return linked.trim();
+  }
+  return null;
 };
 
 // @desc    Get core system metrics and connection status
@@ -23,11 +50,13 @@ const testMailerConfig = async () => {
 router.get('/status', protect, authorize('SuperAdmin'), async (req, res, next) => {
   try {
     const dbStatus = mongoose.connection.readyState === 1 ? 'Operational (Connected)' : 'Disconnected';
-    const studentCount = await Student.countDocuments();
-    const ledgerCount = await FeeLedger.countDocuments();
-    const subjectCount = await Subject.countDocuments();
-    const classCount = await ClassLevel.countDocuments();
-    const mailerStatus = await testMailerConfig();
+    const [studentCount, ledgerCount, subjectCount, classCount, mailerStatus] = await Promise.all([
+      Student.countDocuments(),
+      FeeLedger.countDocuments(),
+      Subject.countDocuments(),
+      ClassLevel.countDocuments(),
+      verifyMailConfig()
+    ]);
 
     const memory = {
       free: (os.freemem() / 1024 / 1024 / 1024).toFixed(2) + ' GB',
@@ -60,46 +89,52 @@ router.get('/status', protect, authorize('SuperAdmin'), async (req, res, next) =
 // @access  Private (SuperAdmin only)
 router.post('/trigger-fee-nag', protect, authorize('SuperAdmin'), async (req, res, next) => {
   try {
-    const currentMonthName = [
-      'January', 'February', 'March', 'April', 'May', 'June',
-      'July', 'August', 'September', 'October', 'November', 'December'
-    ][new Date().getMonth()];
+    const ist = getISTParts();
+    const currentYear = Number(ist.dateStr.slice(0, 4));
+    const currentMonthName = MONTH_NAMES[Number(ist.dateStr.slice(5, 7)) - 1];
 
-    // Find all unpaid ledgers
+    // Find all unpaid or partial ledgers for the current academic year
     const unpaidLedgers = await FeeLedger.find({
-      'months': {
+      year: currentYear,
+      months: {
         $elemMatch: {
           month_name: currentMonthName,
-          status: 'Unpaid'
+          status: { $in: ['Unpaid', 'Partial/Pending'] }
         }
       }
     }).populate('student_id');
 
+    const eligibleStudents = unpaidLedgers
+      .map(l => l.student_id)
+      .filter(s => s && s.status === 'Active' && !s.is_free_tier);
+    const userEmails = await batchFetchUserEmails(eligibleStudents.map(s => s._id));
+
     let sentCount = 0;
     for (const ledger of unpaidLedgers) {
-      if (ledger.student_id && ledger.student_id.status === 'Active') {
-        const student = ledger.student_id;
-        if (student.is_free_tier) continue;
-        const studentUser = await User.findOne({ studentProfile: student._id });
-        if (!studentUser?.email) {
-          console.warn(`[Fee Nagging] Skipping ${student.name}: no registered email.`);
-          continue;
-        }
-        const parentEmail = studentUser.email;
+      const student = ledger.student_id;
+      if (!student || student.status !== 'Active' || student.is_free_tier) continue;
 
-        const mailOptions = {
-          from: '"EduStride Admin" <admin@edustride.com>',
-          to: parentEmail,
-          subject: `Urgent: Tuition Fee Outstanding for ${student.name} - ${currentMonthName}`,
-          text: `Dear ${student.parent_name},\n\nThis is a friendly reminder that the tuition fee of ₹${student.monthly_fee || 0} for ${student.name} (Class ${student.class_level}, Roll No ${student.roll_number}) for the month of ${currentMonthName} is currently UNPAID. Please clear the outstanding balance via the student portal at edustride.in at your earliest convenience.\n\nBest regards,\nEduStride Administration`
-        };
+      const parentEmail = resolveRecipientEmail(student, userEmails);
+      if (!parentEmail) {
+        console.warn(`[Fee Nagging] Skipping ${student.name}: no registered email.`);
+        continue;
+      }
 
-        try {
-          await sendEmail(mailOptions);
-          sentCount++;
-        } catch (mailErr) {
-          console.error(`[Fee Nagging] Failed sending email to ${parentEmail} for ${student.name}:`, mailErr.message);
-        }
+      const monthRecord = ledger.months.find(m => m.month_name === currentMonthName);
+      const statusLabel = monthRecord?.status === 'Partial/Pending' ? 'PARTIALLY PAID / PENDING' : 'UNPAID';
+
+      const mailOptions = {
+        from: '"EduStride Admin" <admin@edustride.com>',
+        to: parentEmail,
+        subject: `Urgent: Tuition Fee Outstanding for ${student.name} - ${currentMonthName}`,
+        text: `Dear ${student.parent_name},\n\nThis is a friendly reminder that the tuition fee of ₹${student.monthly_fee || 0} for ${student.name} (Class ${student.class_level}, Roll No ${student.roll_number}) for the month of ${currentMonthName} is currently ${statusLabel}. Please clear the outstanding balance via the student portal at edustride.in at your earliest convenience.\n\nBest regards,\nEduStride Administration`
+      };
+
+      try {
+        await sendEmail(mailOptions);
+        sentCount++;
+      } catch (mailErr) {
+        console.error(`[Fee Nagging] Failed sending email to ${parentEmail} for ${student.name}:`, mailErr.message);
       }
     }
 
@@ -117,35 +152,42 @@ router.post('/trigger-fee-nag', protect, authorize('SuperAdmin'), async (req, re
 // @access  Private (SuperAdmin only)
 router.post('/trigger-attendance-alert', protect, authorize('SuperAdmin'), async (req, res, next) => {
   try {
-    const currentMonthStr = new Date().toISOString().substring(0, 7);
+    const currentMonthStr = getISTParts().monthStr;
     const students = await Student.find({ status: 'Active' });
-    
-    let sentCount = 0;
+
+    const flagged = [];
     for (const student of students) {
       const monthlyAttendance = student.attendance_history.find(h => h.month === currentMonthStr);
       if (monthlyAttendance && monthlyAttendance.total_classes > 0) {
         const rate = (monthlyAttendance.attended / monthlyAttendance.total_classes) * 100;
         if (rate < 75) {
-          const studentUser = await User.findOne({ studentProfile: student._id });
-          if (!studentUser?.email) {
-            console.warn(`[Attendance Alert] Skipping ${student.name}: no registered email.`);
-            continue;
-          }
-          const parentEmail = studentUser.email;
-          const mailOptions = {
-            from: '"EduStride Academic Office" <academic@edustride.com>',
-            to: parentEmail,
-            subject: `Alert: Low Attendance Notice - ${student.name}`,
-            text: `Dear ${student.parent_name},\n\nWe are writing to inform you that your ward, ${student.name} (Class ${student.class_level}, Roll No ${student.roll_number}), has a running attendance rate of ${rate.toFixed(1)}% for this month. This is below the required 75% threshold.\n\nPlease ensure they attend regular sessions. You can monitor daily attendance details on the student portal at edustride.in. Feel free to contact the class teacher if you have any queries.\n\nBest regards,\nEduStride Academic Office`
-          };
-
-          try {
-            await sendEmail(mailOptions);
-            sentCount++;
-          } catch (mailErr) {
-            console.error(`[Attendance Alert] Failed sending email to ${parentEmail} for ${student.name}:`, mailErr.message);
-          }
+          flagged.push({ student, rate });
         }
+      }
+    }
+
+    const userEmails = await batchFetchUserEmails(flagged.map(item => item.student._id));
+
+    let sentCount = 0;
+    for (const { student, rate } of flagged) {
+      const parentEmail = resolveRecipientEmail(student, userEmails);
+      if (!parentEmail) {
+        console.warn(`[Attendance Alert] Skipping ${student.name}: no registered email.`);
+        continue;
+      }
+
+      const mailOptions = {
+        from: '"EduStride Academic Office" <academic@edustride.com>',
+        to: parentEmail,
+        subject: `Alert: Low Attendance Notice - ${student.name}`,
+        text: `Dear ${student.parent_name},\n\nWe are writing to inform you that your ward, ${student.name} (Class ${student.class_level}, Roll No ${student.roll_number}), has a running attendance rate of ${rate.toFixed(1)}% for this month. This is below the required 75% threshold.\n\nPlease ensure they attend regular sessions. You can monitor daily attendance details on the student portal at edustride.in. Feel free to contact the class teacher if you have any queries.\n\nBest regards,\nEduStride Academic Office`
+      };
+
+      try {
+        await sendEmail(mailOptions);
+        sentCount++;
+      } catch (mailErr) {
+        console.error(`[Attendance Alert] Failed sending email to ${parentEmail} for ${student.name}:`, mailErr.message);
       }
     }
 
@@ -163,29 +205,25 @@ router.post('/trigger-attendance-alert', protect, authorize('SuperAdmin'), async
 // @access  Private (SuperAdmin only)
 router.post('/trigger-progress-report', protect, authorize('SuperAdmin'), async (req, res, next) => {
   try {
-    const { target, class_level, student_id } = req.body;
+    const { target, class_level, student_id } = req.body || {};
 
-    const currentMonthIndex = new Date().getMonth();
-    const currentYear = new Date().getFullYear();
-    const monthsName = [
-      'January', 'February', 'March', 'April', 'May', 'June',
-      'July', 'August', 'September', 'October', 'November', 'December'
-    ];
-    const currentMonthName = monthsName[currentMonthIndex];
-    const currentMonthStr = new Date().toISOString().substring(0, 7);
+    const ist = getISTParts();
+    const currentYear = Number(ist.dateStr.slice(0, 4));
+    const currentMonthName = MONTH_NAMES[Number(ist.dateStr.slice(5, 7)) - 1];
+    const currentMonthStr = ist.monthStr;
 
-    // Filter recipients based on custom parameters
+    // Filter recipients based on validated parameters
     let recipients = [];
     if (target === 'class') {
-      if (!class_level) {
+      if (typeof class_level !== 'string' || !class_level.trim()) {
         res.status(400);
-        throw new Error('Please specify class_level');
+        throw new Error('Please specify a valid class_level');
       }
-      recipients = await Student.find({ class_level, status: 'Active' });
+      recipients = await Student.find({ class_level: class_level.trim().toUpperCase(), status: 'Active' });
     } else if (target === 'student') {
-      if (!student_id) {
+      if (typeof student_id !== 'string' || !student_id.trim()) {
         res.status(400);
-        throw new Error('Please specify student_id');
+        throw new Error('Please specify a valid student_id');
       }
       const student = await Student.findById(student_id);
       if (!student) {
@@ -197,7 +235,7 @@ router.post('/trigger-progress-report', protect, authorize('SuperAdmin'), async 
       recipients = await Student.find({ status: 'Active' });
     }
 
-    // Transporter initialization removed, handled in sendEmail
+    const userEmails = await batchFetchUserEmails(recipients.map(s => s._id));
 
     const logs = [];
     let sentCount = 0;
@@ -210,29 +248,26 @@ router.post('/trigger-progress-report', protect, authorize('SuperAdmin'), async 
       const attendanceRate = totalClasses > 0 ? Math.round((attended / totalClasses) * 100) : 100;
       const attendanceColor = attendanceRate >= 75 ? '#10b981' : attendanceRate >= 50 ? '#f59e0b' : '#f43f5e';
 
-      // 2. Fetch Fee Standing for current month
-      const ledger = await FeeLedger.findOne({ student_id: student._id });
-      const feeMonth = ledger?.months.find(m => m.month_name === currentMonthName) || { status: 'Unpaid', amount_paid: 0 };
-      const feeStatus = feeMonth.status;
-      const feeColor = feeStatus === 'Paid' ? '#10b981' : feeStatus === 'Partial/Pending' ? '#f59e0b' : '#f43f5e';
-
-      // 3. Compile academic exam scores
+      // 2. Compile academic exam scores (guarding total_marks > 0)
       const recentScores = student.test_scores || [];
+      const validScores = recentScores.filter(s => Number(s.total_marks) > 0);
       const testCount = recentScores.length;
-      const averagePercentage = testCount > 0 
-        ? Math.round(recentScores.reduce((sum, s) => sum + (s.marks_obtained / s.total_marks * 100), 0) / testCount)
+      const averagePercentage = validScores.length > 0
+        ? Math.round(validScores.reduce((sum, s) => sum + ((s.marks_obtained / s.total_marks) * 100), 0) / validScores.length)
         : 0;
 
-      // 4. Construct scores table for HTML email
+      // 3. Construct HTML-escaped scores table
       let scoresTableRows = '';
       if (recentScores.length > 0) {
         scoresTableRows = recentScores.map(score => {
-          const percentage = Math.round((score.marks_obtained / score.total_marks) * 100);
+          const percentage = Number(score.total_marks) > 0
+            ? Math.round((score.marks_obtained / score.total_marks) * 100)
+            : 0;
           return `
             <tr style="border-bottom: 1px solid #edf2f7;">
-              <td style="padding: 10px 5px; font-weight: bold; font-family: sans-serif;">${score.test_name}</td>
-              <td style="padding: 10px 5px; color: #4a5568; font-family: sans-serif;">${score.subject}</td>
-              <td style="padding: 10px 5px; font-size: 11px; color: #a0aec0; font-family: sans-serif;">${new Date(score.date).toLocaleDateString()}</td>
+              <td style="padding: 10px 5px; font-weight: bold; font-family: sans-serif;">${escapeHtml(score.test_name)}</td>
+              <td style="padding: 10px 5px; color: #4a5568; font-family: sans-serif;">${escapeHtml(score.subject)}</td>
+              <td style="padding: 10px 5px; font-size: 11px; color: #a0aec0; font-family: sans-serif;">${escapeHtml(new Date(score.date).toLocaleDateString())}</td>
               <td style="padding: 10px 5px; text-align: right; font-weight: bold; font-family: sans-serif;">${score.marks_obtained} / ${score.total_marks}</td>
               <td style="padding: 10px 5px; text-align: right; color: #4f46e5; font-weight: bold; font-family: sans-serif;">${percentage}%</td>
             </tr>
@@ -263,67 +298,73 @@ router.post('/trigger-progress-report', protect, authorize('SuperAdmin'), async 
         </table>
       `;
 
-      // 5. Parent email
-      const studentUser = await User.findOne({ studentProfile: student._id });
-      const parentEmail = studentUser?.email || null;
+      // 4. Resolve parent email (prioritizing parent_email over linked User email)
+      const parentEmail = resolveRecipientEmail(student, userEmails);
 
-      // 6. Send Email via Nodemailer
-      const mailOptions = {
-        from: '"EduStride Academic Office" <academic@edustride.com>',
-        to: parentEmail,
-        subject: `Monthly Progress Report: ${student.name} - ${currentMonthName} ${currentYear}`,
-        html: `
-          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 12px; background-color: #ffffff; color: #1a202c;">
-            <div style="text-align: center; border-bottom: 2px solid #6366f1; padding-bottom: 15px; margin-bottom: 20px;">
-              <h2 style="color: #4f46e5; margin: 0; font-size: 22px;">EduStride Student Progress Report</h2>
-              <p style="color: #718096; margin: 5px 0 0 0; font-size: 14px;">Report Period: ${currentMonthName} ${currentYear}</p>
-            </div>
-            
-            <p>Dear <strong>${student.parent_name}</strong>,</p>
-            <p>Please find below the monthly academic progress and attendance status report for your ward, <strong>${student.name}</strong> (Class ${student.class_level}, Roll No ${student.roll_number}), for the month of <strong>${currentMonthName}</strong>.</p>
-            
-            <div style="background-color: #f7fafc; padding: 15px; border-radius: 8px; border-left: 4px solid #4f46e5; margin-bottom: 20px;">
-              <h3 style="margin-top: 0; color: #2d3748; font-size: 16px;">Student Summary</h3>
-              <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
-                <tr>
-                  <td style="padding: 4px 0; color: #718096; width: 35%;">Class Level:</td>
-                  <td style="padding: 4px 0; font-weight: bold;">Class ${student.class_level}</td>
-                </tr>
-                <tr>
-                  <td style="padding: 4px 0; color: #718096;">Roll Number:</td>
-                  <td style="padding: 4px 0; font-weight: bold;">${student.roll_number}</td>
-                </tr>
-                <tr>
-                  <td style="padding: 4px 0; color: #718096;">Monthly Attendance:</td>
-                  <td style="padding: 4px 0; font-weight: bold; color: ${attendanceColor};">${attendanceRate}% (${attended}/${totalClasses} classes)</td>
-                </tr>
-                <tr>
-                  <td style="padding: 4px 0; color: #718096;">Tests Logged:</td>
-                  <td style="padding: 4px 0; font-weight: bold;">${testCount} tests (Average: ${averagePercentage}%)</td>
-                </tr>
-              </table>
-            </div>
-            
-            <div style="margin-bottom: 20px;">
-              <h3 style="color: #2d3748; font-size: 16px; border-bottom: 1px solid #edf2f7; padding-bottom: 8px; margin-bottom: 12px;">Academic Evaluation & Exam Scores</h3>
-              ${scoresTable}
-            </div>
-            
-            <p style="font-size: 13px; color: #4a5568; line-height: 1.5; margin-top: 20px; margin-bottom: 20px;">
-              Please log in to the student portal (<a href="https://edustride.in" style="color: #4f46e5; text-decoration: none; font-weight: bold;">EduStride.in</a>) to view detailed gradebooks and schedules.
-            </p>
-            
-            <div style="font-size: 12px; color: #a0aec0; text-align: center; border-top: 1px solid #edf2f7; padding-top: 15px; margin-top: 30px;">
-              This is an automated system dispatch from your school portal (<a href="https://edustride.in" style="color: #4f46e5; text-decoration: none; font-weight: bold;">edustride.in</a>).<br>
-              Please do not reply directly to this email. For any queries, contact the academic coordinator.
-            </div>
-          </div>
-        `
-      };
+      const safeParentName = escapeHtml(student.parent_name);
+      const safeStudentName = escapeHtml(student.name);
+      const safeClassLevel = escapeHtml(student.class_level);
+      const safeRollNumber = escapeHtml(student.roll_number);
 
+      let emailSent = false;
       if (parentEmail) {
+        const mailOptions = {
+          from: '"EduStride Academic Office" <academic@edustride.com>',
+          to: parentEmail,
+          subject: `Monthly Progress Report: ${student.name} - ${currentMonthName} ${currentYear}`,
+          html: `
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 12px; background-color: #ffffff; color: #1a202c;">
+              <div style="text-align: center; border-bottom: 2px solid #6366f1; padding-bottom: 15px; margin-bottom: 20px;">
+                <h2 style="color: #4f46e5; margin: 0; font-size: 22px;">EduStride Student Progress Report</h2>
+                <p style="color: #718096; margin: 5px 0 0 0; font-size: 14px;">Report Period: ${currentMonthName} ${currentYear}</p>
+              </div>
+              
+              <p>Dear <strong>${safeParentName}</strong>,</p>
+              <p>Please find below the monthly academic progress and attendance status report for your ward, <strong>${safeStudentName}</strong> (Class ${safeClassLevel}, Roll No ${safeRollNumber}), for the month of <strong>${currentMonthName}</strong>.</p>
+              
+              <div style="background-color: #f7fafc; padding: 15px; border-radius: 8px; border-left: 4px solid #4f46e5; margin-bottom: 20px;">
+                <h3 style="margin-top: 0; color: #2d3748; font-size: 16px;">Student Summary</h3>
+                <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+                  <tr>
+                    <td style="padding: 4px 0; color: #718096; width: 35%;">Class Level:</td>
+                    <td style="padding: 4px 0; font-weight: bold;">Class ${safeClassLevel}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 4px 0; color: #718096;">Roll Number:</td>
+                    <td style="padding: 4px 0; font-weight: bold;">${safeRollNumber}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 4px 0; color: #718096;">Monthly Attendance:</td>
+                    <td style="padding: 4px 0; font-weight: bold; color: ${attendanceColor};">${attendanceRate}% (${attended}/${totalClasses} classes)</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 4px 0; color: #718096;">Tests Logged:</td>
+                    <td style="padding: 4px 0; font-weight: bold;">${testCount} tests (Average: ${averagePercentage}%)</td>
+                  </tr>
+                </table>
+              </div>
+              
+              <div style="margin-bottom: 20px;">
+                <h3 style="color: #2d3748; font-size: 16px; border-bottom: 1px solid #edf2f7; padding-bottom: 8px; margin-bottom: 12px;">Academic Evaluation & Exam Scores</h3>
+                ${scoresTable}
+              </div>
+              
+              <p style="font-size: 13px; color: #4a5568; line-height: 1.5; margin-top: 20px; margin-bottom: 20px;">
+                Please log in to the student portal (<a href="https://edustride.in" style="color: #4f46e5; text-decoration: none; font-weight: bold;">EduStride.in</a>) to view detailed gradebooks and schedules.
+              </p>
+              
+              <div style="font-size: 12px; color: #a0aec0; text-align: center; border-top: 1px solid #edf2f7; padding-top: 15px; margin-top: 30px;">
+                This is an automated system dispatch from your school portal (<a href="https://edustride.in" style="color: #4f46e5; text-decoration: none; font-weight: bold;">edustride.in</a>).<br>
+                Please do not reply directly to this email. For any queries, contact the academic coordinator.
+              </div>
+            </div>
+          `
+        };
+
         try {
           await sendEmail(mailOptions);
+          emailSent = true;
+          sentCount++;
         } catch (mailErr) {
           console.error(`[Progress Report] Failed sending email to ${parentEmail} for ${student.name}:`, mailErr.message);
         }
@@ -331,26 +372,21 @@ router.post('/trigger-progress-report', protect, authorize('SuperAdmin'), async 
         console.warn(`[Progress Report] Skipping email for ${student.name}: no registered email.`);
       }
 
-      // 7. Simulate WhatsApp sending (print details into console log)
-      const whatsappText = `📝 *Monthly Progress Report* 📝\n\nDear *${student.parent_name}*,\nHere is the academic progress report for *${student.name}* (Class *${student.class_level}*, Roll *${student.roll_number}*) for *${currentMonthName}*:\n\n📊 *Academic Performance:*\n- Tests Conducted: *${testCount}*\n- Average Score: *${averagePercentage}%*\n\n📅 *Attendance Status:*\n- Attended: *${attended}* / *${totalClasses}* classes (${attendanceRate}%)\n- Compliance: *${attendanceRate >= 75 ? 'Yes' : 'Low Attendance Alert' }*\n\nPlease log in to the student portal to view detailed gradebooks and schedules.\nBest regards,\n*EduStride Academic Center*`;
-      
-      console.log(`=======================================================`);
-      console.log(`[SIMULATED WHATSAPP MESSAGE DISPATCHED]`);
-      console.log(`To: +91 ${student.primary_contact}`);
-      console.log(`Body:`);
-      console.log(whatsappText);
-      console.log(`=======================================================`);
+      // 5. Build WhatsApp quick-send link safely (guarding primary_contact)
+      const whatsappText = `📝 *Monthly Progress Report* 📝\n\nDear *${student.parent_name}*,\nHere is the academic progress report for *${student.name}* (Class *${student.class_level}*, Roll *${student.roll_number}*) for *${currentMonthName}*:\n\n📊 *Academic Performance:*\n- Tests Conducted: *${testCount}*\n- Average Score: *${averagePercentage}%*\n\n📅 *Attendance Status:*\n- Attended: *${attended}* / *${totalClasses}* classes (${attendanceRate}%)\n- Compliance: *${attendanceRate >= 75 ? 'Yes' : 'Low Attendance Alert'}*\n\nPlease log in to the student portal to view detailed gradebooks and schedules.\nBest regards,\n*EduStride Academic Center*`;
 
-      sentCount++;
-      const numericPhone = student.primary_contact.replace(/\D/g, '');
-      const whatsappLink = `https://api.whatsapp.com/send?phone=${numericPhone.startsWith('91') ? numericPhone : '91' + numericPhone}&text=${encodeURIComponent(whatsappText)}`;
+      const numericPhone = student.primary_contact ? String(student.primary_contact).replace(/\D/g, '') : '';
+      const whatsappLink = numericPhone.length >= 10
+        ? `https://api.whatsapp.com/send?phone=${numericPhone.startsWith('91') || numericPhone.length > 10 ? numericPhone : '91' + numericPhone}&text=${encodeURIComponent(whatsappText)}`
+        : '';
 
       logs.push({
         studentName: student.name,
         rollNumber: student.roll_number,
         parentName: student.parent_name,
         email: parentEmail,
-        phone: student.primary_contact,
+        emailSent,
+        phone: student.primary_contact || '',
         whatsappLink,
         averagePercentage,
         attendanceRate
@@ -359,7 +395,7 @@ router.post('/trigger-progress-report', protect, authorize('SuperAdmin'), async 
 
     res.json({
       success: true,
-      message: `Progress Reports processed successfully. Sent ${sentCount} Emails and simulated ${sentCount} WhatsApp alerts.`,
+      message: `Progress Reports processed successfully. Emailed ${sentCount} of ${recipients.length} recipients.`,
       data: logs
     });
   } catch (error) {
@@ -372,30 +408,32 @@ router.post('/trigger-progress-report', protect, authorize('SuperAdmin'), async 
 // @access  Private (SuperAdmin only)
 router.post('/send-custom-email', protect, authorize('SuperAdmin'), async (req, res, next) => {
   try {
-    const { target, class_level, student_id, subject, body } = req.body;
+    const { target, class_level, student_id, subject, body } = req.body || {};
 
-    if (!subject || !body) {
+    if (typeof subject !== 'string' || !subject.trim() || typeof body !== 'string' || !body.trim()) {
       res.status(400);
       throw new Error('Please provide both subject and body for the email');
     }
 
     let recipients = [];
+    let cleanClassLevel = '';
 
     if (target === 'class') {
-      if (!class_level) {
+      if (typeof class_level !== 'string' || !class_level.trim()) {
         res.status(400);
-        throw new Error('Please specify class_level');
+        throw new Error('Please specify a valid class_level');
       }
-      const students = await Student.find({ class_level, status: 'Active' });
+      cleanClassLevel = class_level.trim().toUpperCase();
+      const students = await Student.find({ class_level: cleanClassLevel, status: 'Active' });
       if (students.length === 0) {
         res.status(404);
-        throw new Error(`No active students found in Class ${class_level}`);
+        throw new Error(`No active students found in Class ${cleanClassLevel}`);
       }
       recipients = students;
     } else if (target === 'student') {
-      if (!student_id) {
+      if (typeof student_id !== 'string' || !student_id.trim()) {
         res.status(400);
-        throw new Error('Please specify student_id');
+        throw new Error('Please specify a valid student_id');
       }
       const student = await Student.findById(student_id);
       if (!student) {
@@ -408,22 +446,27 @@ router.post('/send-custom-email', protect, authorize('SuperAdmin'), async (req, 
       throw new Error('Invalid send target. Must be class or student');
     }
 
+    const userEmails = await batchFetchUserEmails(recipients.map(s => s._id));
+    const safeBodyHtml = escapeHtml(body);
+
     let sentCount = 0;
     const sentList = [];
 
     for (const student of recipients) {
-      const studentUser = await User.findOne({ studentProfile: student._id });
-      if (!studentUser?.email) {
+      const parentEmail = resolveRecipientEmail(student, userEmails);
+      if (!parentEmail) {
         console.warn(`[Custom Email] Skipping ${student.name}: no registered email.`);
         continue;
       }
-      const parentEmail = studentUser.email;
+
+      const safeParentName = escapeHtml(student.parent_name);
+      const safeStudentName = escapeHtml(student.name);
 
       try {
         await sendEmail({
           from: '"EduStride Admin" <admin@edustride.com>',
           to: parentEmail,
-          subject: subject,
+          subject: subject.trim(),
           text: `Dear ${student.parent_name},\n\n${body}\n\nBest regards,\nEduStride Administration`,
           html: `
             <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 12px; background-color: #ffffff; color: #1a202c;">
@@ -431,9 +474,9 @@ router.post('/send-custom-email', protect, authorize('SuperAdmin'), async (req, 
                 <h2 style="color: #4f46e5; margin: 0; font-size: 22px;">EduStride Academic Announcement</h2>
               </div>
               
-              <p>Dear <strong>${student.parent_name}</strong> (Parent of ${student.name}),</p>
+              <p>Dear <strong>${safeParentName}</strong> (Parent of ${safeStudentName}),</p>
               <div style="line-height: 1.6; margin: 20px 0; font-size: 14px; white-space: pre-line; color: #2d3748;">
-                ${body}
+                ${safeBodyHtml}
               </div>
               
               <p style="font-size: 13px; color: #4a5568; line-height: 1.5; margin-top: 20px; margin-bottom: 20px;">
@@ -463,14 +506,14 @@ router.post('/send-custom-email', protect, authorize('SuperAdmin'), async (req, 
     const io = getIO();
     if (io) {
       const noticePayload = {
-        subject,
+        subject: subject.trim(),
         body,
         target,
-        class_level: target === 'class' ? class_level : 'Personal',
+        class_level: target === 'class' ? cleanClassLevel : 'Personal',
         timestamp: new Date()
       };
-      if (target === 'class' && class_level) {
-        io.to(class_level.trim().toUpperCase()).to(class_level.trim()).emit('new_notice', noticePayload);
+      if (target === 'class' && cleanClassLevel) {
+        io.to(cleanClassLevel).emit('new_notice', noticePayload);
       } else if (target === 'student' && recipients[0]) {
         io.to(`USER_${recipients[0]._id}`).emit('new_notice', noticePayload);
       }

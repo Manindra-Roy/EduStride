@@ -30,6 +30,10 @@ const extraLessonSchema = new mongoose.Schema({
     type: String,
     default: ''
   },
+  is_uploaded_asset: {
+    type: Boolean,
+    default: false
+  },
   workflow_stage: {
     type: String,
     enum: ['Drafting', 'Notes Distributed', 'Assignment Assigned', 'Revised'],

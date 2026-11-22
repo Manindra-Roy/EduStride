@@ -4,6 +4,7 @@ import axios from 'axios';
 import { useAuth } from '../context/AuthContext';
 import { socket } from '../config/socket';
 import ClassTimetable from '../components/ClassTimetable';
+import { getCurrentMonthIST } from '../utils/istDate';
 import { 
   Users, 
   BookOpen, 
@@ -121,20 +122,25 @@ const Dashboard = () => {
   useEffect(() => {
     const fetchData = async () => {
       try {
-        // Fetch timetable for all roles
-        const timetableRes = await axios.get('/api/timetable');
-        if (timetableRes.data.success) {
-          setTimetable(timetableRes.data.data);
-        }
-
         if (user.role === 'Student') {
+          // Fetch timetable only for student view on Dashboard
+          try {
+            const timetableRes = await axios.get('/api/timetable');
+            if (timetableRes.data.success) {
+              setTimetable(timetableRes.data.data);
+            }
+          } catch (ttErr) {
+            console.error('Failed to load student timetable:', ttErr);
+          }
+
           let studentClass = user.studentProfile?.class_level || '';
+          const studentId = user.studentProfile?._id || (typeof user.studentProfile === 'string' ? user.studentProfile : null);
           // Fetch specific student details
-          if (user.studentProfile?._id) {
-            const res = await axios.get(`/api/students/${user.studentProfile._id}`);
+          if (studentId) {
+            const res = await axios.get(`/api/students/${studentId}`);
             if (res.data.success) {
               setStudentDetails(res.data.data);
-              studentClass = res.data.data.class_level;
+              studentClass = res.data.data?.class_level || studentClass;
             }
           }
           // Fetch special batches for student
@@ -147,62 +153,66 @@ const Dashboard = () => {
             console.error('Failed to load special batches for student dashboard:', spErr);
           }
           // Fetch daily attendance logs
-          if (user.studentProfile?._id) {
-            const attRes = await axios.get(`/api/students/${user.studentProfile._id}/attendance`);
+          if (studentId) {
+            const attRes = await axios.get(`/api/students/${studentId}/attendance`);
             if (attRes.data.success) {
               setDailyAttendanceLogs(attRes.data.data);
             }
           }
-          // Fetch syllabus progress dynamically
-          const [subjectsRes, materialsRes] = await Promise.all([
-            axios.get(`/api/subjects?class_level=${studentClass}`),
-            axios.get('/api/study-materials')
-          ]);
+          // Fetch syllabus progress dynamically (guard empty studentClass)
+          if (studentClass) {
+            const [subjectsRes, materialsRes] = await Promise.all([
+              axios.get(`/api/subjects?class_level=${encodeURIComponent(studentClass)}`),
+              axios.get('/api/study-materials')
+            ]);
 
-          if (subjectsRes.data.success && materialsRes.data.success) {
-            const subjectsData = subjectsRes.data.data || [];
-            const materialsList = materialsRes.data.data || [];
-            const formatted = [];
+            if (subjectsRes.data.success && materialsRes.data.success) {
+              const subjectsData = subjectsRes.data.data || [];
+              const materialsList = materialsRes.data.data || [];
+              const formatted = [];
 
-            subjectsData.forEach(subjectObj => {
-              const subjectName = subjectObj.name;
-              
-              // Filter materials belonging to this subject and class
-              const subjectMaterials = materialsList.filter(m => 
-                m.class_level?.trim().toUpperCase() === studentClass?.trim().toUpperCase() &&
-                m.subject?.trim().toUpperCase() === subjectName.trim().toUpperCase()
-              );
+              subjectsData.forEach(subjectObj => {
+                const subjectName = subjectObj.name;
+                
+                // Filter materials belonging to this subject and class
+                const subjectMaterials = materialsList.filter(m => 
+                  m.class_level?.trim().toUpperCase() === studentClass?.trim().toUpperCase() &&
+                  m.subject?.trim().toUpperCase() === subjectName.trim().toUpperCase()
+                );
 
-              // Group by chapter name (case-insensitive)
-              const chaptersMap = {};
-              subjectMaterials.forEach(m => {
-                const chapterKey = normalizeChapterName(m.chapter_name);
-                if (!chaptersMap[chapterKey]) {
-                  chaptersMap[chapterKey] = [];
-                }
-                chaptersMap[chapterKey].push(m);
+                // Group by chapter name (case-insensitive)
+                const chaptersMap = {};
+                subjectMaterials.forEach(m => {
+                  const chapterKey = normalizeChapterName(m.chapter_name);
+                  if (!chaptersMap[chapterKey]) {
+                    chaptersMap[chapterKey] = [];
+                  }
+                  chaptersMap[chapterKey].push(m);
+                });
+
+                // Calculate unique chapters count and completed chapters count
+                const uniqueChaptersUploaded = Object.keys(chaptersMap);
+                const completedCount = uniqueChaptersUploaded.filter(chapKey => {
+                  const materials = chaptersMap[chapKey];
+                  return materials.some(m => m.status === 'Notes Distributed' || m.status === 'Revised');
+                }).length;
+
+                // The total chapters count is the maximum of the defined total_chapters or the unique chapters uploaded
+                const totalChapters = Math.max(subjectObj.total_chapters || 4, uniqueChaptersUploaded.length);
+                const percentage = totalChapters > 0 ? Math.round((completedCount / totalChapters) * 100) : 0;
+
+                formatted.push({
+                  subject: subjectName,
+                  completed: completedCount,
+                  total: totalChapters,
+                  percentage
+                });
               });
 
-              // Calculate unique chapters count and completed chapters count
-              const uniqueChaptersUploaded = Object.keys(chaptersMap);
-              const completedCount = uniqueChaptersUploaded.filter(chapKey => {
-                const materials = chaptersMap[chapKey];
-                return materials.some(m => m.status === 'Notes Distributed' || m.status === 'Revised');
-              }).length;
-
-              // The total chapters count is the maximum of the defined total_chapters or the unique chapters uploaded
-              const totalChapters = Math.max(subjectObj.total_chapters || 4, uniqueChaptersUploaded.length);
-              const percentage = totalChapters > 0 ? Math.round((completedCount / totalChapters) * 100) : 0;
-
-              formatted.push({
-                subject: subjectName,
-                completed: completedCount,
-                total: totalChapters,
-                percentage
-              });
-            });
-
-            setSyllabusProgress(formatted);
+              setSyllabusProgress(formatted);
+            }
+          } else {
+            setSyllabusProgress([]);
           }
         } else {
           // Fetch global stats for Admin/Teacher
@@ -211,19 +221,19 @@ const Dashboard = () => {
           const classesRes = await axios.get('/api/classes');
 
           const studentsList = studentsRes.data.data || [];
+          const activeStudents = studentsList.filter(s => s.status === 'Active');
           const classesList = classesRes.data.success && Array.isArray(classesRes.data.data) ? classesRes.data.data : [];
           setClasses(classesList);
           
-          // Compute metrics
+          // Compute metrics using Active students
           const counts = {};
           classesList.forEach(c => {
             counts[c] = 0;
           });
           let lowAttendance = 0;
-          const istNowInit = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
-          const currentMonthStr = istNowInit.toISOString().substring(0, 7);
+          const currentMonthStr = getCurrentMonthIST();
 
-          studentsList.forEach(s => {
+          activeStudents.forEach(s => {
             counts[s.class_level] = (counts[s.class_level] || 0) + 1;
             const currentAttendance = s.attendance_history?.find(h => h.month === currentMonthStr);
             if (currentAttendance && currentAttendance.total_classes > 0) {
@@ -234,12 +244,12 @@ const Dashboard = () => {
             }
           });
 
-          const totalExpected = feeStatsRes?.data?.data?.totalExpectedRevenue || studentsList.reduce((sum, s) => sum + ((s.is_free_tier ? 0 : (s.monthly_fee || 0)) * 12), 0);
+          const totalExpected = feeStatsRes?.data?.data?.totalExpectedRevenue || activeStudents.reduce((sum, s) => sum + ((s.is_free_tier ? 0 : (s.monthly_fee || 0)) * 12), 0);
           const totalCollected = feeStatsRes?.data?.data?.actualCollectedRevenue || 0;
           const totalOutstanding = feeStatsRes?.data?.data?.outstandingBalance || Math.max(0, totalExpected - totalCollected);
 
           setStats({
-            totalStudents: studentsList.length,
+            totalStudents: activeStudents.length,
             classCounts: counts,
             expectedRevenue: totalExpected,
             collectedRevenue: totalCollected,
@@ -300,11 +310,10 @@ const Dashboard = () => {
           } else {
             const studentsRes = await axios.get('/api/students?limit=1000');
             if (studentsRes.data.success) {
-              const studentsList = studentsRes.data.data || [];
-              const istNow = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
-              const currentMonthStr = istNow.toISOString().substring(0, 7);
+              const activeStudents = (studentsRes.data.data || []).filter(s => s.status === 'Active');
+              const currentMonthStr = getCurrentMonthIST();
               let lowAttendance = 0;
-              studentsList.forEach(s => {
+              activeStudents.forEach(s => {
                 const currentAttendance = s.attendance_history?.find(h => h.month === currentMonthStr);
                 if (currentAttendance && currentAttendance.total_classes > 0) {
                   const rate = (currentAttendance.attended / currentAttendance.total_classes) * 100;
@@ -313,7 +322,7 @@ const Dashboard = () => {
               });
               setStats(prev => ({
                 ...prev,
-                totalStudents: studentsList.length,
+                totalStudents: activeStudents.length,
                 lowAttendanceCount: lowAttendance
               }));
             }
@@ -348,7 +357,10 @@ const Dashboard = () => {
     const recentScores = studentDetails?.test_scores || [];
     const tuitionScores = studentDetails?.tuition_test_scores || [];
     
-    const latestAttendance = attendanceRecords[attendanceRecords.length - 1] || { total_classes: 0, attended: 0 };
+    const currentMonthStr = getCurrentMonthIST();
+    const latestAttendance =
+      attendanceRecords.find(r => r.month === currentMonthStr) ||
+      { total_classes: 0, attended: 0 };
     const attendancePercentage = latestAttendance.total_classes > 0 
       ? Math.round((latestAttendance.attended / latestAttendance.total_classes) * 100) 
       : 0;
@@ -389,7 +401,7 @@ const Dashboard = () => {
               />
             ) : (
               <div className="w-16 h-16 rounded-2xl bg-gradient-to-tr from-primary-600 to-indigo-400 flex items-center justify-center font-bold text-white text-2xl shadow-md">
-                {user?.email[0].toUpperCase()}
+                {(user?.email?.[0] || 'U').toUpperCase()}
               </div>
             )}
             <div>
@@ -410,7 +422,7 @@ const Dashboard = () => {
               {studentDetails?.roll_number === '01' && <span className="text-amber-400 text-sm ml-1 select-none">👑</span>}
             </span>
             <span className="px-3 py-1.5 rounded-xl bg-primary-950/40 border border-primary-800/30 text-xs font-semibold text-primary-400">
-              Status: Active
+              Status: {studentDetails?.status || 'Active'}
             </span>
           </div>
         </div>
@@ -440,7 +452,7 @@ const Dashboard = () => {
                     <span className="text-slate-400 flex items-center gap-1.5">
                       {new Date(log.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
                       {log.session_name && (
-                        <span className="text-[9px] font-bold text-primary-400 bg-primary-950/80 border border-primary-900 px-1 py-0.2 rounded font-mono">
+                        <span className="text-[9px] font-bold text-primary-400 bg-primary-950/80 border border-primary-900 px-1 py-0.5 rounded font-mono">
                           {log.session_name}
                         </span>
                       )}
@@ -488,9 +500,9 @@ const Dashboard = () => {
             </div>
             <div className="mt-4 pt-4 border-t border-dark-800/60 text-xs text-slate-400 flex justify-between items-center shrink-0">
               <span>Running Chapter Logs</span>
-              <a href="/lms" className="text-primary-400 hover:text-primary-300 font-semibold flex items-center font-outfit">
+              <Link to="/lms" className="text-primary-400 hover:text-primary-300 font-semibold flex items-center font-outfit">
                 LMS Handouts <ChevronRight size={14} />
-              </a>
+              </Link>
             </div>
           </div>
         </div>
@@ -698,7 +710,7 @@ const Dashboard = () => {
                   className={`px-2.5 py-1 rounded-md text-xs font-bold transition ${
                     rightPanelTab === 'scores'
                       ? 'bg-primary-600 text-white'
-                      : 'text-slate-550 hover:text-slate-300'
+                      : 'text-slate-500 hover:text-slate-300'
                   }`}
                 >
                   Exam Scores
@@ -709,7 +721,7 @@ const Dashboard = () => {
                   className={`px-2.5 py-1 rounded-md text-xs font-bold transition ${
                     rightPanelTab === 'attendance'
                       ? 'bg-primary-600 text-white'
-                      : 'text-slate-550 hover:text-slate-300'
+                      : 'text-slate-500 hover:text-slate-300'
                   }`}
                 >
                   Attendance Logs
@@ -908,7 +920,7 @@ const Dashboard = () => {
                 </div>
               </>
             ) : (
-              <div className="text-center py-10 text-slate-550 text-xs border border-dashed border-dark-850 rounded-xl">
+              <div className="text-center py-10 text-slate-500 text-xs border border-dashed border-dark-850 rounded-xl">
                 No school exam scores logged in your profile yet.
               </div>
             )}
@@ -925,7 +937,7 @@ const Dashboard = () => {
                 <p className="text-xs text-slate-400 mt-0.5">Comprehensive history of your evaluation and tests at the tuition center</p>
               </div>
               <div className="flex flex-wrap gap-2">
-                <span className="px-3 py-1.5 rounded-xl bg-dark-900 border border-dark-850 text-xs font-semibold text-slate-355">
+                <span className="px-3 py-1.5 rounded-xl bg-dark-900 border border-dark-850 text-xs font-semibold text-slate-300">
                   Tests Conducted: {tuitionScores.length}
                 </span>
                 {tuitionScores.length > 0 && (
@@ -1040,7 +1052,7 @@ const Dashboard = () => {
                             {new Date(score.date).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}
                           </div>
                           <div className="flex items-center gap-3">
-                            <span className="text-xs font-mono font-semibold text-slate-355">
+                            <span className="text-xs font-mono font-semibold text-slate-300">
                               {score.marks_obtained}/{score.total_marks}
                             </span>
                             <span className="text-xs font-mono font-bold text-emerald-400">{percentage}%</span>
@@ -1052,7 +1064,7 @@ const Dashboard = () => {
                 </div>
               </>
             ) : (
-              <div className="text-center py-10 text-slate-550 text-xs border border-dashed border-dark-850 rounded-xl">
+              <div className="text-center py-10 text-slate-500 text-xs border border-dashed border-dark-850 rounded-xl">
                 No tuition exam scores logged in your profile yet.
               </div>
             )}
@@ -1094,7 +1106,7 @@ const Dashboard = () => {
             />
           ) : (
             <div className="w-16 h-16 rounded-2xl bg-gradient-to-tr from-primary-600 to-indigo-400 flex items-center justify-center font-bold text-white text-2xl shadow-md">
-              {user?.email[0].toUpperCase()}
+              {(user?.email?.[0] || 'U').toUpperCase()}
             </div>
           )}
           <div>
@@ -1151,7 +1163,7 @@ const Dashboard = () => {
       </div>
 
       {/* Analytics Cards Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+      <div className={`grid grid-cols-1 md:grid-cols-2 ${user?.role === 'SuperAdmin' ? 'lg:grid-cols-4' : 'lg:grid-cols-2'} gap-6`}>
         {/* Total Students */}
         <div className="glass-card-hover p-4 sm:p-6 rounded-2xl relative overflow-hidden group">
           <div className="flex justify-between items-center mb-4">
@@ -1167,35 +1179,39 @@ const Dashboard = () => {
           </span>
         </div>
 
-        {/* Total Collected Revenue */}
-        <div className="glass-card-hover p-4 sm:p-6 rounded-2xl relative overflow-hidden group">
-          <div className="flex justify-between items-center mb-4">
-            <span className="text-xs font-bold uppercase tracking-wider text-slate-400 font-outfit">Collected Revenue</span>
-            <div className="p-2.5 rounded-xl bg-emerald-600/10 border border-emerald-500/20 text-emerald-400 group-hover:scale-110 transition-transform shadow-inner">
-              <CreditCard size={18} />
+        {/* Total Collected Revenue (SuperAdmin only) */}
+        {user?.role === 'SuperAdmin' && (
+          <div className="glass-card-hover p-4 sm:p-6 rounded-2xl relative overflow-hidden group">
+            <div className="flex justify-between items-center mb-4">
+              <span className="text-xs font-bold uppercase tracking-wider text-slate-400 font-outfit">Collected Revenue</span>
+              <div className="p-2.5 rounded-xl bg-emerald-600/10 border border-emerald-500/20 text-emerald-400 group-hover:scale-110 transition-transform shadow-inner">
+                <CreditCard size={18} />
+              </div>
             </div>
+            <p className="text-3xl font-black text-white font-outfit tracking-tight">₹{stats.collectedRevenue.toLocaleString()}</p>
+            <span className="text-[10px] font-semibold text-slate-400 block mt-1.5 flex items-center gap-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-slate-400"></span>
+              Updated real-time via ledger
+            </span>
           </div>
-          <p className="text-3xl font-black text-white font-outfit tracking-tight">₹{stats.collectedRevenue.toLocaleString()}</p>
-          <span className="text-[10px] font-semibold text-slate-400 block mt-1.5 flex items-center gap-1">
-            <span className="w-1.5 h-1.5 rounded-full bg-slate-400"></span>
-            Updated real-time via ledger
-          </span>
-        </div>
+        )}
 
-        {/* Outstanding Balance */}
-        <div className="glass-card-hover p-4 sm:p-6 rounded-2xl relative overflow-hidden group">
-          <div className="flex justify-between items-center mb-4">
-            <span className="text-xs font-bold uppercase tracking-wider text-slate-400 font-outfit">Outstanding Balance</span>
-            <div className="p-2.5 rounded-xl bg-rose-600/10 border border-rose-500/20 text-rose-400 group-hover:scale-110 transition-transform shadow-inner">
-              <AlertTriangle size={18} />
+        {/* Outstanding Balance (SuperAdmin only) */}
+        {user?.role === 'SuperAdmin' && (
+          <div className="glass-card-hover p-4 sm:p-6 rounded-2xl relative overflow-hidden group">
+            <div className="flex justify-between items-center mb-4">
+              <span className="text-xs font-bold uppercase tracking-wider text-slate-400 font-outfit">Outstanding Balance</span>
+              <div className="p-2.5 rounded-xl bg-rose-600/10 border border-rose-500/20 text-rose-400 group-hover:scale-110 transition-transform shadow-inner">
+                <AlertTriangle size={18} />
+              </div>
             </div>
+            <p className="text-3xl font-black text-white font-outfit tracking-tight">₹{stats.outstandingRevenue.toLocaleString()}</p>
+            <span className="text-[10px] font-semibold text-rose-400 block mt-1.5 flex items-center gap-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-rose-400 animate-pulse"></span>
+              Pending payment collection
+            </span>
           </div>
-          <p className="text-3xl font-black text-white font-outfit tracking-tight">₹{stats.outstandingRevenue.toLocaleString()}</p>
-          <span className="text-[10px] font-semibold text-rose-400 block mt-1.5 flex items-center gap-1">
-            <span className="w-1.5 h-1.5 rounded-full bg-rose-400 animate-pulse"></span>
-            Pending payment collection
-          </span>
-        </div>
+        )}
 
         {/* Defaulter / Attendance Warnings */}
         <div className="glass-card-hover p-4 sm:p-6 rounded-2xl relative overflow-hidden group">

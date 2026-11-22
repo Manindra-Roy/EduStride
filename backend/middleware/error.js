@@ -1,4 +1,8 @@
 const errorHandler = (err, req, res, next) => {
+  if (res.headersSent) {
+    return next(err);
+  }
+
   let error = { ...err };
   error.message = err.message;
 
@@ -35,7 +39,11 @@ const errorHandler = (err, req, res, next) => {
     res.status(400);
   }
 
-  const statusCode = res.statusCode && res.statusCode !== 200 ? res.statusCode : 500;
+  const errStatus = Number(err.status || err.statusCode);
+  let statusCode = res.statusCode && res.statusCode !== 200 ? res.statusCode : 500;
+  if (statusCode === 500 && Number.isInteger(errStatus) && errStatus >= 400 && errStatus < 600) {
+    statusCode = errStatus;
+  }
 
   // Log for developer
   if (statusCode >= 500) {
@@ -44,11 +52,15 @@ const errorHandler = (err, req, res, next) => {
     console.warn(`[Client Error] ${statusCode} - ${error.message}`);
   }
 
-  res.status(statusCode).json({
+  const responsePayload = {
     success: false,
-    message: error.message || 'Server Error',
-    stack: process.env.NODE_ENV === 'production' ? null : err.stack
-  });
+    message: error.message || 'Server Error'
+  };
+  if (process.env.NODE_ENV === 'development') {
+    responsePayload.stack = err.stack;
+  }
+
+  res.status(statusCode).json(responsePayload);
 };
 
 export default errorHandler;

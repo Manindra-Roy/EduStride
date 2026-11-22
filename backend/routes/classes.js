@@ -7,15 +7,24 @@ import StudyMaterial from '../models/StudyMaterial.js';
 import Timetable from '../models/Timetable.js';
 import ChatMessage from '../models/ChatMessage.js';
 import { protect, authorize } from '../middleware/auth.js';
+import { invalidateTimetableCache } from '../services/attendanceSync.js';
 
 const router = express.Router();
 
-// Seed default classes if none exist
+// Safe idempotent seeding if collection is empty (race-free via upsert)
 const seedDefaultClasses = async () => {
   const count = await ClassLevel.countDocuments();
   if (count === 0) {
-    const defaults = ['VII', 'VIII', 'IX', 'X'].map((name, index) => ({ name, order: index }));
-    await ClassLevel.insertMany(defaults);
+    const defaults = ['VII', 'VIII', 'IX', 'X'].map((name, index) => ({
+      updateOne: {
+        filter: { name },
+        update: { $setOnInsert: { name, order: index } },
+        upsert: true
+      }
+    }));
+    await ClassLevel.bulkWrite(defaults, { ordered: false }).catch(err => {
+      if (err?.code !== 11000) throw err;
+    });
     console.log('[Seeder] Dynamic ClassLevels seeded: VII, VIII, IX, X');
   }
 };
@@ -27,29 +36,29 @@ router.get('/', async (req, res, next) => {
   try {
     await seedDefaultClasses();
     const classes = await ClassLevel.find();
-    
+
     // Sort class levels. If order is set, sort by order. Otherwise fallback to alphabetical/roman sorting.
     const sortedClasses = classes.sort((a, b) => {
       const orderA = a.order !== undefined ? a.order : 0;
       const orderB = b.order !== undefined ? b.order : 0;
-      
+
       if (orderA !== orderB) {
         return orderA - orderB;
       }
-      
+
       const romanToVal = {
         'I': 1, 'II': 2, 'III': 3, 'IV': 4, 'V': 5,
         'VI': 6, 'VII': 7, 'VIII': 8, 'IX': 9, 'X': 10,
         'XI': 11, 'XII': 12, 'XIII': 13, 'XIV': 14, 'XV': 15,
         'XVI': 16, 'XVII': 17, 'XVIII': 18, 'XIX': 19, 'XX': 20
       };
-      
+
       const cleanA = a.name.toUpperCase().trim();
       const cleanB = b.name.toUpperCase().trim();
-      
+
       const valA = romanToVal[cleanA] !== undefined ? romanToVal[cleanA] : (parseInt(cleanA.replace(/\D/g, ''), 10) || cleanA);
       const valB = romanToVal[cleanB] !== undefined ? romanToVal[cleanB] : (parseInt(cleanB.replace(/\D/g, ''), 10) || cleanB);
-      
+
       if (typeof valA === 'number' && typeof valB === 'number') {
         return valA - valB;
       }
@@ -68,8 +77,8 @@ router.get('/', async (req, res, next) => {
 // @access  Private (SuperAdmin only)
 router.post('/', protect, authorize('SuperAdmin'), async (req, res, next) => {
   try {
-    const { name } = req.body;
-    if (!name) {
+    const { name } = req.body || {};
+    if (typeof name !== 'string' || !name.trim()) {
       res.status(400);
       throw new Error('Please provide class name');
     }
@@ -81,8 +90,10 @@ router.post('/', protect, authorize('SuperAdmin'), async (req, res, next) => {
       throw new Error('Class level already exists');
     }
 
-    const count = await ClassLevel.countDocuments();
-    const newClass = await ClassLevel.create({ name: cleanName, order: count });
+    const highest = await ClassLevel.findOne().sort({ order: -1 }).select('order').lean();
+    const nextOrder = highest && typeof highest.order === 'number' ? highest.order + 1 : 0;
+
+    const newClass = await ClassLevel.create({ name: cleanName, order: nextOrder });
     res.status(201).json({ success: true, data: newClass.name });
   } catch (error) {
     next(error);
@@ -94,10 +105,10 @@ router.post('/', protect, authorize('SuperAdmin'), async (req, res, next) => {
 // @access  Private (SuperAdmin only)
 router.put('/order', protect, authorize('SuperAdmin'), async (req, res, next) => {
   try {
-    const { order } = req.body;
-    if (!order || !Array.isArray(order)) {
+    const { order } = req.body || {};
+    if (!order || !Array.isArray(order) || !order.every(item => typeof item === 'string' && item.trim())) {
       res.status(400);
-      throw new Error('Please provide an order array of class names');
+      throw new Error('Please provide an order array of non-empty class names');
     }
 
     const bulkOps = order.map((name, index) => ({
@@ -123,8 +134,8 @@ router.put('/order', protect, authorize('SuperAdmin'), async (req, res, next) =>
 router.put('/:name', protect, authorize('SuperAdmin'), async (req, res, next) => {
   try {
     const oldName = req.params.name.toUpperCase().trim();
-    const { newName } = req.body;
-    if (!newName) {
+    const { newName } = req.body || {};
+    if (typeof newName !== 'string' || !newName.trim()) {
       res.status(400);
       throw new Error('Please provide the new class name');
     }
@@ -152,39 +163,36 @@ router.put('/:name', protect, authorize('SuperAdmin'), async (req, res, next) =>
     classExists.name = cleanNewName;
     await classExists.save();
 
-    // Cascade update to Students
-    await Student.updateMany({ class_level: oldName }, { class_level: cleanNewName });
-
-    // Cascade update to Attendance
-    await Attendance.updateMany({ class_level: oldName }, { class_level: cleanNewName });
-
-    // Cascade update to Subject
-    await Subject.updateMany({ class_level: oldName }, { class_level: cleanNewName });
-
-    // Cascade update to StudyMaterial
-    await StudyMaterial.updateMany({ class_level: oldName }, { class_level: cleanNewName });
-
-    // Cascade update to ChatMessage
-    await ChatMessage.updateMany({ class_level: oldName }, { class_level: cleanNewName });
+    // Cascade update to Students, Attendance, Subject, StudyMaterial, ChatMessage
+    await Promise.all([
+      Student.updateMany({ class_level: oldName }, { class_level: cleanNewName }),
+      Attendance.updateMany({ class_level: oldName }, { class_level: cleanNewName }),
+      Subject.updateMany({ class_level: oldName }, { class_level: cleanNewName }),
+      StudyMaterial.updateMany({ class_level: oldName }, { class_level: cleanNewName }),
+      ChatMessage.updateMany({ class_level: oldName }, { class_level: cleanNewName })
+    ]);
 
     // Cascade update to Timetable slots
-    let timetable = await Timetable.findOne();
-    if (timetable) {
+    const timetable = await Timetable.findOne();
+    if (timetable && Array.isArray(timetable.data)) {
       let updated = false;
       const updatedData = timetable.data.map(dayObj => {
-        const slots = dayObj.slots.map(slot => {
-          if (slot.grade?.toUpperCase().trim() === oldName) {
-            updated = true;
-            return { ...slot, grade: cleanNewName };
-          }
-          return slot;
-        });
+        const slots = Array.isArray(dayObj.slots)
+          ? dayObj.slots.map(slot => {
+              if (slot.grade?.toUpperCase().trim() === oldName) {
+                updated = true;
+                return { ...slot, grade: cleanNewName };
+              }
+              return slot;
+            })
+          : [];
         return { ...dayObj, slots };
       });
       if (updated) {
         timetable.data = updatedData;
         timetable.markModified('data');
         await timetable.save();
+        invalidateTimetableCache();
       }
     }
 
@@ -200,7 +208,7 @@ router.put('/:name', protect, authorize('SuperAdmin'), async (req, res, next) =>
 router.delete('/:name', protect, authorize('SuperAdmin'), async (req, res, next) => {
   try {
     const name = req.params.name.toUpperCase().trim();
-    
+
     // Check if class exists
     const classExists = await ClassLevel.findOne({ name });
     if (!classExists) {
@@ -215,7 +223,35 @@ router.delete('/:name', protect, authorize('SuperAdmin'), async (req, res, next)
       throw new Error(`Cannot delete Class ${name} because there are active student profiles bound to it.`);
     }
 
+    // Prevent deletion if study materials are still uploaded under this class
+    const materialsCount = await StudyMaterial.countDocuments({ class_level: name });
+    if (materialsCount > 0) {
+      res.status(400);
+      throw new Error(`Cannot delete Class ${name} because there are study materials bound to it.`);
+    }
+
     await ClassLevel.deleteOne({ name });
+
+    // Clean up orphaned subjects and timetable slots for the deleted class
+    await Subject.deleteMany({ class_level: name });
+
+    const timetable = await Timetable.findOne();
+    if (timetable && Array.isArray(timetable.data)) {
+      let changed = false;
+      const updatedData = timetable.data.map(dayObj => {
+        const origSlots = Array.isArray(dayObj.slots) ? dayObj.slots : [];
+        const filtered = origSlots.filter(slot => slot.grade?.toUpperCase().trim() !== name);
+        if (filtered.length !== origSlots.length) changed = true;
+        return { ...dayObj, slots: filtered };
+      });
+      if (changed) {
+        timetable.data = updatedData;
+        timetable.markModified('data');
+        await timetable.save();
+        invalidateTimetableCache();
+      }
+    }
+
     res.json({ success: true, message: `Class ${name} deleted successfully` });
   } catch (error) {
     next(error);

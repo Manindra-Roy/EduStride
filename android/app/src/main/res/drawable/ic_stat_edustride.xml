@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="56"
+    android:viewportHeight="56">
+
+    <!-- Left Chevron -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M16,8 L32,24 L16,40 L10,34 L20,24 L10,14 Z" />
+
+    <!-- Right Chevron -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M30,8 L46,24 L30,40 L24,34 L34,24 L24,14 Z" />
+
+    <!-- Horizon Baseline -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M8,45 h40 v3 h-40 z" />
+</vector>

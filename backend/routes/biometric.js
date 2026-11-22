@@ -16,11 +16,50 @@ import { dispatchGateNotification } from '../services/gateNotifier.js';
 const router = express.Router();
 
 const ONLINE_THRESHOLD_MS = 20000; // 20 seconds (device polls every ~5.5s to keep 3.3V rail quiet for R307S)
-const PENDING_TIMEOUT_MS = 120000; // 2 min waiting for device pickup
-const IN_PROGRESS_TIMEOUT_MS = 180000; // 3 min waiting for enrollment completion
+const PENDING_TIMEOUT_MS = 120000; // 2 min waiting for device pickup (ENROLL / SYNC_SLOTS only)
+const IN_PROGRESS_TIMEOUT_MS = 180000; // 3 min waiting for enrollment completion (ENROLL / SYNC_SLOTS only)
+const AUTO_EXPIRABLE_ACTIONS = new Set(['ENROLL', 'SYNC_SLOTS']);
 
-// Per-(device_id, slot_id) lock to serialize concurrent scan requests & prevent cooldown bypass
+// Per-student lock to serialize concurrent scan requests across multiple fingers/scanners & prevent cooldown bypass
 const activeScanLocks = new Map();
+
+// Per-device async mutex to serialize BiometricDevice command/settings mutations
+const deviceLocks = new Map();
+const withDeviceLock = async (deviceId, fn) => {
+  const key = String(deviceId || '').trim().toUpperCase();
+  const prev = deviceLocks.get(key) || Promise.resolve();
+  let release;
+  const next = new Promise(resolve => { release = resolve; });
+  const chained = prev.catch(() => {}).then(() => next);
+  deviceLocks.set(key, chained);
+  await prev.catch(() => {});
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (deviceLocks.get(key) === chained) {
+      deviceLocks.delete(key);
+    }
+  }
+};
+
+const withStudentScanLock = async (studentId, fn) => {
+  const key = String(studentId);
+  const prev = activeScanLocks.get(key) || Promise.resolve();
+  let release;
+  const next = new Promise(resolve => { release = resolve; });
+  const chained = prev.catch(() => {}).then(() => next);
+  activeScanLocks.set(key, chained);
+  await prev.catch(() => {});
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (activeScanLocks.get(key) === chained) {
+      activeScanLocks.delete(key);
+    }
+  }
+};
 
 const timingSafeEquals = (a, b) => {
   const bufA = Buffer.from(String(a || ''), 'utf8');
@@ -117,32 +156,34 @@ export const enqueueHardwareDeletesForStudent = async (studentId, studentName = 
 
   const io = getIO();
   for (const [deviceId, slots] of byDevice.entries()) {
-    const device = await BiometricDevice.findOne({ device_id: deviceId });
-    if (!device) continue;
+    await withDeviceLock(deviceId, async () => {
+      const device = await BiometricDevice.findOne({ device_id: deviceId });
+      if (!device) return;
 
-    for (const slotId of slots) {
-      enqueueDeviceCommand(device, {
-        action: 'DELETE',
-        slot_id: slotId,
-        student: null,
-        student_name: studentName,
-        message: `Erasing Slot #${slotId} (${studentName} deleted) from R307S sensor...`
-      });
-    }
-    await device.save();
+      for (const slotId of slots) {
+        enqueueDeviceCommand(device, {
+          action: 'DELETE',
+          slot_id: slotId,
+          student: null,
+          student_name: studentName,
+          message: `Erasing Slot #${slotId} (${studentName} deleted) from R307S sensor...`
+        });
+      }
+      await device.save();
 
-    if (io) {
-      io.to('GATE_MONITOR').emit('gate_command_update', {
-        device_id: device.device_id,
-        command_id: device.pending_command?.command_id || '',
-        action: device.pending_command?.action || 'DELETE',
-        slot_id: device.pending_command?.slot_id || slots[0],
-        status: device.pending_command?.status || 'PENDING',
-        student_name: studentName,
-        message: device.pending_command?.message || `Queued hardware erase for ${studentName}`,
-        queue_length: device.command_queue.length
-      });
-    }
+      if (io) {
+        io.to('GATE_MONITOR').emit('gate_command_update', {
+          device_id: device.device_id,
+          command_id: device.pending_command?.command_id || '',
+          action: device.pending_command?.action || 'DELETE',
+          slot_id: device.pending_command?.slot_id || slots[0],
+          status: device.pending_command?.status || 'PENDING',
+          student_name: studentName,
+          message: device.pending_command?.message || `Queued hardware erase for ${studentName}`,
+          queue_length: device.command_queue.length
+        });
+      }
+    });
   }
 };
 
@@ -195,7 +236,7 @@ const authenticateDevice = async (req, res, next) => {
 // @access  Device (x-device-key)
 router.get('/device/status', authenticateDevice, async (req, res, next) => {
   try {
-    const device = req.device;
+    let device = req.device;
     const { firmware, templates, ip } = req.query;
 
     const now = new Date();
@@ -208,38 +249,60 @@ router.get('/device/status', authenticateDevice, async (req, res, next) => {
       const cleanTpl = Number(templates);
       if (cleanTpl !== device.total_templates) updatePatch.total_templates = cleanTpl;
     }
-    const resolvedIp = ip ? String(ip).slice(0, 64) : (req.ip || '');
+    // Only fall back to req.ip when device.ip_address is empty so omitted &ip= never clobbers LAN IP
+    const resolvedIp = ip ? String(ip).slice(0, 64) : (!device.ip_address ? (req.ip || '') : '');
     if (resolvedIp && resolvedIp !== device.ip_address) {
       updatePatch.ip_address = resolvedIp;
     }
 
-    let commandMutated = false;
+    const needsTimeoutCheck = Boolean(
+      device.pending_command &&
+      AUTO_EXPIRABLE_ACTIONS.has(device.pending_command.action) &&
+      (device.pending_command.status === 'PENDING' || device.pending_command.status === 'IN_PROGRESS')
+    );
+    const needsQueuePromote = Boolean(
+      !isActiveCommand(device.pending_command) &&
+      Array.isArray(device.command_queue) &&
+      device.command_queue.length > 0
+    );
 
-    // Auto-expire stale PENDING (>2m) or IN_PROGRESS (>3m) commands & promote next queued item
-    if (device.pending_command && device.pending_command.action !== 'NONE') {
-      const cmdStatus = device.pending_command.status;
-      const refTime = device.pending_command.updated_at || device.pending_command.requested_at;
-      const elapsed = refTime ? now.getTime() - new Date(refTime).getTime() : 0;
+    if (needsTimeoutCheck || needsQueuePromote) {
+      device = await withDeviceLock(device.device_id, async () => {
+        const fresh = await BiometricDevice.findById(device._id);
+        if (!fresh) return device;
 
-      if (
-        (cmdStatus === 'PENDING' && elapsed > PENDING_TIMEOUT_MS) ||
-        (cmdStatus === 'IN_PROGRESS' && elapsed > IN_PROGRESS_TIMEOUT_MS)
-      ) {
-        device.pending_command.status = 'FAILED';
-        device.pending_command.message = 'Command timed out waiting for device.';
-        device.pending_command.action = 'NONE';
-        device.pending_command.updated_at = now;
-        promoteNextCommand(device);
-        commandMutated = true;
-      }
-    } else if (!isActiveCommand(device.pending_command) && Array.isArray(device.command_queue) && device.command_queue.length > 0) {
-      promoteNextCommand(device);
-      commandMutated = true;
-    }
+        let commandMutated = false;
 
-    if (commandMutated) {
-      Object.assign(device, updatePatch);
-      await device.save();
+        // Only auto-expire ENROLL and SYNC_SLOTS; never drop maintenance commands (DELETE / CLEAR_ALL)
+        if (fresh.pending_command && AUTO_EXPIRABLE_ACTIONS.has(fresh.pending_command.action)) {
+          const cmdStatus = fresh.pending_command.status;
+          const refTime = fresh.pending_command.updated_at || fresh.pending_command.requested_at;
+          const elapsed = refTime ? now.getTime() - new Date(refTime).getTime() : 0;
+
+          if (
+            (cmdStatus === 'PENDING' && elapsed > PENDING_TIMEOUT_MS) ||
+            (cmdStatus === 'IN_PROGRESS' && elapsed > IN_PROGRESS_TIMEOUT_MS)
+          ) {
+            fresh.pending_command.status = 'FAILED';
+            fresh.pending_command.message = 'Command timed out waiting for device.';
+            fresh.pending_command.action = 'NONE';
+            fresh.pending_command.updated_at = now;
+            promoteNextCommand(fresh);
+            commandMutated = true;
+          }
+        } else if (!isActiveCommand(fresh.pending_command) && Array.isArray(fresh.command_queue) && fresh.command_queue.length > 0) {
+          promoteNextCommand(fresh);
+          commandMutated = true;
+        }
+
+        if (commandMutated) {
+          Object.assign(fresh, updatePatch);
+          await fresh.save();
+        } else {
+          await BiometricDevice.updateOne({ _id: fresh._id }, { $set: updatePatch });
+        }
+        return fresh;
+      });
     } else {
       await BiometricDevice.updateOne({ _id: device._id }, { $set: updatePatch });
     }
@@ -262,25 +325,45 @@ router.get('/device/status', authenticateDevice, async (req, res, next) => {
 });
 
 // @route   POST /api/biometric/device/scan
-// @desc    ESP32 posts matched R307S fingerprint slot_id on scan (supports optional offline scanned_at)
+// @desc    ESP32 posts matched R307S fingerprint slot_id on scan (supports optional offline scanned_at, scan_id, confidence)
 // @access  Device (x-device-key)
 router.post('/device/scan', authenticateDevice, async (req, res, next) => {
-  const device = req.device;
-  const slotId = Number(req.body.slot_id);
-  const lockKey = `${device.device_id}:${Number.isInteger(slotId) ? slotId : 'invalid'}`;
-
-  // Wait if another scan for the exact same (device, slot) is currently in flight
-  const prevLock = activeScanLocks.get(lockKey);
-  let releaseLock;
-  const currentLock = new Promise(resolve => { releaseLock = resolve; });
-  activeScanLocks.set(lockKey, currentLock);
-  if (prevLock) {
-    await prevLock.catch(() => {});
-  }
-
   try {
-    // Non-blocking heartbeat timestamp update (avoids full document save on critical scan path)
+    const device = req.device;
+    const slotId = Number(req.body?.slot_id);
+    const cleanScanId = typeof req.body?.scan_id === 'string' && req.body.scan_id.trim()
+      ? req.body.scan_id.trim().slice(0, 128)
+      : null;
+    const confidenceVal = req.body?.confidence !== undefined && req.body?.confidence !== null && Number.isFinite(Number(req.body.confidence))
+      ? Number(req.body.confidence)
+      : null;
+
+    // Non-blocking heartbeat timestamp update
     BiometricDevice.updateOne({ _id: device._id }, { $set: { last_heartbeat: new Date() } }).catch(() => {});
+
+    // 1. Check scan_id idempotency FIRST if provided (offline retry deduplication)
+    if (cleanScanId) {
+      const existingByScanId = await GateEntryLog.findOne({ scan_id: cleanScanId })
+        .populate('student', 'name class_level roll_number')
+        .lean();
+      if (existingByScanId) {
+        const existingIst = getISTParts(new Date(existingByScanId.timestamp));
+        return res.status(200).json({
+          success: true,
+          duplicate: true,
+          status: 'OK',
+          event_type: existingByScanId.event_type,
+          student_name: existingByScanId.student?.name || '',
+          class_level: existingByScanId.student?.class_level || '',
+          roll_number: existingByScanId.student?.roll_number || '',
+          time_str: existingIst.time12Str,
+          date_str: existingByScanId.date,
+          duration_minutes: existingByScanId.duration_minutes,
+          attendance_marked: existingByScanId.attendance_marked,
+          attendance_session: existingByScanId.attendance_session
+        });
+      }
+    }
 
     if (!device.sensing_enabled) {
       return res.status(403).json({
@@ -298,6 +381,7 @@ router.post('/device/scan', authenticateDevice, async (req, res, next) => {
       });
     }
 
+    // 2. Resolve FingerprintTemplate BEFORE acquiring lock so we serialize per-student
     const template = await FingerprintTemplate.findOne({
       device_id: device.device_id,
       slot_id: slotId
@@ -323,124 +407,207 @@ router.post('/device/scan', authenticateDevice, async (req, res, next) => {
       });
     }
 
-    // Support optional offline-buffered scanned_at timestamp (within last 24h, not >2m in future)
-    let scanTime = new Date();
-    if (req.body.scanned_at !== undefined && req.body.scanned_at !== null) {
-      const rawVal = req.body.scanned_at;
-      const parsedMs = typeof rawVal === 'number'
-        ? (rawVal < 1e12 ? rawVal * 1000 : rawVal)
-        : Date.parse(String(rawVal));
-      const nowMs = Date.now();
-      if (Number.isFinite(parsedMs) && parsedMs <= nowMs + 120000 && parsedMs >= nowMs - 86400000) {
-        scanTime = new Date(parsedMs);
+    // 3. Serialize per student._id to prevent multi-finger / multi-scanner cooldown bypass
+    const responseData = await withStudentScanLock(student._id, async () => {
+      if (cleanScanId) {
+        const racedExisting = await GateEntryLog.findOne({ scan_id: cleanScanId }).lean();
+        if (racedExisting) {
+          const existingIst = getISTParts(new Date(racedExisting.timestamp));
+          return {
+            httpStatus: 200,
+            body: {
+              success: true,
+              duplicate: true,
+              status: 'OK',
+              event_type: racedExisting.event_type,
+              student_name: student.name,
+              class_level: student.class_level,
+              roll_number: student.roll_number,
+              time_str: existingIst.time12Str,
+              date_str: racedExisting.date,
+              duration_minutes: racedExisting.duration_minutes,
+              attendance_marked: racedExisting.attendance_marked,
+              attendance_session: racedExisting.attendance_session
+            }
+          };
+        }
       }
-    }
 
-    const ist = getISTParts(scanTime);
+      // Support optional offline-buffered scanned_at timestamp (within last 24h, not >2m in future)
+      let scanTime = new Date();
+      if (req.body?.scanned_at !== undefined && req.body?.scanned_at !== null) {
+        const rawVal = req.body.scanned_at;
+        const parsedMs = typeof rawVal === 'number'
+          ? (rawVal < 1e12 ? rawVal * 1000 : rawVal)
+          : Date.parse(String(rawVal));
+        const nowMs = Date.now();
+        if (Number.isFinite(parsedMs) && parsedMs <= nowMs + 120000 && parsedMs >= nowMs - 86400000) {
+          scanTime = new Date(parsedMs);
+        }
+      }
 
-    // Check today's latest gate log for this student (lean index lookup)
-    const lastTodayLog = await GateEntryLog.findOne({
-      student: student._id,
-      date: ist.dateStr
-    })
-      .select('event_type timestamp attendance_session')
-      .sort({ timestamp: -1 })
-      .lean();
+      const ist = getISTParts(scanTime);
 
-    // Anti-double-scan cooldown protection
-    if (lastTodayLog) {
-      const elapsedSeconds = Math.floor((scanTime.getTime() - new Date(lastTodayLog.timestamp).getTime()) / 1000);
-      if (elapsedSeconds >= 0 && elapsedSeconds < device.cooldown_seconds) {
-        const waitSeconds = device.cooldown_seconds - elapsedSeconds;
-        return res.status(200).json({
+      // Query nearest log at or before scanTime AND nearest log after scanTime (handles out-of-order offline scans)
+      const [lastPriorLog, nextAfterLog] = await Promise.all([
+        GateEntryLog.findOne({
+          student: student._id,
+          date: ist.dateStr,
+          timestamp: { $lte: scanTime }
+        })
+          .select('event_type timestamp attendance_session')
+          .sort({ timestamp: -1 })
+          .lean(),
+        GateEntryLog.findOne({
+          student: student._id,
+          date: ist.dateStr,
+          timestamp: { $gt: scanTime }
+        })
+          .select('event_type timestamp attendance_session')
+          .sort({ timestamp: 1 })
+          .lean()
+      ]);
+
+      // Anti-double-scan cooldown protection against the nearest log in either direction
+      let nearestLog = null;
+      let nearestAbsDiffSec = Infinity;
+      for (const candidate of [lastPriorLog, nextAfterLog]) {
+        if (!candidate) continue;
+        const diffSec = Math.abs(Math.floor((scanTime.getTime() - new Date(candidate.timestamp).getTime()) / 1000));
+        if (diffSec < nearestAbsDiffSec) {
+          nearestAbsDiffSec = diffSec;
+          nearestLog = candidate;
+        }
+      }
+
+      if (nearestLog && nearestAbsDiffSec < device.cooldown_seconds) {
+        const waitSeconds = device.cooldown_seconds - nearestAbsDiffSec;
+        return {
+          httpStatus: 200,
+          body: {
+            success: true,
+            status: 'COOLDOWN',
+            student_name: student.name,
+            class_level: student.class_level,
+            last_event: nearestLog.event_type,
+            wait_seconds: waitSeconds,
+            message: `Already scanned (${nearestLog.event_type}). Wait ${waitSeconds}s.`
+          }
+        };
+      }
+
+      // Determine ENTRY vs EXIT chronologically based on lastPriorLog
+      const eventType = (!lastPriorLog || lastPriorLog.event_type === 'EXIT') ? 'ENTRY' : 'EXIT';
+      let pairedEntryTime = null;
+      let durationMinutes = null;
+
+      if (eventType === 'EXIT' && lastPriorLog) {
+        pairedEntryTime = lastPriorLog.timestamp;
+        durationMinutes = Math.max(0, Math.round((scanTime.getTime() - new Date(lastPriorLog.timestamp).getTime()) / 60000));
+      }
+
+      // Automatically sync with the existing Attendance system on ENTRY (if enabled on device)
+      let attendanceMarked = false;
+      let attendanceSession = '';
+
+      if (eventType === 'ENTRY' && device.auto_mark_attendance) {
+        try {
+          const syncResult = await markBiometricAttendancePresent(
+            student,
+            ist.dateStr,
+            ist.time12Str,
+            ist.totalMinutes,
+            device.pinned_session_name
+          );
+          attendanceMarked = syncResult.marked;
+          attendanceSession = syncResult.session_name;
+        } catch (attErr) {
+          console.error('[Biometric Auto-Attendance Error]:', attErr.message);
+        }
+      } else if (eventType === 'EXIT' && device.auto_mark_attendance) {
+        attendanceSession = lastPriorLog?.attendance_session || '';
+        appendBiometricExitRemark(student, ist.dateStr, ist.time12Str, attendanceSession).catch(() => {});
+      }
+
+      const logPayload = {
+        student: student._id,
+        device_id: device.device_id,
+        slot_id: slotId,
+        confidence: confidenceVal,
+        date: ist.dateStr,
+        event_type: eventType,
+        timestamp: scanTime,
+        paired_entry_time: pairedEntryTime,
+        duration_minutes: durationMinutes,
+        attendance_marked: attendanceMarked,
+        attendance_session: attendanceSession
+      };
+      if (cleanScanId) {
+        logPayload.scan_id = cleanScanId;
+      }
+
+      let logDoc;
+      try {
+        logDoc = await GateEntryLog.create(logPayload);
+      } catch (createErr) {
+        if (createErr?.code === 11000 && cleanScanId) {
+          const dup = await GateEntryLog.findOne({ scan_id: cleanScanId }).lean();
+          if (dup) {
+            const dupIst = getISTParts(new Date(dup.timestamp));
+            return {
+              httpStatus: 200,
+              body: {
+                success: true,
+                duplicate: true,
+                status: 'OK',
+                event_type: dup.event_type,
+                student_name: student.name,
+                class_level: student.class_level,
+                roll_number: student.roll_number,
+                time_str: dupIst.time12Str,
+                date_str: dup.date,
+                duration_minutes: dup.duration_minutes,
+                attendance_marked: dup.attendance_marked,
+                attendance_session: dup.attendance_session
+              }
+            };
+          }
+        }
+        throw createErr;
+      }
+
+      // Dispatch parent notifications (Push + Email + optional SMS/WA) asynchronously unless paused
+      dispatchGateNotification({
+        logDoc,
+        student,
+        time12Str: ist.time12Str,
+        dateStr: ist.dateStr,
+        sendParentAlerts: device.parent_alerts_enabled !== false
+      }).catch(err => {
+        console.error('[Biometric Gate Notification Dispatch Error]:', err.message);
+      });
+
+      return {
+        httpStatus: 201,
+        body: {
           success: true,
-          status: 'COOLDOWN',
+          status: 'OK',
+          event_type: eventType,
           student_name: student.name,
           class_level: student.class_level,
-          last_event: lastTodayLog.event_type,
-          wait_seconds: waitSeconds,
-          message: `Already scanned (${lastTodayLog.event_type}). Wait ${waitSeconds}s.`
-        });
-      }
-    }
-
-    // Determine ENTRY vs EXIT automatically
-    const eventType = (!lastTodayLog || lastTodayLog.event_type === 'EXIT') ? 'ENTRY' : 'EXIT';
-    let pairedEntryTime = null;
-    let durationMinutes = null;
-
-    if (eventType === 'EXIT' && lastTodayLog) {
-      pairedEntryTime = lastTodayLog.timestamp;
-      durationMinutes = Math.max(0, Math.round((scanTime.getTime() - new Date(lastTodayLog.timestamp).getTime()) / 60000));
-    }
-
-    // Automatically sync with the existing Attendance system on ENTRY (if enabled on device)
-    let attendanceMarked = false;
-    let attendanceSession = '';
-
-    if (eventType === 'ENTRY' && device.auto_mark_attendance) {
-      try {
-        const syncResult = await markBiometricAttendancePresent(
-          student,
-          ist.dateStr,
-          ist.time12Str,
-          ist.totalMinutes,
-          device.pinned_session_name
-        );
-        attendanceMarked = syncResult.marked;
-        attendanceSession = syncResult.session_name;
-      } catch (attErr) {
-        console.error('[Biometric Auto-Attendance Error]:', attErr.message);
-      }
-    } else if (eventType === 'EXIT' && device.auto_mark_attendance) {
-      attendanceSession = lastTodayLog?.attendance_session || '';
-      appendBiometricExitRemark(student, ist.dateStr, ist.time12Str, attendanceSession).catch(() => {});
-    }
-
-    const logDoc = await GateEntryLog.create({
-      student: student._id,
-      device_id: device.device_id,
-      slot_id: slotId,
-      date: ist.dateStr,
-      event_type: eventType,
-      timestamp: scanTime,
-      paired_entry_time: pairedEntryTime,
-      duration_minutes: durationMinutes,
-      attendance_marked: attendanceMarked,
-      attendance_session: attendanceSession
+          roll_number: student.roll_number,
+          time_str: ist.time12Str,
+          date_str: ist.dateStr,
+          duration_minutes: durationMinutes,
+          attendance_marked: attendanceMarked,
+          attendance_session: attendanceSession
+        }
+      };
     });
 
-    // Dispatch parent notifications (Push + Email + optional SMS/WA) asynchronously unless paused
-    dispatchGateNotification({
-      logDoc,
-      student,
-      time12Str: ist.time12Str,
-      dateStr: ist.dateStr,
-      sendParentAlerts: device.parent_alerts_enabled !== false
-    }).catch(err => {
-      console.error('[Biometric Gate Notification Dispatch Error]:', err.message);
-    });
-
-    return res.status(201).json({
-      success: true,
-      status: 'OK',
-      event_type: eventType,
-      student_name: student.name,
-      class_level: student.class_level,
-      roll_number: student.roll_number,
-      time_str: ist.time12Str,
-      date_str: ist.dateStr,
-      duration_minutes: durationMinutes,
-      attendance_marked: attendanceMarked,
-      attendance_session: attendanceSession
-    });
+    return res.status(responseData.httpStatus).json(responseData.body);
   } catch (error) {
     next(error);
-  } finally {
-    releaseLock();
-    if (activeScanLocks.get(lockKey) === currentLock) {
-      activeScanLocks.delete(lockKey);
-    }
   }
 });
 
@@ -449,162 +616,194 @@ router.post('/device/scan', authenticateDevice, async (req, res, next) => {
 // @access  Device (x-device-key)
 router.post('/device/command-ack', authenticateDevice, async (req, res, next) => {
   try {
-    const device = req.device;
-    const { action, status, slot_id, message, command_id, step, progress, duplicate_slot_id } = req.body;
+    const { action, status, slot_id, message, command_id, step, progress, duplicate_slot_id } = req.body || {};
 
     if (!status) {
       return res.status(400).json({ success: false, message: 'Status is required' });
     }
 
-    const currentCmd = device.pending_command || {};
-    const effectiveAction = action || currentCmd.action || 'NONE';
-    const effectiveSlot = slot_id !== undefined ? Number(slot_id) : currentCmd.slot_id;
-    const cmdIdMatches = !command_id || !currentCmd.command_id || String(command_id) === String(currentCmd.command_id);
-
-    device.last_heartbeat = new Date();
-
-    // If an ENROLL completed on the ESP32 AFTER staff canceled/replaced it in the app,
-    // immediately queue a hardware DELETE so the orphaned print is erased from R307S flash!
-    if (status === 'COMPLETED' && effectiveAction === 'ENROLL' && (!cmdIdMatches || !currentCmd.student || currentCmd.action !== 'ENROLL')) {
-      if (effectiveSlot >= 1 && effectiveSlot <= 1000) {
-        enqueueDeviceCommand(device, {
-          action: 'DELETE',
-          slot_id: effectiveSlot,
-          student: null,
-          student_name: 'Canceled Enrollment',
-          message: `Cleaning up canceled enrollment from Slot #${effectiveSlot} on R307S...`
-        });
-        await device.save();
+    const result = await withDeviceLock(req.device.device_id, async () => {
+      const device = await BiometricDevice.findById(req.device._id);
+      if (!device) {
+        return { httpStatus: 404, body: { success: false, message: 'Biometric device not found' } };
       }
-      return res.json({ success: true, message: 'Stale enrollment completion detected; queued hardware slot cleanup' });
-    }
 
-    // Ignore stale IN_PROGRESS / FAILED acks from an older canceled command_id
-    if (!cmdIdMatches) {
-      await device.save();
-      return res.json({ success: true, message: 'Ignored acknowledgement for superseded command_id' });
-    }
+      const currentCmd = device.pending_command || {};
+      const effectiveAction = action || currentCmd.action || 'NONE';
+      const effectiveSlot = slot_id !== undefined ? Number(slot_id) : currentCmd.slot_id;
 
-    const ackStudentName = currentCmd.student_name || '';
-    const ackStudentId = currentCmd.student ? String(currentCmd.student) : null;
+      // Require non-empty active command_id & matching command_id and action
+      const hasActiveCmd = Boolean(currentCmd.command_id && currentCmd.action && currentCmd.action !== 'NONE');
+      const cmdIdMatches = hasActiveCmd && Boolean(command_id) && String(command_id) === String(currentCmd.command_id);
+      const actionMatches = !action || String(action) === String(currentCmd.action);
 
-    // Enrich duplicate-finger rejection with the actual enrolled student's name & class
-    let enrichedMessage = message || '';
-    let duplicateStudentName = '';
-    if (duplicate_slot_id !== undefined && Number.isInteger(Number(duplicate_slot_id))) {
-      const dupSlot = Number(duplicate_slot_id);
-      const dupTemplate = await FingerprintTemplate.findOne({
-        device_id: device.device_id,
-        slot_id: dupSlot
-      }).populate('student', 'name class_level roll_number').lean();
-      if (dupTemplate?.student) {
-        duplicateStudentName = dupTemplate.student.name;
-        enrichedMessage = `Duplicate fingerprint detected! This finger is already enrolled to ${dupTemplate.student.name} (Class ${dupTemplate.student.class_level}, Roll ${dupTemplate.student.roll_number}, Slot #${dupSlot}).`;
-      } else if (!enrichedMessage) {
-        enrichedMessage = `Duplicate fingerprint detected! This finger already matches Slot #${dupSlot} on the sensor.`;
+      device.last_heartbeat = new Date();
+
+      // If an ENROLL completed on the ESP32 AFTER staff canceled/replaced it in the app,
+      // check if the slot is currently claimed by a newer ENROLL or template before queueing cleanup DELETE
+      if (status === 'COMPLETED' && effectiveAction === 'ENROLL' && (!cmdIdMatches || !actionMatches || !currentCmd.student || currentCmd.action !== 'ENROLL')) {
+        if (Number.isInteger(effectiveSlot) && effectiveSlot >= 1 && effectiveSlot <= 1000) {
+          const slotTargetedByPendingEnroll =
+            isActiveCommand(device.pending_command) &&
+            device.pending_command.action === 'ENROLL' &&
+            device.pending_command.slot_id === effectiveSlot;
+          const slotTargetedByQueuedEnroll =
+            Array.isArray(device.command_queue) &&
+            device.command_queue.some(c => c.action === 'ENROLL' && c.slot_id === effectiveSlot);
+          const slotOwnedByTemplate = await FingerprintTemplate.exists({
+            device_id: device.device_id,
+            slot_id: effectiveSlot
+          });
+
+          if (!slotTargetedByPendingEnroll && !slotTargetedByQueuedEnroll && !slotOwnedByTemplate) {
+            enqueueDeviceCommand(device, {
+              action: 'DELETE',
+              slot_id: effectiveSlot,
+              student: null,
+              student_name: 'Canceled Enrollment',
+              message: `Cleaning up canceled enrollment from Slot #${effectiveSlot} on R307S...`
+            });
+          }
+          await device.save();
+        }
+        return {
+          httpStatus: 200,
+          body: { success: true, message: 'Stale enrollment completion detected; evaluated hardware slot cleanup' }
+        };
       }
-    }
 
-    const effectiveStep = step !== undefined ? String(step) : (status === 'COMPLETED' ? 'DONE' : (currentCmd.step || ''));
-    const effectiveProgress = progress !== undefined && Number.isFinite(Number(progress))
-      ? Math.max(0, Math.min(100, Math.round(Number(progress))))
-      : (status === 'COMPLETED' ? 100 : (currentCmd.progress || 0));
+      // Reject stale acks when command_id or action does not match (or currentCmd.action === 'NONE')
+      if (!cmdIdMatches || !actionMatches) {
+        await BiometricDevice.updateOne({ _id: device._id }, { $set: { last_heartbeat: device.last_heartbeat } });
+        return {
+          httpStatus: 200,
+          body: { success: true, message: 'Ignored acknowledgement for superseded or inactive command' }
+        };
+      }
 
-    device.pending_command.status = status;
-    device.pending_command.step = effectiveStep;
-    device.pending_command.progress = effectiveProgress;
-    device.pending_command.message = enrichedMessage;
-    device.pending_command.updated_at = new Date();
+      const ackStudentName = currentCmd.student_name || '';
+      const ackStudentId = currentCmd.student ? String(currentCmd.student) : null;
 
-    let promotedNext = false;
-
-    if (status === 'COMPLETED') {
-      if (effectiveAction === 'ENROLL' && currentCmd.student && effectiveSlot) {
-        const fingerIdx = Number(currentCmd.finger_index) || 1;
-        const fingerLabel = currentCmd.finger_label || (fingerIdx === 2 ? 'Backup Finger' : 'Primary Finger');
-        // Clear any stale/orphan mapping occupying the same hardware slot before upsert
-        await FingerprintTemplate.deleteMany({
+      // Enrich duplicate-finger rejection with the actual enrolled student's name & class
+      let enrichedMessage = message || '';
+      let duplicateStudentName = '';
+      if (duplicate_slot_id !== undefined && Number.isInteger(Number(duplicate_slot_id))) {
+        const dupSlot = Number(duplicate_slot_id);
+        const dupTemplate = await FingerprintTemplate.findOne({
           device_id: device.device_id,
-          slot_id: effectiveSlot,
-          $or: [
-            { student: { $ne: currentCmd.student } },
-            { finger_index: { $ne: fingerIdx } }
-          ]
-        });
-        // Save/update FingerprintTemplate mapping for this (device, student, finger_index)
-        await FingerprintTemplate.findOneAndUpdate(
-          { device_id: device.device_id, student: currentCmd.student, finger_index: fingerIdx },
-          {
+          slot_id: dupSlot
+        }).populate('student', 'name class_level roll_number').lean();
+        if (dupTemplate?.student) {
+          duplicateStudentName = dupTemplate.student.name;
+          enrichedMessage = `Duplicate fingerprint detected! This finger is already enrolled to ${dupTemplate.student.name} (Class ${dupTemplate.student.class_level}, Roll ${dupTemplate.student.roll_number}, Slot #${dupSlot}).`;
+        } else if (!enrichedMessage) {
+          enrichedMessage = `Duplicate fingerprint detected! This finger already matches Slot #${dupSlot} on the sensor.`;
+        }
+      }
+
+      const effectiveStep = step !== undefined ? String(step) : (status === 'COMPLETED' ? 'DONE' : (currentCmd.step || ''));
+      const effectiveProgress = progress !== undefined && Number.isFinite(Number(progress))
+        ? Math.max(0, Math.min(100, Math.round(Number(progress))))
+        : (status === 'COMPLETED' ? 100 : (currentCmd.progress || 0));
+
+      device.pending_command.status = status;
+      device.pending_command.step = effectiveStep;
+      device.pending_command.progress = effectiveProgress;
+      device.pending_command.message = enrichedMessage;
+      device.pending_command.updated_at = new Date();
+
+      let promotedNext = false;
+
+      if (status === 'COMPLETED') {
+        if (effectiveAction === 'ENROLL' && currentCmd.student && effectiveSlot) {
+          const fingerIdx = Number(currentCmd.finger_index) || 1;
+          const fingerLabel = currentCmd.finger_label || (fingerIdx === 2 ? 'Backup Finger' : 'Primary Finger');
+          // Clear any stale/orphan mapping occupying the same hardware slot before upsert
+          await FingerprintTemplate.deleteMany({
             device_id: device.device_id,
             slot_id: effectiveSlot,
-            student: currentCmd.student,
-            finger_index: fingerIdx,
-            finger_label: fingerLabel,
-            enrolled_by: currentCmd.enrolled_by || null,
-            enrolled_at: new Date()
-          },
-          { upsert: true, new: true }
-        );
-      } else if (effectiveAction === 'DELETE' && effectiveSlot) {
-        await FingerprintTemplate.deleteOne({
-          device_id: device.device_id,
-          slot_id: effectiveSlot
-        });
-      } else if (effectiveAction === 'CLEAR_ALL') {
-        await FingerprintTemplate.deleteMany({ device_id: device.device_id });
+            $or: [
+              { student: { $ne: currentCmd.student } },
+              { finger_index: { $ne: fingerIdx } }
+            ]
+          });
+          // Save/update FingerprintTemplate mapping for this (device, student, finger_index)
+          await FingerprintTemplate.findOneAndUpdate(
+            { device_id: device.device_id, student: currentCmd.student, finger_index: fingerIdx },
+            {
+              device_id: device.device_id,
+              slot_id: effectiveSlot,
+              student: currentCmd.student,
+              finger_index: fingerIdx,
+              finger_label: fingerLabel,
+              enrolled_by: currentCmd.enrolled_by || null,
+              enrolled_at: new Date()
+            },
+            { upsert: true, new: true }
+          );
+        } else if (effectiveAction === 'DELETE' && effectiveSlot) {
+          await FingerprintTemplate.deleteOne({
+            device_id: device.device_id,
+            slot_id: effectiveSlot
+          });
+        } else if (effectiveAction === 'CLEAR_ALL') {
+          await FingerprintTemplate.deleteMany({ device_id: device.device_id });
+        }
+
+        device.pending_command.action = 'NONE';
+        promotedNext = promoteNextCommand(device);
+      } else if (status === 'FAILED') {
+        device.pending_command.action = 'NONE';
+        promotedNext = promoteNextCommand(device);
       }
 
-      device.pending_command.action = 'NONE';
-      promotedNext = promoteNextCommand(device);
-    } else if (status === 'FAILED') {
-      device.pending_command.action = 'NONE';
-      promotedNext = promoteNextCommand(device);
-    }
+      await device.save();
 
-    await device.save();
-
-    const io = getIO();
-    if (io) {
-      const enrolledCount = await FingerprintTemplate.countDocuments({ device_id: device.device_id });
-      io.to('GATE_MONITOR').emit('gate_command_update', {
-        device_id: device.device_id,
-        command_id: command_id || currentCmd.command_id || '',
-        action: effectiveAction,
-        slot_id: effectiveSlot,
-        status,
-        step: effectiveStep,
-        progress: effectiveProgress,
-        message: enrichedMessage,
-        student_id: ackStudentId,
-        student_name: ackStudentName,
-        finger_index: currentCmd.finger_index || 1,
-        finger_label: currentCmd.finger_label || 'Primary Finger',
-        duplicate_student_name: duplicateStudentName,
-        enrolled_count: enrolledCount,
-        queue_length: Array.isArray(device.command_queue) ? device.command_queue.length : 0
-      });
-
-      if (promotedNext) {
+      const io = getIO();
+      if (io) {
+        const enrolledCount = await FingerprintTemplate.countDocuments({ device_id: device.device_id });
         io.to('GATE_MONITOR').emit('gate_command_update', {
           device_id: device.device_id,
-          command_id: device.pending_command.command_id,
-          action: device.pending_command.action,
-          slot_id: device.pending_command.slot_id,
-          status: device.pending_command.status,
-          step: device.pending_command.step || '',
-          progress: device.pending_command.progress || 0,
-          message: device.pending_command.message,
-          student_id: device.pending_command.student ? String(device.pending_command.student) : null,
-          student_name: device.pending_command.student_name,
-          finger_index: device.pending_command.finger_index || 1,
-          finger_label: device.pending_command.finger_label || 'Primary Finger',
+          command_id: command_id || currentCmd.command_id || '',
+          action: effectiveAction,
+          slot_id: effectiveSlot,
+          status,
+          step: effectiveStep,
+          progress: effectiveProgress,
+          message: enrichedMessage,
+          student_id: ackStudentId,
+          student_name: ackStudentName,
+          finger_index: currentCmd.finger_index || 1,
+          finger_label: currentCmd.finger_label || 'Primary Finger',
+          duplicate_student_name: duplicateStudentName,
           enrolled_count: enrolledCount,
-          queue_length: device.command_queue.length
+          queue_length: Array.isArray(device.command_queue) ? device.command_queue.length : 0
         });
-      }
-    }
 
-    res.json({ success: true, message: 'Command acknowledgement processed' });
+        if (promotedNext) {
+          io.to('GATE_MONITOR').emit('gate_command_update', {
+            device_id: device.device_id,
+            command_id: device.pending_command.command_id,
+            action: device.pending_command.action,
+            slot_id: device.pending_command.slot_id,
+            status: device.pending_command.status,
+            step: device.pending_command.step || '',
+            progress: device.pending_command.progress || 0,
+            message: device.pending_command.message,
+            student_id: device.pending_command.student ? String(device.pending_command.student) : null,
+            student_name: device.pending_command.student_name,
+            finger_index: device.pending_command.finger_index || 1,
+            finger_label: device.pending_command.finger_label || 'Primary Finger',
+            enrolled_count: enrolledCount,
+            queue_length: device.command_queue.length
+          });
+        }
+      }
+
+      return { httpStatus: 200, body: { success: true, message: 'Command acknowledgement processed' } };
+    });
+
+    return res.status(result.httpStatus).json(result.body);
   } catch (error) {
     next(error);
   }
@@ -615,54 +814,56 @@ router.post('/device/command-ack', authenticateDevice, async (req, res, next) =>
 // @access  Device (x-device-key)
 router.post('/device/sync-slots', authenticateDevice, async (req, res, next) => {
   try {
-    const device = req.device;
-    const rawSlots = Array.isArray(req.body.hardware_slots) ? req.body.hardware_slots : [];
-    const hwSlotSet = new Set(
-      rawSlots
-        .map(s => Number(s))
-        .filter(s => Number.isInteger(s) && s >= 1 && s <= 1000)
-    );
+    const result = await withDeviceLock(req.device.device_id, async () => {
+      const device = req.device;
+      const rawSlots = Array.isArray(req.body?.hardware_slots) ? req.body.hardware_slots : [];
+      const hwSlotSet = new Set(
+        rawSlots
+          .map(s => Number(s))
+          .filter(s => Number.isInteger(s) && s >= 1 && s <= 1000)
+      );
 
-    const dbTemplates = await FingerprintTemplate.find({ device_id: device.device_id })
-      .populate('student', '_id status')
-      .lean();
+      const dbTemplates = await FingerprintTemplate.find({ device_id: device.device_id })
+        .populate('student', '_id status')
+        .lean();
 
-    const ghostIds = [];
-    const validDbSlots = new Set();
+      const ghostIds = [];
+      const validDbSlots = new Set();
 
-    for (const tpl of dbTemplates) {
-      // Remove DB record if student was deleted or slot is missing on R307S hardware
-      if (!tpl.student || !hwSlotSet.has(tpl.slot_id)) {
-        ghostIds.push(tpl._id);
-      } else {
-        validDbSlots.add(tpl.slot_id);
+      for (const tpl of dbTemplates) {
+        if (!tpl.student || !hwSlotSet.has(tpl.slot_id)) {
+          ghostIds.push(tpl._id);
+        } else {
+          validDbSlots.add(tpl.slot_id);
+        }
       }
-    }
 
-    if (ghostIds.length > 0) {
-      await FingerprintTemplate.deleteMany({ _id: { $in: ghostIds } });
-    }
-
-    // Any slot present in R307S flash that is NOT in validDbSlots is an orphan slot to erase on hardware
-    const orphanSlots = [];
-    for (const hwSlot of hwSlotSet) {
-      if (!validDbSlots.has(hwSlot)) {
-        orphanSlots.push(hwSlot);
+      if (ghostIds.length > 0) {
+        await FingerprintTemplate.deleteMany({ _id: { $in: ghostIds } });
       }
-    }
-    orphanSlots.sort((a, b) => a - b);
 
-    await BiometricDevice.updateOne(
-      { _id: device._id },
-      { $set: { last_heartbeat: new Date(), total_templates: validDbSlots.size } }
-    );
+      const orphanSlots = [];
+      for (const hwSlot of hwSlotSet) {
+        if (!validDbSlots.has(hwSlot)) {
+          orphanSlots.push(hwSlot);
+        }
+      }
+      orphanSlots.sort((a, b) => a - b);
 
-    res.json({
-      success: true,
-      orphan_slots: orphanSlots,
-      ghosts_removed: ghostIds.length,
-      valid_count: validDbSlots.size
+      await BiometricDevice.updateOne(
+        { _id: device._id },
+        { $set: { last_heartbeat: new Date(), total_templates: validDbSlots.size } }
+      );
+
+      return {
+        success: true,
+        orphan_slots: orphanSlots,
+        ghosts_removed: ghostIds.length,
+        valid_count: validDbSlots.size
+      };
     });
+
+    res.json(result);
   } catch (error) {
     next(error);
   }
@@ -710,7 +911,7 @@ router.get('/devices', protect, authorize('SuperAdmin', 'Teacher'), async (req, 
 // @access  Private (SuperAdmin)
 router.post('/devices', protect, authorize('SuperAdmin'), async (req, res, next) => {
   try {
-    const { device_id, name } = req.body;
+    const { device_id, name } = req.body || {};
     if (!device_id || !String(device_id).trim()) {
       return res.status(400).json({ success: false, message: 'Device ID is required' });
     }
@@ -726,7 +927,7 @@ router.post('/devices', protect, authorize('SuperAdmin'), async (req, res, next)
 
     const created = await BiometricDevice.create({
       device_id: cleanId,
-      name: (name && String(name).trim()) || `Gate Scanner ${cleanId}`
+      name: (name !== undefined && name !== null && String(name).trim()) || `Gate Scanner ${cleanId}`
     });
 
     res.status(201).json({ success: true, data: formatDevice(created, 0, { includeApiKey: true }) });
@@ -741,49 +942,64 @@ router.post('/devices', protect, authorize('SuperAdmin'), async (req, res, next)
 router.put('/devices/:deviceId/toggle', protect, authorize('SuperAdmin', 'Teacher'), async (req, res, next) => {
   try {
     const deviceId = String(req.params.deviceId).trim().toUpperCase();
-    const device = await BiometricDevice.findOne({ device_id: deviceId });
 
-    if (!device) {
-      return res.status(404).json({ success: false, message: 'Biometric device not found' });
-    }
-
-    const { sensing_enabled, auto_mark_attendance, parent_alerts_enabled, cooldown_seconds, name, pinned_session_name, regenerate_key } = req.body;
-
-    if (sensing_enabled !== undefined) device.sensing_enabled = Boolean(sensing_enabled);
-    if (auto_mark_attendance !== undefined) device.auto_mark_attendance = Boolean(auto_mark_attendance);
-    if (parent_alerts_enabled !== undefined) device.parent_alerts_enabled = Boolean(parent_alerts_enabled);
-    if (cooldown_seconds !== undefined) {
-      const cd = Number(cooldown_seconds);
-      if (Number.isFinite(cd) && cd >= 5 && cd <= 3600) {
-        device.cooldown_seconds = Math.round(cd);
+    const result = await withDeviceLock(deviceId, async () => {
+      const device = await BiometricDevice.findOne({ device_id: deviceId });
+      if (!device) {
+        return { httpStatus: 404, body: { success: false, message: 'Biometric device not found' } };
       }
-    }
-    if (name !== undefined && String(name).trim()) {
-      device.name = String(name).trim();
-    }
-    if (pinned_session_name !== undefined) {
-      device.pinned_session_name = String(pinned_session_name).trim();
-    }
-    if (regenerate_key === true && req.user.role === 'SuperAdmin') {
-      device.api_key = crypto.randomBytes(24).toString('hex');
-    }
 
-    await device.save();
+      const {
+        sensing_enabled,
+        auto_mark_attendance,
+        parent_alerts_enabled,
+        cooldown_seconds,
+        name,
+        pinned_session_name,
+        regenerate_key
+      } = req.body || {};
 
-    const enrolledCount = await FingerprintTemplate.countDocuments({ device_id: device.device_id });
-    const safeBroadcast = formatDevice(device, enrolledCount, { includeApiKey: false });
-    const responsePayload = formatDevice(device, enrolledCount, { includeApiKey: req.user.role === 'SuperAdmin' });
+      if (sensing_enabled !== undefined) device.sensing_enabled = Boolean(sensing_enabled);
+      if (auto_mark_attendance !== undefined) device.auto_mark_attendance = Boolean(auto_mark_attendance);
+      if (parent_alerts_enabled !== undefined) device.parent_alerts_enabled = Boolean(parent_alerts_enabled);
+      if (cooldown_seconds !== undefined) {
+        const cd = Number(cooldown_seconds);
+        if (Number.isFinite(cd) && cd >= 5 && cd <= 3600) {
+          device.cooldown_seconds = Math.round(cd);
+        }
+      }
+      if (name !== undefined && name !== null && String(name).trim()) {
+        device.name = String(name).trim();
+      }
+      if (pinned_session_name !== undefined) {
+        device.pinned_session_name = pinned_session_name === null ? '' : String(pinned_session_name).trim();
+      }
+      if (regenerate_key === true && req.user.role === 'SuperAdmin') {
+        device.api_key = crypto.randomBytes(24).toString('hex');
+      }
 
-    const io = getIO();
-    if (io) {
-      io.to('GATE_MONITOR').emit('gate_device_updated', safeBroadcast);
-    }
+      await device.save();
 
-    res.json({
-      success: true,
-      message: `Scanner "${device.name}" updated (Sensing ${device.sensing_enabled ? 'ON' : 'OFF'})`,
-      data: responsePayload
+      const enrolledCount = await FingerprintTemplate.countDocuments({ device_id: device.device_id });
+      const safeBroadcast = formatDevice(device, enrolledCount, { includeApiKey: false });
+      const responsePayload = formatDevice(device, enrolledCount, { includeApiKey: req.user.role === 'SuperAdmin' });
+
+      const io = getIO();
+      if (io) {
+        io.to('GATE_MONITOR').emit('gate_device_updated', safeBroadcast);
+      }
+
+      return {
+        httpStatus: 200,
+        body: {
+          success: true,
+          message: `Scanner "${device.name}" updated (Sensing ${device.sensing_enabled ? 'ON' : 'OFF'})`,
+          data: responsePayload
+        }
+      };
     });
+
+    return res.status(result.httpStatus).json(result.body);
   } catch (error) {
     next(error);
   }
@@ -795,117 +1011,125 @@ router.put('/devices/:deviceId/toggle', protect, authorize('SuperAdmin', 'Teache
 router.post('/devices/:deviceId/enroll', protect, authorize('SuperAdmin', 'Teacher'), async (req, res, next) => {
   try {
     const deviceId = String(req.params.deviceId).trim().toUpperCase();
-    const { student_id, finger_index = 1, finger_label } = req.body;
+    const { student_id, finger_index = 1, finger_label } = req.body || {};
 
     if (!student_id) {
       return res.status(400).json({ success: false, message: 'student_id is required' });
     }
 
-    const cleanFingerIdx = Math.min(3, Math.max(1, Number(finger_index) || 1));
-    const cleanFingerLabel = (finger_label && String(finger_label).trim())
+    const parsedFinger = Math.floor(Number(finger_index));
+    const cleanFingerIdx = Math.min(3, Math.max(1, Number.isFinite(parsedFinger) ? parsedFinger : 1));
+    const cleanFingerLabel = (finger_label !== undefined && finger_label !== null && String(finger_label).trim())
       || (cleanFingerIdx === 2 ? 'Backup Finger' : cleanFingerIdx === 3 ? 'Finger #3' : 'Primary Finger');
 
-    const [device, student] = await Promise.all([
-      BiometricDevice.findOne({ device_id: deviceId }),
-      Student.findById(student_id)
-    ]);
+    const result = await withDeviceLock(deviceId, async () => {
+      const [device, student] = await Promise.all([
+        BiometricDevice.findOne({ device_id: deviceId }),
+        Student.findById(student_id)
+      ]);
 
-    if (!device) {
-      return res.status(404).json({ success: false, message: 'Biometric device not found' });
-    }
-    if (!student) {
-      return res.status(404).json({ success: false, message: 'Student not found' });
-    }
+      if (!device) {
+        return { httpStatus: 404, body: { success: false, message: 'Biometric device not found' } };
+      }
+      if (!student) {
+        return { httpStatus: 404, body: { success: false, message: 'Student not found' } };
+      }
 
-    // Prevent silently overwriting another in-flight ENROLL or SYNC_SLOTS command
-    if (isActiveCommand(device.pending_command) && ['ENROLL', 'SYNC_SLOTS'].includes(device.pending_command.action)) {
-      return res.status(409).json({
-        success: false,
-        message: `${device.pending_command.action === 'SYNC_SLOTS' ? 'Sensor sync' : `Enrollment for ${device.pending_command.student_name || 'another student'}`} is already in progress. Complete or cancel it first.`
+      if (isActiveCommand(device.pending_command) && ['ENROLL', 'SYNC_SLOTS'].includes(device.pending_command.action)) {
+        return {
+          httpStatus: 409,
+          body: {
+            success: false,
+            message: `${device.pending_command.action === 'SYNC_SLOTS' ? 'Sensor sync' : `Enrollment for ${device.pending_command.student_name || 'another student'}`} is already in progress. Complete or cancel it first.`
+          }
+        };
+      }
+
+      const existingTemplate = await FingerprintTemplate.findOne({
+        device_id: deviceId,
+        student: student._id,
+        finger_index: cleanFingerIdx
       });
-    }
+      let targetSlot = existingTemplate?.slot_id || null;
 
-    // Reuse existing slot if re-enrolling same (student, finger_index), else find lowest free slot 1..1000
-    const existingTemplate = await FingerprintTemplate.findOne({
-      device_id: deviceId,
-      student: student._id,
-      finger_index: cleanFingerIdx
-    });
-    let targetSlot = existingTemplate?.slot_id || null;
-
-    if (!targetSlot) {
-      const usedTemplates = await FingerprintTemplate.find({ device_id: deviceId }).select('slot_id').lean();
-      const usedSet = new Set(usedTemplates.map(t => t.slot_id));
-      // Also avoid slots currently queued for pending DELETE so they don't race
-      if (isActiveCommand(device.pending_command) && device.pending_command.slot_id) {
-        usedSet.add(device.pending_command.slot_id);
-      }
-      if (Array.isArray(device.command_queue)) {
-        device.command_queue.forEach(c => {
-          if (c.slot_id) usedSet.add(c.slot_id);
-        });
-      }
-      for (let i = 1; i <= 1000; i++) {
-        if (!usedSet.has(i)) {
-          targetSlot = i;
-          break;
+      if (!targetSlot) {
+        const usedTemplates = await FingerprintTemplate.find({ device_id: deviceId }).select('slot_id').lean();
+        const usedSet = new Set(usedTemplates.map(t => t.slot_id));
+        if (isActiveCommand(device.pending_command) && device.pending_command.slot_id) {
+          usedSet.add(device.pending_command.slot_id);
+        }
+        if (Array.isArray(device.command_queue)) {
+          device.command_queue.forEach(c => {
+            if (c.slot_id) usedSet.add(c.slot_id);
+          });
+        }
+        for (let i = 1; i <= 1000; i++) {
+          if (!usedSet.has(i)) {
+            targetSlot = i;
+            break;
+          }
         }
       }
-    }
 
-    if (!targetSlot) {
-      return res.status(400).json({ success: false, message: 'R307S sensor memory full (1000/1000 slots used)' });
-    }
+      if (!targetSlot) {
+        return { httpStatus: 400, body: { success: false, message: 'R307S sensor memory full (1000/1000 slots used)' } };
+      }
 
-    const { queued, command } = enqueueDeviceCommand(device, {
-      action: 'ENROLL',
-      slot_id: targetSlot,
-      student: student._id,
-      student_name: student.name,
-      finger_index: cleanFingerIdx,
-      finger_label: cleanFingerLabel,
-      enrolled_by: req.user._id,
-      step: 'WAITING_DEVICE',
-      progress: 10,
-      message: `Waiting for ESP32 to begin enrolling ${student.name} (${cleanFingerLabel}, Slot #${targetSlot})...`
-    });
-
-    await device.save();
-
-    const io = getIO();
-    if (io) {
-      io.to('GATE_MONITOR').emit('gate_command_update', {
-        device_id: device.device_id,
-        command_id: device.pending_command.command_id,
-        action: device.pending_command.action,
-        slot_id: device.pending_command.slot_id,
-        status: device.pending_command.status,
-        step: device.pending_command.step || 'WAITING_DEVICE',
-        progress: device.pending_command.progress || 10,
-        student_id: device.pending_command.student ? String(device.pending_command.student) : null,
-        student_name: device.pending_command.student_name,
-        finger_index: device.pending_command.finger_index || cleanFingerIdx,
-        finger_label: device.pending_command.finger_label || cleanFingerLabel,
-        message: device.pending_command.message,
-        queue_length: device.command_queue.length
-      });
-    }
-
-    res.json({
-      success: true,
-      message: queued
-        ? `Enrollment queued behind ${device.command_queue.length} pending command(s) for ${student.name} (${cleanFingerLabel}, Slot #${targetSlot}).`
-        : `Enrollment queued for ${student.name} (${cleanFingerLabel}, Slot #${targetSlot}). Follow instructions on the ESP32 OLED screen.`,
-      data: {
+      const { queued, command } = enqueueDeviceCommand(device, {
+        action: 'ENROLL',
         slot_id: targetSlot,
+        student: student._id,
         student_name: student.name,
         finger_index: cleanFingerIdx,
         finger_label: cleanFingerLabel,
-        queued,
-        queue_length: device.command_queue.length,
-        pending_command: command
+        enrolled_by: req.user._id,
+        step: 'WAITING_DEVICE',
+        progress: 10,
+        message: `Waiting for ESP32 to begin enrolling ${student.name} (${cleanFingerLabel}, Slot #${targetSlot})...`
+      });
+
+      await device.save();
+
+      const io = getIO();
+      if (io) {
+        io.to('GATE_MONITOR').emit('gate_command_update', {
+          device_id: device.device_id,
+          command_id: device.pending_command.command_id,
+          action: device.pending_command.action,
+          slot_id: device.pending_command.slot_id,
+          status: device.pending_command.status,
+          step: device.pending_command.step || 'WAITING_DEVICE',
+          progress: device.pending_command.progress || 10,
+          student_id: device.pending_command.student ? String(device.pending_command.student) : null,
+          student_name: device.pending_command.student_name,
+          finger_index: device.pending_command.finger_index || cleanFingerIdx,
+          finger_label: device.pending_command.finger_label || cleanFingerLabel,
+          message: device.pending_command.message,
+          queue_length: device.command_queue.length
+        });
       }
+
+      return {
+        httpStatus: 200,
+        body: {
+          success: true,
+          message: queued
+            ? `Enrollment queued behind ${device.command_queue.length} pending command(s) for ${student.name} (${cleanFingerLabel}, Slot #${targetSlot}).`
+            : `Enrollment queued for ${student.name} (${cleanFingerLabel}, Slot #${targetSlot}). Follow instructions on the ESP32 OLED screen.`,
+          data: {
+            slot_id: targetSlot,
+            student_name: student.name,
+            finger_index: cleanFingerIdx,
+            finger_label: cleanFingerLabel,
+            queued,
+            queue_length: device.command_queue.length,
+            pending_command: command
+          }
+        }
+      };
     });
+
+    return res.status(result.httpStatus).json(result.body);
   } catch (error) {
     next(error);
   }
@@ -920,58 +1144,65 @@ router.delete('/devices/:deviceId/templates/:studentId', protect, authorize('Sup
     const { studentId } = req.params;
     const { slot_id, finger_index } = req.query;
 
-    const device = await BiometricDevice.findOne({ device_id: deviceId });
-    if (!device) {
-      return res.status(404).json({ success: false, message: 'Biometric device not found' });
-    }
+    const result = await withDeviceLock(deviceId, async () => {
+      const device = await BiometricDevice.findOne({ device_id: deviceId });
+      if (!device) {
+        return { httpStatus: 404, body: { success: false, message: 'Biometric device not found' } };
+      }
 
-    const filter = { device_id: deviceId, student: studentId };
-    if (slot_id !== undefined && Number.isInteger(Number(slot_id))) {
-      filter.slot_id = Number(slot_id);
-    } else if (finger_index !== undefined && Number.isInteger(Number(finger_index))) {
-      filter.finger_index = Number(finger_index);
-    }
+      const filter = { device_id: deviceId, student: studentId };
+      if (slot_id !== undefined && Number.isInteger(Number(slot_id))) {
+        filter.slot_id = Number(slot_id);
+      } else if (finger_index !== undefined && Number.isInteger(Number(finger_index))) {
+        filter.finger_index = Number(finger_index);
+      }
 
-    const templatesToRemove = await FingerprintTemplate.find(filter).populate('student', 'name');
-    if (templatesToRemove.length === 0) {
-      return res.status(404).json({ success: false, message: 'Student has no matching enrolled fingerprint on this device' });
-    }
+      const templatesToRemove = await FingerprintTemplate.find(filter).populate('student', 'name');
+      if (templatesToRemove.length === 0) {
+        return { httpStatus: 404, body: { success: false, message: 'Student has no matching enrolled fingerprint on this device' } };
+      }
 
-    const studentName = templatesToRemove[0].student?.name || 'Student';
-    await FingerprintTemplate.deleteMany({ _id: { $in: templatesToRemove.map(t => t._id) } });
+      const studentName = templatesToRemove[0].student?.name || 'Student';
+      await FingerprintTemplate.deleteMany({ _id: { $in: templatesToRemove.map(t => t._id) } });
 
-    for (const tpl of templatesToRemove) {
-      enqueueDeviceCommand(device, {
-        action: 'DELETE',
-        slot_id: tpl.slot_id,
-        student: null,
-        student_name: studentName,
-        finger_index: tpl.finger_index || 1,
-        finger_label: tpl.finger_label || 'Primary Finger',
-        message: `Deleting Slot #${tpl.slot_id} (${studentName}) from R307S sensor...`
-      });
-    }
-    await device.save();
+      for (const tpl of templatesToRemove) {
+        enqueueDeviceCommand(device, {
+          action: 'DELETE',
+          slot_id: tpl.slot_id,
+          student: null,
+          student_name: studentName,
+          finger_index: tpl.finger_index || 1,
+          finger_label: tpl.finger_label || 'Primary Finger',
+          message: `Deleting Slot #${tpl.slot_id} (${studentName}) from R307S sensor...`
+        });
+      }
+      await device.save();
 
-    const io = getIO();
-    if (io) {
-      io.to('GATE_MONITOR').emit('gate_command_update', {
-        device_id: device.device_id,
-        command_id: device.pending_command.command_id,
-        action: device.pending_command.action,
-        slot_id: device.pending_command.slot_id,
-        status: device.pending_command.status,
-        student_name: device.pending_command.student_name,
-        message: device.pending_command.message,
-        queue_length: device.command_queue.length
-      });
-    }
+      const io = getIO();
+      if (io) {
+        io.to('GATE_MONITOR').emit('gate_command_update', {
+          device_id: device.device_id,
+          command_id: device.pending_command.command_id,
+          action: device.pending_command.action,
+          slot_id: device.pending_command.slot_id,
+          status: device.pending_command.status,
+          student_name: device.pending_command.student_name,
+          message: device.pending_command.message,
+          queue_length: device.command_queue.length
+        });
+      }
 
-    const slotList = templatesToRemove.map(t => `#${t.slot_id}`).join(', ');
-    res.json({
-      success: true,
-      message: `Removed fingerprint ${slotList} for ${studentName}. Sensor erase queued.`
+      const slotList = templatesToRemove.map(t => `#${t.slot_id}`).join(', ');
+      return {
+        httpStatus: 200,
+        body: {
+          success: true,
+          message: `Removed fingerprint ${slotList} for ${studentName}. Sensor erase queued.`
+        }
+      };
     });
+
+    return res.status(result.httpStatus).json(result.body);
   } catch (error) {
     next(error);
   }
@@ -983,50 +1214,61 @@ router.delete('/devices/:deviceId/templates/:studentId', protect, authorize('Sup
 router.post('/devices/:deviceId/sync-slots', protect, authorize('SuperAdmin', 'Teacher'), async (req, res, next) => {
   try {
     const deviceId = String(req.params.deviceId).trim().toUpperCase();
-    const device = await BiometricDevice.findOne({ device_id: deviceId });
-    if (!device) {
-      return res.status(404).json({ success: false, message: 'Biometric device not found' });
-    }
 
-    if (isActiveCommand(device.pending_command) && device.pending_command.action === 'ENROLL') {
-      return res.status(409).json({
-        success: false,
-        message: `Finish or cancel the active enrollment for ${device.pending_command.student_name || 'student'} before running Sensor Sync.`
-      });
-    }
+    const result = await withDeviceLock(deviceId, async () => {
+      const device = await BiometricDevice.findOne({ device_id: deviceId });
+      if (!device) {
+        return { httpStatus: 404, body: { success: false, message: 'Biometric device not found' } };
+      }
 
-    const { command } = enqueueDeviceCommand(device, {
-      action: 'SYNC_SLOTS',
-      slot_id: null,
-      student: null,
-      student_name: 'Sensor Memory Audit',
-      step: 'WAITING_DEVICE',
-      progress: 15,
-      message: 'Waiting for ESP32 to scan R307S memory table & reconcile with database...'
-    });
-    await device.save();
+      if (isActiveCommand(device.pending_command) && device.pending_command.action === 'ENROLL') {
+        return {
+          httpStatus: 409,
+          body: {
+            success: false,
+            message: `Finish or cancel the active enrollment for ${device.pending_command.student_name || 'student'} before running Sensor Sync.`
+          }
+        };
+      }
 
-    const io = getIO();
-    if (io) {
-      io.to('GATE_MONITOR').emit('gate_command_update', {
-        device_id: device.device_id,
-        command_id: device.pending_command.command_id,
-        action: device.pending_command.action,
+      const { command } = enqueueDeviceCommand(device, {
+        action: 'SYNC_SLOTS',
         slot_id: null,
-        status: device.pending_command.status,
-        step: device.pending_command.step || 'WAITING_DEVICE',
-        progress: device.pending_command.progress || 15,
-        student_name: device.pending_command.student_name,
-        message: device.pending_command.message,
-        queue_length: device.command_queue.length
+        student: null,
+        student_name: 'Sensor Memory Audit',
+        step: 'WAITING_DEVICE',
+        progress: 15,
+        message: 'Waiting for ESP32 to scan R307S memory table & reconcile with database...'
       });
-    }
+      await device.save();
 
-    res.json({
-      success: true,
-      message: 'Sensor Sync & Repair queued. ESP32 will audit all 1,000 slots on its next heartbeat.',
-      data: { pending_command: command }
+      const io = getIO();
+      if (io) {
+        io.to('GATE_MONITOR').emit('gate_command_update', {
+          device_id: device.device_id,
+          command_id: device.pending_command.command_id,
+          action: device.pending_command.action,
+          slot_id: null,
+          status: device.pending_command.status,
+          step: device.pending_command.step || 'WAITING_DEVICE',
+          progress: device.pending_command.progress || 15,
+          student_name: device.pending_command.student_name,
+          message: device.pending_command.message,
+          queue_length: device.command_queue.length
+        });
+      }
+
+      return {
+        httpStatus: 200,
+        body: {
+          success: true,
+          message: 'Sensor Sync & Repair queued. ESP32 will audit all 1,000 slots on its next heartbeat.',
+          data: { pending_command: command }
+        }
+      };
     });
+
+    return res.status(result.httpStatus).json(result.body);
   } catch (error) {
     next(error);
   }
@@ -1038,43 +1280,50 @@ router.post('/devices/:deviceId/sync-slots', protect, authorize('SuperAdmin', 'T
 router.post('/devices/:deviceId/clear-all', protect, authorize('SuperAdmin'), async (req, res, next) => {
   try {
     const deviceId = String(req.params.deviceId).trim().toUpperCase();
-    const device = await BiometricDevice.findOne({ device_id: deviceId });
-    if (!device) {
-      return res.status(404).json({ success: false, message: 'Biometric device not found' });
-    }
 
-    // Clear DB templates & supersede any queued slot deletes since CLEAR_ALL wipes everything
-    await FingerprintTemplate.deleteMany({ device_id: deviceId });
-    device.command_queue = [];
-    device.pending_command = buildCommandPayload({
-      action: 'CLEAR_ALL',
-      slot_id: null,
-      student: null,
-      student_name: 'All Templates',
-      message: 'Erasing all fingerprints from R307S sensor memory...'
-    });
-    await device.save();
+    const result = await withDeviceLock(deviceId, async () => {
+      const device = await BiometricDevice.findOne({ device_id: deviceId });
+      if (!device) {
+        return { httpStatus: 404, body: { success: false, message: 'Biometric device not found' } };
+      }
 
-    const io = getIO();
-    if (io) {
-      io.to('GATE_MONITOR').emit('gate_command_update', {
-        device_id: device.device_id,
-        command_id: device.pending_command.command_id,
+      await FingerprintTemplate.deleteMany({ device_id: deviceId });
+      device.command_queue = [];
+      device.pending_command = buildCommandPayload({
         action: 'CLEAR_ALL',
         slot_id: null,
-        status: 'PENDING',
+        student: null,
         student_name: 'All Templates',
-        message: device.pending_command.message,
-        enrolled_count: 0,
-        queue_length: 0
+        message: 'Erasing all fingerprints from R307S sensor memory...'
       });
-    }
+      await device.save();
 
-    res.json({
-      success: true,
-      message: 'CLEAR_ALL queued. ESP32 will erase all stored prints on its next heartbeat.',
-      data: { pending_command: device.pending_command }
+      const io = getIO();
+      if (io) {
+        io.to('GATE_MONITOR').emit('gate_command_update', {
+          device_id: device.device_id,
+          command_id: device.pending_command.command_id,
+          action: 'CLEAR_ALL',
+          slot_id: null,
+          status: 'PENDING',
+          student_name: 'All Templates',
+          message: device.pending_command.message,
+          enrolled_count: 0,
+          queue_length: 0
+        });
+      }
+
+      return {
+        httpStatus: 200,
+        body: {
+          success: true,
+          message: 'CLEAR_ALL queued. ESP32 will erase all stored prints on its next heartbeat.',
+          data: { pending_command: device.pending_command }
+        }
+      };
     });
+
+    return res.status(result.httpStatus).json(result.body);
   } catch (error) {
     next(error);
   }
@@ -1086,53 +1335,64 @@ router.post('/devices/:deviceId/clear-all', protect, authorize('SuperAdmin'), as
 router.post('/devices/:deviceId/cancel-command', protect, authorize('SuperAdmin', 'Teacher'), async (req, res, next) => {
   try {
     const deviceId = String(req.params.deviceId).trim().toUpperCase();
-    const device = await BiometricDevice.findOne({ device_id: deviceId });
-    if (!device) {
-      return res.status(404).json({ success: false, message: 'Biometric device not found' });
-    }
 
-    if (req.body?.clear_queue === true) {
-      device.command_queue = [];
-    }
+    const result = await withDeviceLock(deviceId, async () => {
+      const device = await BiometricDevice.findOne({ device_id: deviceId });
+      if (!device) {
+        return { httpStatus: 404, body: { success: false, message: 'Biometric device not found' } };
+      }
 
-    device.pending_command = {
-      command_id: '',
-      action: 'NONE',
-      slot_id: null,
-      student: null,
-      student_name: '',
-      status: 'IDLE',
-      message: 'Cancelled by user',
-      requested_at: null,
-      updated_at: new Date()
-    };
+      if (req.body?.clear_queue === true) {
+        device.command_queue = [];
+      }
 
-    const promoted = promoteNextCommand(device);
-    await device.save();
-
-    const io = getIO();
-    if (io) {
-      io.to('GATE_MONITOR').emit('gate_command_update', promoted ? {
-        device_id: device.device_id,
-        command_id: device.pending_command.command_id,
-        action: device.pending_command.action,
-        slot_id: device.pending_command.slot_id,
-        status: device.pending_command.status,
-        student_name: device.pending_command.student_name,
-        message: device.pending_command.message,
-        queue_length: device.command_queue.length
-      } : {
-        device_id: device.device_id,
+      device.pending_command = {
         command_id: '',
         action: 'NONE',
         slot_id: null,
+        student: null,
+        student_name: '',
         status: 'IDLE',
         message: 'Cancelled by user',
-        queue_length: 0
-      });
-    }
+        requested_at: null,
+        updated_at: new Date()
+      };
 
-    res.json({ success: true, message: promoted ? 'Active command cancelled; next queued command started.' : 'Pending command cleared' });
+      const promoted = promoteNextCommand(device);
+      await device.save();
+
+      const io = getIO();
+      if (io) {
+        io.to('GATE_MONITOR').emit('gate_command_update', promoted ? {
+          device_id: device.device_id,
+          command_id: device.pending_command.command_id,
+          action: device.pending_command.action,
+          slot_id: device.pending_command.slot_id,
+          status: device.pending_command.status,
+          student_name: device.pending_command.student_name,
+          message: device.pending_command.message,
+          queue_length: device.command_queue.length
+        } : {
+          device_id: device.device_id,
+          command_id: '',
+          action: 'NONE',
+          slot_id: null,
+          status: 'IDLE',
+          message: 'Cancelled by user',
+          queue_length: 0
+        });
+      }
+
+      return {
+        httpStatus: 200,
+        body: {
+          success: true,
+          message: promoted ? 'Active command cancelled; next queued command started.' : 'Pending command cleared'
+        }
+      };
+    });
+
+    return res.status(result.httpStatus).json(result.body);
   } catch (error) {
     next(error);
   }
@@ -1161,7 +1421,7 @@ router.get('/logs', protect, async (req, res, next) => {
   try {
     const ist = getISTParts();
     const { date, class_level, event_type, search, limit = 200 } = req.query;
-    const targetDate = date ? String(date).split('T')[0] : ist.dateStr;
+    const targetDate = typeof date === 'string' && date.trim() ? date.trim().split('T')[0] : ist.dateStr;
 
     const query = {};
     if (req.user.role === 'Student') {
@@ -1174,12 +1434,12 @@ router.get('/logs', protect, async (req, res, next) => {
         });
       }
       query.student = req.user.studentProfile;
-      if (date) {
+      if (typeof date === 'string' && date.trim()) {
         query.date = targetDate;
       }
     } else {
       query.date = targetDate;
-      if (event_type && ['ENTRY', 'EXIT'].includes(event_type)) {
+      if (typeof event_type === 'string' && ['ENTRY', 'EXIT'].includes(event_type)) {
         query.event_type = event_type;
       }
     }
@@ -1189,11 +1449,11 @@ router.get('/logs', protect, async (req, res, next) => {
     // Push class & search filters into MongoDB before .limit() for accurate pagination & speed
     if (req.user.role !== 'Student') {
       const studentFilter = {};
-      if (class_level && class_level !== 'All') {
-        studentFilter.class_level = String(class_level).trim().toUpperCase();
+      if (typeof class_level === 'string' && class_level.trim() && class_level !== 'All') {
+        studentFilter.class_level = class_level.trim().toUpperCase();
       }
-      if (search && String(search).trim()) {
-        const escaped = String(search).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      if (typeof search === 'string' && search.trim()) {
+        const escaped = search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         studentFilter.$or = [
           { name: { $regex: escaped, $options: 'i' } },
           { roll_number: { $regex: escaped, $options: 'i' } }

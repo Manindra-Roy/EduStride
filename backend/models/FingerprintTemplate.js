@@ -47,9 +47,4 @@ fingerprintTemplateSchema.index({ device_id: 1, student: 1, finger_index: 1 }, {
 
 const FingerprintTemplate = mongoose.model('FingerprintTemplate', fingerprintTemplateSchema);
 
-// Automatically migrate legacy { device_id: 1, student: 1 } unique index to multi-finger index
-FingerprintTemplate.syncIndexes().catch(err => {
-  console.log('[FingerprintTemplate Index Sync]:', err.message);
-});
-
 export default FingerprintTemplate;

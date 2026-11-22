@@ -39,14 +39,15 @@ const Preloader = ({ loading, onFinished }) => {
     return () => clearInterval(interval);
   }, [loading]);
 
-  // Cycle Status Text smoothly
+  // Cycle Status Text smoothly while loading
   useEffect(() => {
+    if (!loading || progress === 100) return;
     const statusInterval = setInterval(() => {
       setStatusIndex(prev => (prev + 1) % (LOADING_STATUSES.length - 1));
     }, 1200);
 
     return () => clearInterval(statusInterval);
-  }, []);
+  }, [loading, progress]);
 
   // Ultra-smooth fadeOut when progress reaches 100%
   useEffect(() => {
@@ -91,7 +92,7 @@ const Preloader = ({ loading, onFinished }) => {
         </div>
 
         {/* Brand Name & Subtitle */}
-        <h1 className="text-2.5xl font-black font-outfit text-white tracking-tight mb-1">
+        <h1 className="text-2xl font-black font-outfit text-white tracking-tight mb-1">
           EduStride
         </h1>
         <p className="text-xs text-slate-400 font-medium tracking-wide mb-8 font-sans">

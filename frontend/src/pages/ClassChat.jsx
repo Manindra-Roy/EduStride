@@ -1,9 +1,10 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { useLocation } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { useAuth } from '../context/AuthContext';
 import { socket } from '../config/socket';
 import { useCall } from '../context/CallContext';
+import { getDisplayName } from '../utils/istDate';
 import Logo from '../components/Logo';
 import { 
   MessageSquare, 
@@ -109,8 +110,32 @@ const VoicePlayer = ({ src }) => {
   );
 };
 
+const ALLOWED_ATTACHMENT_MIMES = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/webp',
+  'image/gif',
+  'audio/webm',
+  'audio/mpeg',
+  'audio/ogg',
+  'audio/mp4',
+  'application/pdf',
+  'text/plain',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.ms-powerpoint',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+]);
+
+const ATTACHMENT_ACCEPT_ATTR =
+  'image/png,image/jpeg,image/webp,image/gif,audio/webm,audio/mpeg,audio/ogg,audio/mp4,application/pdf,text/plain,.doc,.docx,.xls,.xlsx,.ppt,.pptx';
+
 const ClassChat = ({ setAppSidebarOpen }) => {
   const { user } = useAuth();
+  const myDisplayName = getDisplayName(user);
+  const myUserId = user?.id || user?._id || null;
   const {
     activeCall,
     isMuted,
@@ -121,7 +146,9 @@ const ClassChat = ({ setAppSidebarOpen }) => {
     isCallHost,
     currentRoom: callContextRoom,
     setCurrentRoom: setCallContextRoom,
+    remoteParticipants,
     handleStartCall,
+    joinCallInRoom,
     handleEndCall,
     toggleMute,
     formatCallDuration,
@@ -129,14 +156,16 @@ const ClassChat = ({ setAppSidebarOpen }) => {
     toggleOnScreenToasts
   } = useCall();
   const location = useLocation();
+  const navigate = useNavigate();
   const targetRoomState = location.state?.targetRoom;
+  const autoJoinCallState = Boolean(location.state?.autoJoinCall);
   const [currentRoom, setCurrentRoom] = useState(targetRoomState || callContextRoom || user.studentProfile?.class_level || '');
   const [roomMetadataMap, setRoomMetadataMap] = useState({});
 
   // Sync current room level with global CallContext
   useEffect(() => {
     setCallContextRoom(currentRoom);
-  }, [currentRoom]);
+  }, [currentRoom, setCallContextRoom]);
 
   // Sync external changes in global CallContext back to local room selection
   useEffect(() => {
@@ -149,8 +178,14 @@ const ClassChat = ({ setAppSidebarOpen }) => {
     if (targetRoomState) {
       setCurrentRoom(targetRoomState);
       setShowSidebarOnMobile(false);
+      if (autoJoinCallState && !activeCall) {
+        joinCallInRoom(targetRoomState);
+      }
+      if (autoJoinCallState) {
+        navigate(location.pathname, { replace: true, state: { targetRoom: targetRoomState } });
+      }
     }
-  }, [targetRoomState]);
+  }, [targetRoomState, autoJoinCallState, activeCall, joinCallInRoom, navigate, location.pathname]);
   const [messages, setMessages] = useState([]);
   const [typedMessage, setTypedMessage] = useState('');
   const [rooms, setRooms] = useState([]);
@@ -223,7 +258,7 @@ const ClassChat = ({ setAppSidebarOpen }) => {
     if (socketRef.current && currentRoom) {
       socketRef.current.emit('toggle_incognito', {
         class_level: currentRoom,
-        sender_name: user.studentProfile?.name || (user.role === 'SuperAdmin' ? 'Admin' : 'Teacher'),
+        sender_name: myDisplayName,
         sender_role: user.role,
         is_hidden: nextVal
       });
@@ -358,13 +393,53 @@ const ClassChat = ({ setAppSidebarOpen }) => {
     if (typeof uri !== 'string') return false;
     const trimmed = uri.trim();
     if (/^https?:\/\//i.test(trimmed)) return true;
-    if (/^data:/i.test(trimmed)) {
-      if (/^data:(text\/html|image\/svg\+xml|application\/javascript|text\/javascript)/i.test(trimmed)) {
-        return false;
-      }
-      return true;
+    const dataMatch = trimmed.match(/^data:([a-z0-9.+-]+\/[a-z0-9.+-]+)(?:;[^,]*)?,/i);
+    if (dataMatch) {
+      return ALLOWED_ATTACHMENT_MIMES.has(dataMatch[1].toLowerCase());
     }
     return false;
+  };
+
+  const handleDownloadAttachment = (uri, filename = 'attachment') => {
+    if (!isSafeAttachmentUri(uri)) return;
+    if (/^data:/i.test(uri)) {
+      try {
+        const [header, dataPart] = uri.split(',');
+        const mimeMatch = header.match(/^data:([^;]+)/i);
+        const mime = mimeMatch ? mimeMatch[1] : 'application/octet-stream';
+        const isBase64 = /;base64$/i.test(header);
+        let blob;
+        if (isBase64) {
+          const binary = atob(dataPart);
+          const bytes = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i++) {
+            bytes[i] = binary.charCodeAt(i);
+          }
+          blob = new Blob([bytes], { type: mime });
+        } else {
+          blob = new Blob([decodeURIComponent(dataPart)], { type: mime });
+        }
+        const blobUrl = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = blobUrl;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+      } catch (err) {
+        console.error('Failed to download attachment:', err);
+      }
+      return;
+    }
+    const link = document.createElement('a');
+    link.href = uri;
+    link.download = filename;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   const parseMessage = (text) => {
@@ -500,13 +575,16 @@ const ClassChat = ({ setAppSidebarOpen }) => {
     const sock = socketRef.current;
     let isActive = true;
 
-    // Join chat presence room
-    sock.emit('join_room_chat', {
-      class_level: currentRoom,
-      sender_name: user.studentProfile?.name || (user.role === 'SuperAdmin' ? 'Admin' : 'Teacher'),
-      sender_role: user.role,
-      is_hidden: (user.role === 'SuperAdmin' || user.role === 'Teacher') && isStealthMode
-    });
+    const emitJoinPresence = () => {
+      sock.emit('join_room_chat', {
+        class_level: currentRoom,
+        sender_name: myDisplayName,
+        sender_role: user.role,
+        is_hidden: (user.role === 'SuperAdmin' || user.role === 'Teacher') && isStealthMode
+      });
+    };
+
+    emitJoinPresence();
 
     // Clear unread counts when entering the active room
     setUnreadCounts((prev) => ({ ...prev, [currentRoom]: 0 }));
@@ -537,7 +615,10 @@ const ClassChat = ({ setAppSidebarOpen }) => {
     };
 
     const handleTypingStatus = (data) => {
-      const { sender_name, is_typing } = data;
+      const { sender_id, sender_name, is_typing } = data || {};
+      if (sender_id && myUserId && String(sender_id) === String(myUserId)) return;
+      if (!sender_id && sender_name === myDisplayName) return;
+      if (!sender_name) return;
       setTypingUsers((prev) => ({
         ...prev,
         [sender_name]: is_typing
@@ -548,6 +629,11 @@ const ClassChat = ({ setAppSidebarOpen }) => {
       setRoomMembers(members);
     };
 
+    const handleSocketReconnect = () => {
+      emitJoinPresence();
+    };
+
+    sock.on('connect', handleSocketReconnect);
     sock.on('new_message', handleNewMessageGlobal);
     sock.on('message_deleted', handleMessageDeleted);
     sock.on('message_reaction_updated', handleReactionUpdated);
@@ -559,11 +645,14 @@ const ClassChat = ({ setAppSidebarOpen }) => {
     setShowSearchInChat(false);
     setTypingUsers({});
     setMessages([]);
+    prevLastMsgIdRef.current = null;
+    prevMessagesLenRef.current = 0;
     fetchChatHistory(currentRoom, () => isActive);
 
     return () => {
       isActive = false;
       sock.emit('leave_room_chat');
+      sock.off('connect', handleSocketReconnect);
       sock.off('new_message', handleNewMessageGlobal);
       sock.off('message_deleted', handleMessageDeleted);
       sock.off('message_reaction_updated', handleReactionUpdated);
@@ -572,49 +661,62 @@ const ClassChat = ({ setAppSidebarOpen }) => {
     };
   }, [currentRoom]);
 
-  // Handle typing triggers based on input modifications
+  // Handle typing triggers cleanly without firing is_typing:false on every keystroke
   const isTypingRef = useRef(false);
   const typingTimeoutRef = useRef(null);
 
-  useEffect(() => {
-    if (!socketRef.current || !currentRoom) return;
-    const roomForTyping = currentRoom;
-    const senderName = user.studentProfile?.name || (user.role === 'SuperAdmin' ? 'Admin' : 'Teacher');
+  const stopTypingStatus = (roomOverride = currentRoom) => {
+    if (typingTimeoutRef.current) {
+      clearTimeout(typingTimeoutRef.current);
+      typingTimeoutRef.current = null;
+    }
+    if (isTypingRef.current) {
+      isTypingRef.current = false;
+      if (socketRef.current && roomOverride) {
+        socketRef.current.emit('typing_status', {
+          class_level: roomOverride,
+          sender_name: myDisplayName,
+          is_typing: false
+        });
+      }
+    }
+  };
 
-    if (typedMessage.trim() && !isTypingRef.current) {
+  const handleTypingActivity = (nextText) => {
+    if (!socketRef.current || !currentRoom) return;
+    if (!nextText.trim()) {
+      stopTypingStatus(currentRoom);
+      return;
+    }
+    if (!isTypingRef.current) {
       isTypingRef.current = true;
       socketRef.current.emit('typing_status', {
-        class_level: roomForTyping,
-        sender_name: senderName,
+        class_level: currentRoom,
+        sender_name: myDisplayName,
         is_typing: true
       });
     }
-
     if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
-
+    const roomForTimer = currentRoom;
     typingTimeoutRef.current = setTimeout(() => {
+      typingTimeoutRef.current = null;
       if (isTypingRef.current) {
         isTypingRef.current = false;
         socketRef.current?.emit('typing_status', {
-          class_level: roomForTyping,
-          sender_name: senderName,
+          class_level: roomForTimer,
+          sender_name: myDisplayName,
           is_typing: false
         });
       }
     }, 2000);
+  };
 
+  useEffect(() => {
+    const roomAtMount = currentRoom;
     return () => {
-      if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
-      if (isTypingRef.current) {
-        isTypingRef.current = false;
-        socketRef.current?.emit('typing_status', {
-          class_level: roomForTyping,
-          sender_name: senderName,
-          is_typing: false
-        });
-      }
+      stopTypingStatus(roomAtMount);
     };
-  }, [typedMessage, currentRoom]);
+  }, [currentRoom]);
 
   const handleReactToMessage = (messageId, emoji) => {
     if (socketRef.current) {
@@ -622,25 +724,64 @@ const ClassChat = ({ setAppSidebarOpen }) => {
         message_id: messageId,
         class_level: currentRoom,
         emoji,
-        sender_name: user.studentProfile?.name || (user.role === 'SuperAdmin' ? 'Admin' : 'Teacher')
+        sender_name: myDisplayName
       });
     }
   };
 
+  const scrollTimeoutRef = useRef(null);
+  const prevMessagesLenRef = useRef(0);
+  const prevLastMsgIdRef = useRef(null);
+
   const scrollToBottom = (behavior = 'smooth') => {
-    if (messagesContainerRef.current) {
-      setTimeout(() => {
-        if (messagesContainerRef.current) {
-          messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight;
-        }
-      }, 50);
-    }
+    if (scrollTimeoutRef.current) clearTimeout(scrollTimeoutRef.current);
+    scrollTimeoutRef.current = setTimeout(() => {
+      scrollTimeoutRef.current = null;
+      if (messagesContainerRef.current) {
+        messagesContainerRef.current.scrollTo({
+          top: messagesContainerRef.current.scrollHeight,
+          behavior
+        });
+      }
+    }, 50);
   };
 
-  // Scroll to bottom helper
   useEffect(() => {
-    scrollToBottom('smooth');
-  }, [messages]);
+    return () => {
+      if (scrollTimeoutRef.current) clearTimeout(scrollTimeoutRef.current);
+    };
+  }, []);
+
+  // Only auto-scroll when a new message is appended and user is near bottom (or on initial room load / own message)
+  useEffect(() => {
+    const prevLen = prevMessagesLenRef.current;
+    const prevLastId = prevLastMsgIdRef.current;
+    const lastMsg = messages.length > 0 ? messages[messages.length - 1] : null;
+    const lastId = lastMsg?._id || null;
+
+    const isInitialLoad = prevLen === 0 && messages.length > 0;
+    const isNewAppend = messages.length > prevLen && lastId !== prevLastId;
+
+    prevMessagesLenRef.current = messages.length;
+    prevLastMsgIdRef.current = lastId;
+
+    if (!isInitialLoad && !isNewAppend) return;
+
+    const lastIsMe = Boolean(
+      lastMsg &&
+      ((lastMsg.sender_id && myUserId && String(lastMsg.sender_id) === String(myUserId)) ||
+        (!lastMsg.sender_id && lastMsg.sender_name === myDisplayName))
+    );
+
+    const container = messagesContainerRef.current;
+    const isNearBottom = !container || (container.scrollHeight - container.scrollTop - container.clientHeight < 180);
+
+    if (isInitialLoad) {
+      scrollToBottom('auto');
+    } else if (isNearBottom || lastIsMe) {
+      scrollToBottom('smooth');
+    }
+  }, [messages, myUserId, myDisplayName]);
 
   // Scroll to bottom on viewport resize (e.g. mobile keyboard opens)
   useEffect(() => {
@@ -684,7 +825,7 @@ const ClassChat = ({ setAppSidebarOpen }) => {
 
     const messageData = {
       class_level: currentRoom,
-      sender_name: user.studentProfile?.name || (user.role === 'SuperAdmin' ? 'Admin' : 'Teacher'),
+      sender_name: myDisplayName,
       sender_role: user.role,
       message_text: typedMessage,
       reply_to: replyToMessage ? replyToMessage._id : null
@@ -692,16 +833,7 @@ const ClassChat = ({ setAppSidebarOpen }) => {
 
     if (socketRef.current) {
       socketRef.current.emit('send_message', messageData);
-
-      // Immediately reset typing status
-      if (isTypingRef.current) {
-        isTypingRef.current = false;
-        socketRef.current.emit('typing_status', {
-          class_level: currentRoom,
-          sender_name: user.studentProfile?.name || (user.role === 'SuperAdmin' ? 'Admin' : 'Teacher'),
-          is_typing: false
-        });
-      }
+      stopTypingStatus(currentRoom);
     }
     setTypedMessage('');
     setReplyToMessage(null);
@@ -743,7 +875,7 @@ const ClassChat = ({ setAppSidebarOpen }) => {
           
           const messageData = {
             class_level: targetRoomAtStart,
-            sender_name: user.studentProfile?.name || (user.role === 'SuperAdmin' ? 'Admin' : 'Teacher'),
+            sender_name: myDisplayName,
             sender_role: user.role,
             message_text: msgPayload
           };
@@ -807,8 +939,15 @@ const ClassChat = ({ setAppSidebarOpen }) => {
     const file = e.target.files[0];
     if (!file) return;
 
+    if (!ALLOWED_ATTACHMENT_MIMES.has((file.type || '').toLowerCase())) {
+      alert('Unsupported file type. Allowed: PNG, JPEG, WebP, GIF, MP3/OGG/WebM/MP4 audio, PDF, TXT, and Office documents.');
+      e.target.value = '';
+      return;
+    }
+
     if (file.size > 5 * 1024 * 1024) {
       alert('File size exceeds the 5MB limit for chat attachments.');
+      e.target.value = '';
       return;
     }
 
@@ -817,7 +956,7 @@ const ClassChat = ({ setAppSidebarOpen }) => {
     reader.onloadend = () => {
       setSelectedAttachment({
         name: file.name,
-        type: file.type.startsWith('image/') ? 'image' : 'document',
+        type: file.type.startsWith('image/') ? 'image' : (file.type.startsWith('audio/') ? 'audio' : 'document'),
         rawType: file.type,
         size: file.size,
         base64: reader.result
@@ -842,7 +981,7 @@ const ClassChat = ({ setAppSidebarOpen }) => {
 
     const messageData = {
       class_level: currentRoom,
-      sender_name: user.studentProfile?.name || (user.role === 'SuperAdmin' ? 'Admin' : 'Teacher'),
+      sender_name: myDisplayName,
       sender_role: user.role,
       message_text: payload,
       reply_to: replyToMessage ? replyToMessage._id : null
@@ -900,6 +1039,7 @@ const ClassChat = ({ setAppSidebarOpen }) => {
       <input 
         type="file" 
         ref={fileInputRef} 
+        accept={ATTACHMENT_ACCEPT_ATTR}
         onChange={handleFileChange} 
         className="hidden" 
       />
@@ -926,7 +1066,7 @@ const ClassChat = ({ setAppSidebarOpen }) => {
               />
             ) : (
               <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-primary-600 to-indigo-500 flex items-center justify-center font-bold text-white text-base shadow-sm shrink-0">
-                {user?.email[0].toUpperCase()}
+                {(user?.email?.[0] || 'U').toUpperCase()}
               </div>
             )}
             <div className="overflow-hidden">
@@ -1359,15 +1499,23 @@ const ClassChat = ({ setAppSidebarOpen }) => {
               ) : (
                 searchedMessages.map((msg, index) => {
                   const prevMsg = index > 0 ? searchedMessages[index - 1] : null;
-                  const isSameSender = prevMsg && prevMsg.sender_name === msg.sender_name;
-                  const isMe = msg.sender_name === (user.studentProfile?.name || (user.role === 'SuperAdmin' ? 'Admin' : 'Teacher'));
+                  const isSameSender = Boolean(
+                    prevMsg &&
+                    ((prevMsg.sender_id && msg.sender_id)
+                      ? String(prevMsg.sender_id) === String(msg.sender_id)
+                      : prevMsg.sender_name === msg.sender_name)
+                  );
+                  const isMe = Boolean(
+                    (msg.sender_id && myUserId && String(msg.sender_id) === String(myUserId)) ||
+                    (!msg.sender_id && msg.sender_name === myDisplayName)
+                  );
                   const time = new Date(msg.created_at || msg.timestamp || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
                   const parsed = parseMessage(msg.message_text);
                   const canDelete = isMe || user.role === 'SuperAdmin' || user.role === 'Teacher';
 
                   return (
                     <div 
-                      key={index} 
+                      key={msg._id || index} 
                       className={`flex gap-2.5 items-end max-w-[85%] sm:max-w-[70%] ${
                         isMe ? 'self-end flex-row-reverse' : 'self-start flex-row'
                       } ${isSameSender ? 'mt-1' : 'mt-3.5'} group relative`}
@@ -1377,7 +1525,7 @@ const ClassChat = ({ setAppSidebarOpen }) => {
                         <div className="w-8 shrink-0 flex justify-center">
                           {!isSameSender ? (
                             <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-primary-650 to-indigo-500 flex items-center justify-center font-bold text-white text-xs shadow-md shadow-primary-500/10 select-none">
-                              {msg.sender_name[0].toUpperCase()}
+                              {(msg.sender_name?.[0] || '?').toUpperCase()}
                             </div>
                           ) : null}
                         </div>
@@ -1452,14 +1600,14 @@ const ClassChat = ({ setAppSidebarOpen }) => {
                                   <p className="text-xs font-bold text-white truncate leading-snug font-outfit">{parsed.name}</p>
                                   <span className="text-[9px] text-slate-500 uppercase tracking-wider font-bold">Document</span>
                                 </div>
-                                <a 
-                                  href={parsed.content} 
-                                  download={parsed.name}
+                                <button
+                                  type="button"
+                                  onClick={() => handleDownloadAttachment(parsed.content, parsed.name)}
                                   className="p-1.5 rounded-lg bg-dark-900 border border-dark-800 hover:bg-dark-850 text-primary-400 transition cursor-pointer"
                                   title="Download handout file"
                                 >
                                   <Download size={12} />
-                                </a>
+                                </button>
                               </div>
                             )}
 
@@ -1483,12 +1631,15 @@ const ClassChat = ({ setAppSidebarOpen }) => {
                             {Object.entries(
                               msg.reactions.reduce((acc, r) => {
                                 acc[r.emoji] = acc[r.emoji] || [];
-                                acc[r.emoji].push(r.sender_name);
+                                acc[r.emoji].push(r);
                                 return acc;
                               }, {})
-                            ).map(([emoji, users]) => {
-                              const myName = user.studentProfile?.name || (user.role === 'SuperAdmin' ? 'Admin' : 'Teacher');
-                              const didIReact = users.includes(myName);
+                            ).map(([emoji, reactionItems]) => {
+                              const userNames = reactionItems.map(r => r.sender_name);
+                              const didIReact = reactionItems.some(r =>
+                                (r.sender_id && myUserId && String(r.sender_id) === String(myUserId)) ||
+                                (!r.sender_id && r.sender_name === myDisplayName)
+                              );
                               return (
                                 <button
                                   key={emoji}
@@ -1496,7 +1647,7 @@ const ClassChat = ({ setAppSidebarOpen }) => {
                                     e.stopPropagation();
                                     handleReactToMessage(msg._id, emoji);
                                   }}
-                                  title={`Reacted by: ${users.join(', ')}`}
+                                  title={`Reacted by: ${userNames.join(', ')}`}
                                   className={`flex items-center gap-1 px-1.5 py-0.5 rounded-lg text-[9px] border transition cursor-pointer active:scale-90 ${
                                     didIReact 
                                       ? 'bg-primary-500/20 border-primary-550/40 text-primary-300 font-extrabold shadow-sm' 
@@ -1504,7 +1655,7 @@ const ClassChat = ({ setAppSidebarOpen }) => {
                                   }`}
                                 >
                                   <span>{emoji}</span>
-                                  <span className="font-mono text-[8px]">{users.length}</span>
+                                  <span className="font-mono text-[8px]">{reactionItems.length}</span>
                                 </button>
                               );
                             })}
@@ -1574,7 +1725,7 @@ const ClassChat = ({ setAppSidebarOpen }) => {
                                 handleDeleteMessage(msg._id);
                               }}
                               className={`opacity-60 md:opacity-0 md:group-hover:opacity-100 hover:scale-110 active:scale-90 transition-all cursor-pointer mr-1 ${
-                                isMe ? 'text-primary-200 hover:text-rose-300' : 'text-slate-550 hover:text-rose-455'
+                                isMe ? 'text-primary-200 hover:text-rose-300' : 'text-slate-500 hover:text-rose-455'
                               }`}
                               title="Delete message"
                             >
@@ -1591,7 +1742,7 @@ const ClassChat = ({ setAppSidebarOpen }) => {
               )}
               {/* Typing Indicators */}
               {Object.entries(typingUsers)
-                .filter(([name, typing]) => typing && name !== (user.studentProfile?.name || (user.role === 'SuperAdmin' ? 'Admin' : 'Teacher')))
+                .filter(([name, typing]) => typing && name !== myDisplayName)
                 .map(([name]) => (
                   <div key={name} className="flex items-center gap-2 text-slate-450 text-[10px] pl-4 py-1 select-none animate-fadeIn">
                     <div className="flex items-center gap-1 bg-dark-900/60 border border-dark-800/85 px-3 py-1.5 rounded-full rounded-tl-none">
@@ -1690,7 +1841,7 @@ const ClassChat = ({ setAppSidebarOpen }) => {
                     /* Audio recording active control bar */
                     <div className="flex-1 bg-dark-955 border border-red-500/20 rounded-xl px-4 py-2 flex justify-between items-center gap-3 animate-fadeIn">
                       <div className="flex items-center gap-2">
-                        <span className="w-2 h-2 bg-red-550 rounded-full animate-ping shrink-0" />
+                        <span className="w-2 h-2 bg-red-500 rounded-full animate-ping shrink-0" />
                         <span className="text-xs font-bold text-red-500 font-mono">Recording {formatDuration(recordingDuration)}</span>
                       </div>
                       <div className="flex items-center gap-2">
@@ -1765,7 +1916,9 @@ const ClassChat = ({ setAppSidebarOpen }) => {
                           placeholder="Type a message..."
                           value={typedMessage}
                           onChange={(e) => {
-                            setTypedMessage(e.target.value);
+                            const val = e.target.value;
+                            setTypedMessage(val);
+                            handleTypingActivity(val);
                             e.target.style.height = 'auto';
                             e.target.style.height = `${Math.min(e.target.scrollHeight, 120)}px`;
                           }}
@@ -1855,7 +2008,7 @@ const ClassChat = ({ setAppSidebarOpen }) => {
           {/* Mobile backdrop overlay */}
           <div 
             onClick={() => setShowMembersPanel(false)}
-            className="fixed inset-0 bg-black/45 backdrop-blur-[1px] md:hidden z-25"
+            className="fixed inset-0 bg-black/45 backdrop-blur-[1px] md:hidden z-20"
           />
           <div className="w-64 max-w-[85vw] bg-dark-950 border-l border-dark-800/80 flex flex-col shrink-0 z-30 absolute right-0 top-0 bottom-0 md:relative h-full animate-fadeIn shadow-2xl">
             <div className="p-4 bg-dark-900/40 border-b border-dark-800/80 flex justify-between items-center text-slate-100 shrink-0">
@@ -1881,11 +2034,11 @@ const ClassChat = ({ setAppSidebarOpen }) => {
                       <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
                       <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500 border border-dark-950"></span>
                     </span>
-                    {member.sender_name[0].toUpperCase()}
+                    {(member.sender_name?.[0] || '?').toUpperCase()}
                   </div>
                   <div className="overflow-hidden flex-1">
                     <p className="text-[11px] font-bold text-white truncate leading-tight font-outfit">{member.sender_name}</p>
-                    <span className={`text-[7px] font-extrabold px-1 py-0.2 rounded uppercase font-mono tracking-wider leading-none mt-0.5 inline-block ${
+                    <span className={`text-[7px] font-extrabold px-1 py-0.5 rounded uppercase font-mono tracking-wider leading-none mt-0.5 inline-block ${
                       member.sender_role === 'SuperAdmin' || member.sender_role === 'Admin'
                         ? 'bg-indigo-500/10 text-indigo-400'
                         : member.sender_role === 'Teacher'
@@ -1946,7 +2099,7 @@ const ClassChat = ({ setAppSidebarOpen }) => {
                   placeholder="Add caption..."
                   value={attachmentCaption}
                   onChange={(e) => setAttachmentCaption(e.target.value)}
-                  className="w-full px-3.5 py-2.5 rounded-xl bg-dark-900 border border-dark-850 text-white placeholder-slate-550 outline-none text-xs focus:border-primary-500 transition"
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-dark-900 border border-dark-850 text-white placeholder-slate-500 outline-none text-xs focus:border-primary-500 transition"
                 />
               </div>
             </div>
@@ -2074,8 +2227,12 @@ const ClassChat = ({ setAppSidebarOpen }) => {
               </div>
               
               <div className="text-center">
-                <h2 className="text-base font-bold text-white font-outfit">Class {currentRoom} Lounge Call</h2>
-                <p className="text-xs text-primary-400 font-semibold mt-1.5">Connected • Joining students lounge...</p>
+                <h2 className="text-base font-bold text-white font-outfit">Class {activeCall.room || currentRoom} Lounge Call</h2>
+                <p className="text-xs text-primary-400 font-semibold mt-1.5">
+                  {remoteParticipants > 0
+                    ? `Live Audio • ${remoteParticipants + 1} participants connected`
+                    : 'Connected • Waiting for participants to join...'}
+                </p>
               </div>
             </div>
           </div>
@@ -2087,7 +2244,7 @@ const ClassChat = ({ setAppSidebarOpen }) => {
               className={`w-12 h-12 rounded-xl flex items-center justify-center border transition active:scale-95 cursor-pointer ${
                 isMuted 
                   ? 'bg-rose-500/15 border-rose-500/30 text-rose-400' 
-                  : 'bg-dark-900/80 border-dark-800 text-slate-300 hover:bg-dark-855 hover:text-white'
+                  : 'bg-dark-900/80 border-dark-800 text-slate-300 hover:bg-dark-850 hover:text-white'
               }`}
               title={isMuted ? 'Unmute microphone' : 'Mute microphone'}
             >

@@ -2,12 +2,37 @@ import { Server } from 'socket.io';
 import jwt from 'jsonwebtoken';
 import ChatMessage from '../models/ChatMessage.js';
 import User from '../models/User.js';
+import SpecialBatch from '../models/SpecialBatch.js';
 
-const activeCalls = new Map(); // class_level -> callDetails
-const roomMembers = new Map(); // class_level -> Map of socket.id -> { sender_name, sender_role }
+const activeCalls = new Map(); // normalizedRoom -> callDetails
+const callParticipants = new Map(); // normalizedRoom -> Map<socketId, { socketId, name, role, userId }>
+const roomMembers = new Map(); // normalizedRoom -> Map<socketId, { sender_id, sender_name, sender_role }>
 let ioInstance = null;
 
 export const getIO = () => ioInstance;
+
+const normalizeRoom = (rawRoom) => {
+  if (rawRoom === null || rawRoom === undefined) return '';
+  const trimmed = String(rawRoom).trim();
+  if (!trimmed) return '';
+  if (/^batch_[0-9a-fA-F]{24}$/i.test(trimmed)) {
+    return `BATCH_${trimmed.slice(6)}`;
+  }
+  if (/^user_[0-9a-fA-F]{24}$/i.test(trimmed)) {
+    return `USER_${trimmed.slice(5)}`;
+  }
+  return trimmed.toUpperCase();
+};
+
+const isStaffUser = (user) => Boolean(user && (user.role === 'SuperAdmin' || user.role === 'Teacher'));
+
+const getSocketSender = (user) => ({
+  sender_id: String(user._id),
+  sender_role: user.role,
+  sender_name:
+    user.studentProfile?.name ||
+    (user.role === 'SuperAdmin' ? 'Admin' : (user.email ? user.email.split('@')[0] : 'Teacher'))
+});
 
 export const initSocket = (server) => {
   const allowedOrigins = process.env.CORS_ORIGINS
@@ -15,6 +40,7 @@ export const initSocket = (server) => {
     : '*';
 
   const io = new Server(server, {
+    maxHttpBufferSize: 8 * 1024 * 1024, // 8 MB for chat/attachment payloads
     cors: {
       origin: allowedOrigins,
       methods: ['GET', 'POST']
@@ -29,16 +55,19 @@ export const initSocket = (server) => {
       const bearerToken = authHeader && authHeader.startsWith('Bearer ')
         ? authHeader.slice(7).trim()
         : null;
-      const token = socket.handshake.auth?.token || bearerToken || socket.handshake.query?.token;
+      const token = socket.handshake.auth?.token || bearerToken;
 
       if (!token) {
         return next(new Error('Authentication required'));
       }
 
-      const decoded = jwt.verify(String(token), process.env.JWT_SECRET || 'fallback_secret_key_123');
+      const decoded = jwt.verify(String(token), process.env.JWT_SECRET);
       const user = await User.findById(decoded.id).select('-password').populate('studentProfile', 'class_level name');
       if (!user) {
         return next(new Error('User not found'));
+      }
+      if ((decoded.tv ?? 0) !== (user.tokenVersion || 0)) {
+        return next(new Error('Session invalidated'));
       }
 
       socket.user = user;
@@ -48,56 +77,81 @@ export const initSocket = (server) => {
     }
   });
 
-  const isStaffUser = (user) => user && (user.role === 'SuperAdmin' || user.role === 'Teacher');
-
-  const canJoinRoom = (user, rawRoom) => {
+  const canJoinRoom = async (user, rawRoom) => {
     if (!user || !rawRoom) return false;
-    const clean = String(rawRoom).trim();
-    const upper = clean.toUpperCase();
+    const room = normalizeRoom(rawRoom);
+    if (!room) return false;
 
     if (isStaffUser(user)) return true;
 
     // Restricted staff-only rooms
-    if (upper === 'GATE_MONITOR') return false;
+    if (room === 'GATE_MONITOR') return false;
+
+    const ownStudentId = user.studentProfile?._id?.toString() || user.studentProfile?.toString() || '';
 
     // Personal student room: only the owning student may join
-    if (upper.startsWith('USER_')) {
-      const targetStudentId = clean.slice(5);
-      const ownStudentId = user.studentProfile?._id?.toString() || user.studentProfile?.toString() || '';
+    if (room.startsWith('USER_')) {
+      const targetStudentId = room.slice(5);
       return Boolean(ownStudentId && targetStudentId === ownStudentId);
     }
 
-    // Broadcast room, special batches, or the student's own class
-    if (upper === 'ALL' || upper.startsWith('BATCH_')) return true;
+    // Broadcast room
+    if (room === 'ALL') return true;
 
+    // Special batch room: verify student enrollment in SpecialBatch
+    if (room.startsWith('BATCH_')) {
+      const batchId = room.slice(6);
+      if (!ownStudentId || !/^[0-9a-fA-F]{24}$/.test(batchId)) {
+        return false;
+      }
+      const enrolled = await SpecialBatch.exists({ _id: batchId, students: ownStudentId });
+      return Boolean(enrolled);
+    }
+
+    // Standard class room: only the student's own class
     const ownClass = user.studentProfile?.class_level?.trim().toUpperCase();
-    return Boolean(ownClass && upper === ownClass);
+    return Boolean(ownClass && room === ownClass);
   };
 
-  const sendMembersList = (class_level) => {
-    const membersMap = roomMembers.get(class_level);
+  const sendMembersList = (room) => {
+    const membersMap = roomMembers.get(room);
     const membersList = membersMap ? Array.from(membersMap.values()) : [];
-    // De-duplicate members by sender_name
+    // De-duplicate members by sender_id
     const uniqueMembers = [];
     const seen = new Set();
     for (const m of membersList) {
-      if (!seen.has(m.sender_name)) {
-        seen.add(m.sender_name);
+      if (!seen.has(m.sender_id)) {
+        seen.add(m.sender_id);
         uniqueMembers.push(m);
       }
     }
-    io.to(class_level).emit('room_members', uniqueMembers);
+    io.to(room).emit('room_members', uniqueMembers);
   };
 
   const removeUserFromRooms = (socketId) => {
-    for (const [class_level, members] of roomMembers.entries()) {
+    for (const [room, members] of roomMembers.entries()) {
       if (members.has(socketId)) {
         members.delete(socketId);
-        sendMembersList(class_level);
+        sendMembersList(room);
         if (members.size === 0) {
-          roomMembers.delete(class_level);
+          roomMembers.delete(room);
         }
       }
+    }
+  };
+
+  const removeSocketFromCall = (room, socketId) => {
+    const participants = callParticipants.get(room);
+    if (!participants || !participants.has(socketId)) return;
+    participants.delete(socketId);
+    for (const peer of participants.values()) {
+      io.to(peer.socketId).emit('call_peer_left', {
+        class_level: room,
+        socketId
+      });
+    }
+    if (participants.size === 0) {
+      callParticipants.delete(room);
     }
   };
 
@@ -105,83 +159,92 @@ export const initSocket = (server) => {
     console.log(`Socket connected: ${socket.id} (${socket.user?.email} / ${socket.user?.role})`);
 
     // Listen for join_room (with strict RBAC authorization)
-    socket.on('join_room', (class_level) => {
-      if (!class_level) return;
-      const cleanLevel = class_level.toString().trim();
-      const upperLevel = cleanLevel.toUpperCase();
+    socket.on('join_room', async (class_level) => {
+      try {
+        const room = normalizeRoom(class_level);
+        if (!room) return;
 
-      if (!canJoinRoom(socket.user, cleanLevel)) {
-        console.warn(`[Socket Auth] Blocked ${socket.user?.email} (${socket.user?.role}) from joining room: ${cleanLevel}`);
-        return;
-      }
+        if (!(await canJoinRoom(socket.user, room))) {
+          console.warn(`[Socket Auth] Blocked ${socket.user?.email} (${socket.user?.role}) from joining room: ${room}`);
+          return;
+        }
 
-      socket.join(cleanLevel);
-      socket.join(upperLevel);
-      if (upperLevel !== 'GATE_MONITOR' && !upperLevel.startsWith('USER_')) {
-        socket.join('ALL');
-      }
-      console.log(`User ${socket.id} joined authorized room: ${cleanLevel}`);
+        socket.join(room);
+        if (room !== 'GATE_MONITOR' && !room.startsWith('USER_')) {
+          socket.join('ALL');
+        }
+        console.log(`User ${socket.id} joined authorized room: ${room}`);
 
-      // Immediately notify the user if there is an active call in this room
-      if (activeCalls.has(upperLevel) || activeCalls.has(cleanLevel)) {
-        const callInfo = activeCalls.get(upperLevel) || activeCalls.get(cleanLevel);
-        socket.emit('incoming_call', callInfo);
+        // Immediately notify the user if there is an active call in this room
+        if (activeCalls.has(room)) {
+          socket.emit('incoming_call', activeCalls.get(room));
+        }
+      } catch (error) {
+        console.error('Socket error in join_room:', error.message);
       }
     });
 
     // Listen for chat presence room joining
-    socket.on('join_room_chat', (data) => {
-      const { class_level, sender_name, sender_role, is_hidden } = data || {};
-      if (!class_level || !canJoinRoom(socket.user, class_level)) {
-        return;
-      }
-      socket.join(class_level);
-      
-      // Remove from any other rooms first
-      removeUserFromRooms(socket.id);
-      
-      if (!is_hidden) {
-        if (!roomMembers.has(class_level)) {
-          roomMembers.set(class_level, new Map());
+    socket.on('join_room_chat', async (data) => {
+      try {
+        const { class_level, is_hidden } = data || {};
+        const room = normalizeRoom(class_level);
+        if (!room || !(await canJoinRoom(socket.user, room))) {
+          return;
         }
-        roomMembers.get(class_level).set(socket.id, {
-          sender_name,
-          sender_role: socket.user?.role || sender_role
-        });
-        console.log(`User ${sender_name} (${socket.user?.role || sender_role}) joined chat presence for room: ${class_level}`);
-      } else {
-        console.log(`User ${sender_name} (${socket.user?.role || sender_role}) joined in STEALTH (HIDDEN) mode for room: ${class_level}`);
-      }
-      
-      sendMembersList(class_level);
 
-      // Immediately notify active call
-      const upperLevel = typeof class_level === 'string' ? class_level.trim().toUpperCase() : class_level;
-      if (activeCalls.has(class_level) || activeCalls.has(upperLevel)) {
-        socket.emit('incoming_call', activeCalls.get(class_level) || activeCalls.get(upperLevel));
+        const sender = getSocketSender(socket.user);
+        const hidden = isStaffUser(socket.user) && Boolean(is_hidden);
+
+        socket.join(room);
+        removeUserFromRooms(socket.id);
+
+        if (!hidden) {
+          if (!roomMembers.has(room)) {
+            roomMembers.set(room, new Map());
+          }
+          roomMembers.get(room).set(socket.id, sender);
+          console.log(`User ${sender.sender_name} (${sender.sender_role}) joined chat presence for room: ${room}`);
+        } else {
+          console.log(`User ${sender.sender_name} (${sender.sender_role}) joined in STEALTH (HIDDEN) mode for room: ${room}`);
+        }
+
+        sendMembersList(room);
+
+        if (activeCalls.has(room)) {
+          socket.emit('incoming_call', activeCalls.get(room));
+        }
+      } catch (error) {
+        console.error('Socket error in join_room_chat:', error.message);
       }
     });
 
     // Listen for toggle_incognito status changes
-    socket.on('toggle_incognito', (data) => {
-      const { class_level, sender_name, sender_role, is_hidden } = data || {};
-      if (!class_level || !canJoinRoom(socket.user, class_level)) return;
-      removeUserFromRooms(socket.id);
+    socket.on('toggle_incognito', async (data) => {
+      try {
+        const { class_level, is_hidden } = data || {};
+        const room = normalizeRoom(class_level);
+        if (!room || !(await canJoinRoom(socket.user, room))) return;
 
-      if (!is_hidden) {
-        if (!roomMembers.has(class_level)) {
-          roomMembers.set(class_level, new Map());
+        const sender = getSocketSender(socket.user);
+        const hidden = isStaffUser(socket.user) && Boolean(is_hidden);
+
+        removeUserFromRooms(socket.id);
+
+        if (!hidden) {
+          if (!roomMembers.has(room)) {
+            roomMembers.set(room, new Map());
+          }
+          roomMembers.get(room).set(socket.id, sender);
+          console.log(`User ${sender.sender_name} toggled active status to VISIBLE in room: ${room}`);
+        } else {
+          console.log(`User ${sender.sender_name} toggled active status to HIDDEN in room: ${room}`);
         }
-        roomMembers.get(class_level).set(socket.id, {
-          sender_name,
-          sender_role: socket.user?.role || sender_role
-        });
-        console.log(`User ${sender_name} toggled active status to VISIBLE in room: ${class_level}`);
-      } else {
-        console.log(`User ${sender_name} toggled active status to HIDDEN in room: ${class_level}`);
-      }
 
-      sendMembersList(class_level);
+        sendMembersList(room);
+      } catch (error) {
+        console.error('Socket error in toggle_incognito:', error.message);
+      }
     });
 
     // Listen for leaving chat room presence
@@ -190,37 +253,57 @@ export const initSocket = (server) => {
     });
 
     // Listen for typing indicators
-    socket.on('typing_status', (data) => {
-      const { class_level, sender_name, is_typing } = data;
-      socket.to(class_level).emit('typing_status', { sender_name, is_typing });
+    socket.on('typing_status', async (data) => {
+      try {
+        const { class_level, is_typing } = data || {};
+        const room = normalizeRoom(class_level);
+        if (!room || !(await canJoinRoom(socket.user, room))) return;
+
+        const sender = getSocketSender(socket.user);
+        socket.to(room).emit('typing_status', {
+          sender_id: sender.sender_id,
+          sender_name: sender.sender_name,
+          is_typing: Boolean(is_typing)
+        });
+      } catch (error) {
+        console.error('Socket error in typing_status:', error.message);
+      }
     });
 
     // Listen for message reactions
     socket.on('add_reaction', async (data) => {
       try {
-        const { message_id, class_level, emoji, sender_name } = data;
-        
-        // Find message
+        const { message_id, class_level, emoji } = data || {};
+        const room = normalizeRoom(class_level);
+        if (!message_id || !room || typeof emoji !== 'string' || !emoji.trim()) return;
+        if (!(await canJoinRoom(socket.user, room))) return;
+
         const message = await ChatMessage.findById(message_id);
         if (!message) return;
+        if (normalizeRoom(message.class_level) !== room) return;
 
-        // If user already reacted with this emoji, toggle it off (remove it)
-        const existingIndex = message.reactions.findIndex(
-          (r) => r.emoji === emoji && r.sender_name === sender_name
-        );
+        const sender = getSocketSender(socket.user);
+        const cleanEmoji = emoji.trim();
+
+        const existingIndex = message.reactions.findIndex((r) => {
+          if (r.emoji !== cleanEmoji) return false;
+          if (r.sender_id) return r.sender_id === sender.sender_id;
+          return r.sender_name === sender.sender_name;
+        });
 
         if (existingIndex > -1) {
-          // Remove reaction
           message.reactions.splice(existingIndex, 1);
         } else {
-          // Add new reaction (and optionally remove any other reaction by this user on this message)
-          message.reactions.push({ emoji, sender_name });
+          message.reactions.push({
+            emoji: cleanEmoji,
+            sender_name: sender.sender_name,
+            sender_id: sender.sender_id
+          });
         }
 
         await message.save();
 
-        // Broadcast update to all clients in the room
-        io.to(class_level).emit('message_reaction_updated', {
+        io.to(room).emit('message_reaction_updated', {
           message_id,
           reactions: message.reactions
         });
@@ -232,14 +315,26 @@ export const initSocket = (server) => {
     // Listen for send_message
     socket.on('send_message', async (data) => {
       try {
-        const { class_level, sender_name, sender_role, message_text, reply_to } = data || {};
-        if (!class_level || !canJoinRoom(socket.user, class_level)) return;
+        const { class_level, message_text, reply_to } = data || {};
+        const room = normalizeRoom(class_level);
+        if (!room || !(await canJoinRoom(socket.user, room))) return;
 
-        // Save message to MongoDB
+        // Block students from posting to global broadcast room
+        if (room === 'ALL' && !isStaffUser(socket.user)) {
+          return;
+        }
+
+        if (typeof message_text !== 'string' || message_text.trim().length === 0) {
+          return;
+        }
+
+        const sender = getSocketSender(socket.user);
+
         let chatMsg = await ChatMessage.create({
-          class_level,
-          sender_name,
-          sender_role: socket.user?.role || sender_role,
+          class_level: room,
+          sender_id: socket.user._id,
+          sender_name: sender.sender_name,
+          sender_role: sender.sender_role,
           message_text,
           reply_to: reply_to || null
         });
@@ -248,9 +343,7 @@ export const initSocket = (server) => {
           chatMsg = await ChatMessage.findById(chatMsg._id).populate('reply_to');
         }
 
-        // Broadcast back to all clients in the class room
-        io.to(class_level).emit('new_message', chatMsg);
-        console.log(`Message broadcasted to Class ${class_level} from ${sender_name}: "${message_text}"`);
+        io.to(room).emit('new_message', chatMsg);
       } catch (error) {
         console.error('Socket error in send_message:', error.message);
       }
@@ -260,49 +353,207 @@ export const initSocket = (server) => {
     socket.on('delete_message', async (data) => {
       try {
         const { message_id, class_level } = data || {};
-        if (!message_id || !class_level || !canJoinRoom(socket.user, class_level)) return;
+        const room = normalizeRoom(class_level);
+        if (!message_id || !room || !(await canJoinRoom(socket.user, room))) return;
 
-        // Only staff or the message sender may delete a message
         const existingMsg = await ChatMessage.findById(message_id);
         if (!existingMsg) return;
-        const ownName = socket.user?.studentProfile?.name || socket.user?.email;
-        if (!isStaffUser(socket.user) && existingMsg.sender_name !== ownName) {
-          return;
-        }
+        if (normalizeRoom(existingMsg.class_level) !== room) return;
 
-        // Delete from MongoDB
+        const sender = getSocketSender(socket.user);
+        const canDelete =
+          isStaffUser(socket.user) ||
+          (existingMsg.sender_id && String(existingMsg.sender_id) === String(socket.user._id)) ||
+          (!existingMsg.sender_id && existingMsg.sender_name === sender.sender_name);
+
+        if (!canDelete) return;
+
         await ChatMessage.findByIdAndDelete(message_id);
 
-        // Broadcast deletion event to class room
-        io.to(class_level).emit('message_deleted', message_id);
-        console.log(`Message ${message_id} deleted in Class ${class_level}`);
+        io.to(room).emit('message_deleted', message_id);
       } catch (error) {
         console.error('Socket error in delete_message:', error.message);
       }
     });
 
-    // Listen for start_call
-    socket.on('start_call', (data) => {
+    // =========================================================================
+    // Real WebRTC Voice Call Signaling
+    // =========================================================================
+
+    // Start a call (staff only)
+    socket.on('start_call', async (data) => {
       try {
-        const { class_level, caller_name, hostEmail } = data || {};
-        if (!class_level || !canJoinRoom(socket.user, class_level)) return;
-        const callData = { class_level, caller_name, hostEmail: socket.user?.email || hostEmail, hostSocketId: socket.id, startTime: Date.now() };
-        activeCalls.set(class_level, callData);
-        socket.to(class_level).emit('incoming_call', callData);
-        console.log(`Incoming call notification sent in room ${class_level} from ${caller_name} (Host: ${callData.hostEmail})`);
+        if (!isStaffUser(socket.user)) return;
+        const { class_level } = data || {};
+        const room = normalizeRoom(class_level);
+        if (!room || !(await canJoinRoom(socket.user, room))) return;
+
+        const sender = getSocketSender(socket.user);
+        const callData = {
+          class_level: room,
+          caller_name: sender.sender_name,
+          hostEmail: socket.user?.email || '',
+          hostSocketId: socket.id,
+          startTime: Date.now()
+        };
+
+        activeCalls.set(room, callData);
+
+        if (!callParticipants.has(room)) {
+          callParticipants.set(room, new Map());
+        }
+        callParticipants.get(room).set(socket.id, {
+          socketId: socket.id,
+          name: sender.sender_name,
+          role: sender.sender_role,
+          userId: sender.sender_id
+        });
+
+        socket.to(room).emit('incoming_call', callData);
+        console.log(`Incoming call notification sent in room ${room} from ${sender.sender_name} (Host: ${callData.hostEmail})`);
       } catch (error) {
         console.error('Socket error in start_call:', error.message);
       }
     });
 
-    // Listen for end_call
-    socket.on('end_call', (data) => {
+    // Join an active voice call
+    socket.on('join_call', async (data) => {
       try {
         const { class_level } = data || {};
-        if (!class_level || !canJoinRoom(socket.user, class_level)) return;
-        activeCalls.delete(class_level);
-        socket.to(class_level).emit('call_ended', { class_level });
-        console.log(`Call end broadcasted in room ${class_level}`);
+        const room = normalizeRoom(class_level);
+        if (!room || !(await canJoinRoom(socket.user, room))) return;
+        if (!activeCalls.has(room)) return;
+
+        const sender = getSocketSender(socket.user);
+        if (!callParticipants.has(room)) {
+          callParticipants.set(room, new Map());
+        }
+        const participantsMap = callParticipants.get(room);
+        const existingPeers = Array.from(participantsMap.values()).filter(p => p.socketId !== socket.id);
+
+        const joiner = {
+          socketId: socket.id,
+          name: sender.sender_name,
+          role: sender.sender_role,
+          userId: sender.sender_id
+        };
+
+        participantsMap.set(socket.id, joiner);
+
+        // Send existing participants to joiner so they can initiate peer connections
+        socket.emit('call_peers', {
+          class_level: room,
+          peers: existingPeers
+        });
+
+        // Notify existing participants about the newly joined peer
+        for (const peer of existingPeers) {
+          io.to(peer.socketId).emit('call_peer_joined', {
+            class_level: room,
+            peer: joiner
+          });
+        }
+      } catch (error) {
+        console.error('Socket error in join_call:', error.message);
+      }
+    });
+
+    // Leave an active voice call
+    socket.on('leave_call', (data) => {
+      try {
+        const { class_level } = data || {};
+        const room = normalizeRoom(class_level);
+        if (!room) return;
+        removeSocketFromCall(room, socket.id);
+      } catch (error) {
+        console.error('Socket error in leave_call:', error.message);
+      }
+    });
+
+    // Forward WebRTC SDP offer
+    socket.on('webrtc_offer', (data) => {
+      try {
+        const { class_level, targetSocketId, offer } = data || {};
+        const room = normalizeRoom(class_level);
+        if (!room || !targetSocketId || !offer) return;
+
+        const participants = callParticipants.get(room);
+        if (!participants || !participants.has(socket.id) || !participants.has(targetSocketId)) return;
+
+        const sender = getSocketSender(socket.user);
+        io.to(targetSocketId).emit('webrtc_offer', {
+          class_level: room,
+          fromSocketId: socket.id,
+          fromName: sender.sender_name,
+          fromRole: sender.sender_role,
+          offer
+        });
+      } catch (error) {
+        console.error('Socket error in webrtc_offer:', error.message);
+      }
+    });
+
+    // Forward WebRTC SDP answer
+    socket.on('webrtc_answer', (data) => {
+      try {
+        const { class_level, targetSocketId, answer } = data || {};
+        const room = normalizeRoom(class_level);
+        if (!room || !targetSocketId || !answer) return;
+
+        const participants = callParticipants.get(room);
+        if (!participants || !participants.has(socket.id) || !participants.has(targetSocketId)) return;
+
+        const sender = getSocketSender(socket.user);
+        io.to(targetSocketId).emit('webrtc_answer', {
+          class_level: room,
+          fromSocketId: socket.id,
+          fromName: sender.sender_name,
+          fromRole: sender.sender_role,
+          answer
+        });
+      } catch (error) {
+        console.error('Socket error in webrtc_answer:', error.message);
+      }
+    });
+
+    // Forward WebRTC ICE candidate
+    socket.on('webrtc_ice_candidate', (data) => {
+      try {
+        const { class_level, targetSocketId, candidate } = data || {};
+        const room = normalizeRoom(class_level);
+        if (!room || !targetSocketId || !candidate) return;
+
+        const participants = callParticipants.get(room);
+        if (!participants || !participants.has(socket.id) || !participants.has(targetSocketId)) return;
+
+        const sender = getSocketSender(socket.user);
+        io.to(targetSocketId).emit('webrtc_ice_candidate', {
+          class_level: room,
+          fromSocketId: socket.id,
+          fromName: sender.sender_name,
+          fromRole: sender.sender_role,
+          candidate
+        });
+      } catch (error) {
+        console.error('Socket error in webrtc_ice_candidate:', error.message);
+      }
+    });
+
+    // End call (staff or call host only)
+    socket.on('end_call', async (data) => {
+      try {
+        const { class_level } = data || {};
+        const room = normalizeRoom(class_level);
+        if (!room || !(await canJoinRoom(socket.user, room))) return;
+
+        const currentCall = activeCalls.get(room);
+        const canEnd = isStaffUser(socket.user) || (currentCall && currentCall.hostSocketId === socket.id);
+        if (!canEnd) return;
+
+        activeCalls.delete(room);
+        callParticipants.delete(room);
+        io.to(room).emit('call_ended', { class_level: room });
+        console.log(`Call end broadcasted in room ${room}`);
       } catch (error) {
         console.error('Socket error in end_call:', error.message);
       }
@@ -311,16 +562,22 @@ export const initSocket = (server) => {
     socket.on('disconnect', () => {
       console.log(`Socket disconnected: ${socket.id}`);
       removeUserFromRooms(socket.id);
-      
+
+      // Remove socket from any active call participant rosters
+      for (const room of Array.from(callParticipants.keys())) {
+        removeSocketFromCall(room, socket.id);
+      }
+
       // Terminate any calls hosted by this socket after a 5-second grace period
-      for (const [class_level, callData] of activeCalls.entries()) {
+      for (const [room, callData] of activeCalls.entries()) {
         if (callData.hostSocketId === socket.id) {
           setTimeout(() => {
-            const currentCall = activeCalls.get(class_level);
+            const currentCall = activeCalls.get(room);
             if (currentCall && currentCall.hostSocketId === socket.id) {
-              activeCalls.delete(class_level);
-              io.to(class_level).emit('call_ended', { class_level });
-              console.log(`Grace period expired. Host disconnected, active call ended in room ${class_level}`);
+              activeCalls.delete(room);
+              callParticipants.delete(room);
+              io.to(room).emit('call_ended', { class_level: room });
+              console.log(`Grace period expired. Host disconnected, active call ended in room ${room}`);
             }
           }, 5000);
         }

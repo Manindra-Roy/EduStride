@@ -24,7 +24,7 @@
   ],
   "rewrites": [
     {
-      "source": "/((?!api|uploads|.*\\.apk).*)|/",
+      "source": "/((?!api|uploads|socket\\.io|.*\\.apk).*)|/",
       "destination": "/index.html"
     }
   ]

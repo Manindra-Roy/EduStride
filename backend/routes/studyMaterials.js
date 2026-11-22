@@ -11,6 +11,16 @@ import { getIO } from '../config/socket.js';
 
 const router = express.Router();
 
+const ALLOWED_MATERIAL_MIMES = new Set([
+  'application/pdf',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'text/plain',
+  'image/png',
+  'image/jpeg',
+  'image/jpg'
+]);
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -31,14 +41,17 @@ const storage = multer.diskStorage({
   }
 });
 
-// File filter (accept PDF, Word, images, text)
+// File filter (accept PDF, Word, images, text — validates both extension & MIME type)
 const fileFilter = (req, file, cb) => {
   const allowedExtensions = ['.pdf', '.doc', '.docx', '.txt', '.png', '.jpg', '.jpeg'];
   const ext = path.extname(file.originalname).toLowerCase();
-  if (allowedExtensions.includes(ext)) {
+  const mime = (file.mimetype || '').toLowerCase();
+  if (allowedExtensions.includes(ext) && ALLOWED_MATERIAL_MIMES.has(mime)) {
     cb(null, true);
   } else {
-    cb(new Error('Only document files (.pdf, .doc, .docx, .txt) and images are allowed'), false);
+    const err = new Error('Only document files (.pdf, .doc, .docx, .txt) and images are allowed');
+    err.statusCode = 400;
+    cb(err, false);
   }
 };
 
@@ -57,6 +70,7 @@ router.get('/', protect, async (req, res, next) => {
     const query = {};
 
     if (req.user.role === 'Student') {
+      query.status = { $ne: 'Drafting' };
       if (req.user.studentProfile) {
         const student = await Student.findById(req.user.studentProfile);
         if (student) {
@@ -67,12 +81,12 @@ router.get('/', protect, async (req, res, next) => {
       } else {
         return res.json({ success: true, data: [] });
       }
-    } else if (class_level && class_level !== 'All') {
-      query.class_level = class_level;
+    } else if (typeof class_level === 'string' && class_level.trim() && class_level !== 'All') {
+      query.class_level = class_level.trim().toUpperCase();
     }
 
-    if (subject) {
-      query.subject = subject;
+    if (typeof subject === 'string' && subject.trim()) {
+      query.subject = subject.trim();
     }
 
     const materials = await StudyMaterial.find(query).sort({ uploaded_at: -1 });
@@ -86,15 +100,19 @@ router.get('/', protect, async (req, res, next) => {
 // @route   POST /api/study-materials/upload
 // @access  Private (Admin/Teacher)
 router.post('/upload', protect, authorize('SuperAdmin', 'Teacher'), upload.single('file'), async (req, res, next) => {
+  let uploadedFileUrl = null;
   try {
     if (!req.file) {
       res.status(400);
       throw new Error('Please upload a file');
     }
 
-    const { class_level, subject, chapter_name, status } = req.body;
-    if (!class_level || !subject || !chapter_name) {
-      // Clean up uploaded file
+    const { class_level, subject, chapter_name, status } = req.body || {};
+    if (
+      typeof class_level !== 'string' || !class_level.trim() ||
+      typeof subject !== 'string' || !subject.trim() ||
+      typeof chapter_name !== 'string' || !chapter_name.trim()
+    ) {
       if (fs.existsSync(req.file.path)) {
         fs.unlinkSync(req.file.path);
       }
@@ -102,14 +120,18 @@ router.post('/upload', protect, authorize('SuperAdmin', 'Teacher'), upload.singl
       throw new Error('Please provide class_level, subject, and chapter_name');
     }
 
-    const file_url = await uploadToCloud(req.file.path, 'handouts');
+    const cleanClass = class_level.trim().toUpperCase();
+    const cleanSubject = subject.trim();
+    const cleanChapter = chapter_name.trim();
+
+    uploadedFileUrl = await uploadToCloud(req.file.path, 'handouts');
 
     const material = await StudyMaterial.create({
-      class_level,
-      subject,
-      chapter_name,
-      status: status || 'Drafting',
-      file_url,
+      class_level: cleanClass,
+      subject: cleanSubject,
+      chapter_name: cleanChapter,
+      status: typeof status === 'string' && status.trim() ? status.trim() : 'Drafting',
+      file_url: uploadedFileUrl,
       file_name: req.file.originalname
     });
 
@@ -117,10 +139,10 @@ router.post('/upload', protect, authorize('SuperAdmin', 'Teacher'), upload.singl
     if (material.status !== 'Drafting') {
       const io = getIO();
       if (io) {
-        io.to(class_level).emit('new_study_material', {
-          class_level,
-          subject,
-          chapter_name,
+        io.to(cleanClass).emit('new_study_material', {
+          class_level: cleanClass,
+          subject: cleanSubject,
+          chapter_name: cleanChapter,
           file_name: req.file.originalname,
           material
         });
@@ -132,11 +154,16 @@ router.post('/upload', protect, authorize('SuperAdmin', 'Teacher'), upload.singl
       data: material
     });
   } catch (error) {
+    if (uploadedFileUrl) {
+      await deleteFromCloud(uploadedFileUrl).catch(() => {});
+    } else if (req.file && fs.existsSync(req.file.path)) {
+      try { fs.unlinkSync(req.file.path); } catch { /* ignore */ }
+    }
     next(error);
   }
 });
 
-// @desc    Update study material (e.g., status/chapter)
+// @desc    Update study material (e.g., status/chapter) — whitelisted fields only
 // @route   PUT /api/study-materials/:id
 // @access  Private (Admin/Teacher)
 router.put('/:id', protect, authorize('SuperAdmin', 'Teacher'), async (req, res, next) => {
@@ -148,14 +175,30 @@ router.put('/:id', protect, authorize('SuperAdmin', 'Teacher'), async (req, res,
     }
 
     const oldStatus = material.status;
+    const { class_level, subject, chapter_name, status } = req.body || {};
 
-    const updated = await StudyMaterial.findByIdAndUpdate(req.params.id, req.body, {
-      new: true,
-      runValidators: true
-    });
+    const updateFields = {};
+    if (typeof class_level === 'string' && class_level.trim()) {
+      updateFields.class_level = class_level.trim().toUpperCase();
+    }
+    if (typeof subject === 'string' && subject.trim()) {
+      updateFields.subject = subject.trim();
+    }
+    if (typeof chapter_name === 'string' && chapter_name.trim()) {
+      updateFields.chapter_name = chapter_name.trim();
+    }
+    if (typeof status === 'string' && status.trim()) {
+      updateFields.status = status.trim();
+    }
+
+    const updated = await StudyMaterial.findByIdAndUpdate(
+      req.params.id,
+      { $set: updateFields },
+      { new: true, runValidators: true }
+    );
 
     // Notify class students if status is updated to something other than Drafting
-    if (req.body.status && req.body.status !== 'Drafting' && oldStatus !== req.body.status) {
+    if (updateFields.status && updateFields.status !== 'Drafting' && oldStatus !== updateFields.status) {
       const io = getIO();
       if (io) {
         io.to(updated.class_level).emit('new_study_material', {
@@ -187,7 +230,6 @@ router.delete('/:id', protect, authorize('SuperAdmin', 'Teacher'), async (req, r
     }
 
     await deleteFromCloud(material.file_url);
-
     await StudyMaterial.findByIdAndDelete(req.params.id);
 
     res.json({ success: true, message: 'Study material deleted successfully' });

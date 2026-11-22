@@ -1,20 +1,14 @@
 import React, { useEffect, useState } from 'react';
 import axios from 'axios';
-import ClassTimetable from '../components/ClassTimetable';
 import { 
   Settings, 
   CheckCircle, 
   AlertTriangle, 
-  Calendar, 
-  User, 
-  Clock, 
   Activity, 
   TrendingUp,
   Mail,
   GraduationCap,
-  Trash2,
-  X,
-  Plus
+  Trash2
 } from 'lucide-react';
 
 const normalizeChapterName = (name) => {
@@ -44,18 +38,6 @@ const normalizeChapterName = (name) => {
 const AutomationsPanel = () => {
   const [loading, setLoading] = useState(true);
   const [progressData, setProgressData] = useState([]);
-  
-  // Timetable State
-  const [timetable, setTimetable] = useState([]);
-  const [loadingTimetable, setLoadingTimetable] = useState(false);
-
-  // Edit Timetable State
-  const [showTimetableModal, setShowTimetableModal] = useState(false);
-  const [editingDay, setEditingDay] = useState('Monday');
-  const [tempSlots, setTempSlots] = useState([]);
-  const [savingTimetable, setSavingTimetable] = useState(false);
-  const [timetableError, setTimetableError] = useState('');
-  const [timetableSuccess, setTimetableSuccess] = useState('');
 
   // Selected class for syllabus tracking
   const [syllabusClass, setSyllabusClass] = useState('');
@@ -236,70 +218,6 @@ const AutomationsPanel = () => {
     }
   };
 
-  // Sync temp slots when day is changed
-  useEffect(() => {
-    const dayData = timetable.find(t => t.day === editingDay);
-    if (dayData) {
-      setTempSlots(JSON.parse(JSON.stringify(dayData.slots)));
-    } else {
-      setTempSlots([]);
-    }
-  }, [editingDay, timetable, showTimetableModal]);
-
-  const fetchTimetable = async () => {
-    setLoadingTimetable(true);
-    try {
-      const res = await axios.get('/api/timetable');
-      if (res.data.success) {
-        setTimetable(res.data.data);
-      }
-    } catch (err) {
-      console.error('Failed to fetch timetable:', err);
-    } finally {
-      setLoadingTimetable(false);
-    }
-  };
-
-  const handleAddTempSlot = () => {
-    setTempSlots([...tempSlots, { time: '09:00 AM', subject: 'New Subject', teacher: 'Educator Name', grade: classes[0] || '' }]);
-  };
-
-  const handleRemoveTempSlot = (index) => {
-    setTempSlots(tempSlots.filter((_, idx) => idx !== index));
-  };
-
-  const handleTempSlotChange = (index, field, value) => {
-    const updated = [...tempSlots];
-    updated[index][field] = value;
-    setTempSlots(updated);
-  };
-
-  const handleSaveTimetable = async (e) => {
-    e.preventDefault();
-    setTimetableError('');
-    setTimetableSuccess('');
-    setSavingTimetable(true);
-
-    try {
-      const updatedTimetable = timetable.map(t => {
-        if (t.day === editingDay) {
-          return { ...t, slots: tempSlots };
-        }
-        return t;
-      });
-
-      const res = await axios.put('/api/timetable', { data: updatedTimetable });
-      if (res.data.success) {
-        setTimetable(res.data.data);
-        setTimetableSuccess(`Timetable for ${editingDay} updated successfully!`);
-      }
-    } catch (err) {
-      setTimetableError(err.response?.data?.message || 'Failed to save timetable');
-    } finally {
-      setSavingTimetable(false);
-    }
-  };
-
   // All state declarations consolidated at the top of the component
 
   const fetchSystemMetrics = async () => {
@@ -404,7 +322,6 @@ const AutomationsPanel = () => {
     };
     fetchClasses();
     fetchSystemMetrics();
-    fetchTimetable();
     fetchStudentsList();
   }, []);
 
@@ -442,7 +359,7 @@ const AutomationsPanel = () => {
     }
 
     try {
-      const res = await axios.delete(`/api/classes/${className}`);
+      const res = await axios.delete(`/api/classes/${encodeURIComponent(className)}`);
       if (res.data.success) {
         setClassSuccess(res.data.message || `Class ${className} deleted successfully!`);
         // Re-fetch classes
@@ -466,7 +383,9 @@ const AutomationsPanel = () => {
       setLoading(true);
       try {
         // Fetch subjects dynamically class-wise
-        const subjectsRes = syllabusClass ? await axios.get(`/api/subjects?class_level=${syllabusClass}`) : { data: { success: true, data: [] } };
+        const subjectsRes = syllabusClass
+          ? await axios.get('/api/subjects', { params: { class_level: syllabusClass } })
+          : { data: { success: true, data: [] } };
         const subjectsData = subjectsRes.data.success && Array.isArray(subjectsRes.data.data)
           ? subjectsRes.data.data
           : [];
@@ -918,7 +837,15 @@ const AutomationsPanel = () => {
                 <label className="block text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Target Class (Next Class)</label>
                 <select
                   value={promoTargetClass}
-                  onChange={(e) => setPromoTargetClass(e.target.value)}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setPromoTargetClass(val);
+                    if (val === 'GRADUATED') {
+                      setPromoStatus('Graduated');
+                    } else if (promoStatus === 'Graduated') {
+                      setPromoStatus('Promoted');
+                    }
+                  }}
                   className="w-full max-w-md px-3.5 py-2.5 rounded-xl bg-dark-900 border border-dark-850 focus:border-primary-500 text-white text-xs outline-none transition cursor-pointer"
                 >
                   <option value="" disabled>-- Select Target Class --</option>
@@ -935,7 +862,15 @@ const AutomationsPanel = () => {
                   <label className="block text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Promotion Decision</label>
                   <select
                     value={promoStatus}
-                    onChange={(e) => setPromoStatus(e.target.value)}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setPromoStatus(val);
+                      if (val === 'Graduated') {
+                        setPromoTargetClass('GRADUATED');
+                      } else if (promoTargetClass === 'GRADUATED') {
+                        setPromoTargetClass(classes[1] || classes[0] || '');
+                      }
+                    }}
                     className="w-full px-3.5 py-2.5 rounded-xl bg-dark-900 border border-dark-850 focus:border-primary-500 text-white text-xs outline-none transition cursor-pointer"
                   >
                     <option value="Promoted">Promoted (Advances to Next Class)</option>
@@ -1013,17 +948,17 @@ const AutomationsPanel = () => {
                 </div>
                 <div className="flex justify-between p-2.5 rounded-lg bg-dark-900 border border-dark-850">
                   <span className="text-slate-500">SMTP Nodemailer</span>
-                  <span className={`font-bold ${systemMetrics.mailerStatus.includes('Operational') ? 'text-emerald-400' : 'text-amber-400'}`}>
-                    {systemMetrics.mailerStatus.split(' ')[0]}
+                  <span className={`font-bold ${systemMetrics?.mailerStatus?.includes('Operational') ? 'text-emerald-400' : 'text-amber-400'}`}>
+                    {systemMetrics?.mailerStatus?.split(' ')[0] || 'Unknown'}
                   </span>
                 </div>
                 <div className="flex justify-between p-2.5 rounded-lg bg-dark-900 border border-dark-850">
                   <span className="text-slate-500">Node / Platform</span>
-                  <span className="font-mono text-slate-300">{systemMetrics.nodeVersion} ({systemMetrics.platform})</span>
+                  <span className="font-mono text-slate-300">{systemMetrics?.nodeVersion || 'N/A'} ({systemMetrics?.platform || 'N/A'})</span>
                 </div>
                 <div className="flex justify-between p-2.5 rounded-lg bg-dark-900 border border-dark-850">
                   <span className="text-slate-500">Memory Usage / Uptime</span>
-                  <span className="font-mono text-slate-300">{systemMetrics.memory.usage} ({systemMetrics.uptime})</span>
+                  <span className="font-mono text-slate-300">{systemMetrics?.memory?.usage || 'N/A'} ({systemMetrics?.uptime || 'N/A'})</span>
                 </div>
                 
                 {/* Stats indicators grid */}
@@ -1191,11 +1126,13 @@ const AutomationsPanel = () => {
                     </div>
                     <div className="space-y-1 text-slate-400 text-[10px]">
                       <div><span className="text-slate-500 font-semibold">Parent:</span> {log.parentName}</div>
-                      <div><span className="text-slate-500 font-semibold">Email:</span> {log.email}</div>
+                      <div><span className="text-slate-500 font-semibold">Email:</span> {log.email || 'Not configured'}</div>
                       <div><span className="text-slate-500 font-semibold">WhatsApp:</span> {log.phone}</div>
                       <div className="flex justify-between items-center mt-2 pt-2 border-t border-dark-800/80">
                         <div className="flex gap-2 font-mono text-[9px]">
-                          <span className="text-emerald-400">Email: Dispatched</span>
+                          <span className={log.email ? 'text-emerald-400' : 'text-amber-400'}>
+                            {log.email ? 'Email: Dispatched' : 'Email: Skipped (No email)'}
+                          </span>
                           <span className="text-slate-500">|</span>
                           <span className="text-teal-400">WhatsApp: Ready</span>
                         </div>

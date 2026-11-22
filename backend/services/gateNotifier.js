@@ -2,6 +2,7 @@ import User from '../models/User.js';
 import GateEntryLog from '../models/GateEntryLog.js';
 import { sendEmail } from './mailService.js';
 import { getIO } from '../config/socket.js';
+import { escapeHtml } from '../utils/html.js';
 
 const formatDuration = (mins) => {
   if (mins === null || mins === undefined || mins < 0) return '';
@@ -78,6 +79,8 @@ export const dispatchGateNotification = async ({ logDoc, student, time12Str, dat
 
   // 2. Instant Mobile App / Web Push Notification via Socket.IO
   if (io) {
+    const userRoom = `USER_${student._id}`;
+    const hasConnectedClient = (io.sockets?.adapter?.rooms?.get(userRoom)?.size || 0) > 0;
     const noticePayload = {
       subject,
       body: plainMessage,
@@ -86,8 +89,8 @@ export const dispatchGateNotification = async ({ logDoc, student, time12Str, dat
       event_type: logDoc.event_type,
       timestamp: logDoc.timestamp
     };
-    io.to(`USER_${student._id}`).emit('new_notice', noticePayload);
-    pushSent = true;
+    io.to(userRoom).emit('new_notice', noticePayload);
+    pushSent = hasConnectedClient;
   }
 
   // 3. Instant Parent Email via existing mailService (Brevo in prod / SMTP in dev)
@@ -104,6 +107,16 @@ export const dispatchGateNotification = async ({ logDoc, student, time12Str, dat
       const accentColor = isEntry ? '#10b981' : '#f59e0b';
       const badgeLabel = isEntry ? 'CAMPUS ENTRY' : 'CAMPUS EXIT';
 
+      const safeParentName = escapeHtml(parentName);
+      const safeStudentName = escapeHtml(student.name);
+      const safeClassLevel = escapeHtml(student.class_level);
+      const safeRollNumber = escapeHtml(student.roll_number);
+      const safeActionWord = escapeHtml(actionWord);
+      const safeEventType = escapeHtml(logDoc.event_type);
+      const safeTime = escapeHtml(time12Str);
+      const safeDate = escapeHtml(dateStr);
+      const safeDuration = escapeHtml(formatDuration(logDoc.duration_minutes));
+
       await sendEmail({
         from: '"EduStride Gate Security" <admin@edustride.com>',
         to: emailTo,
@@ -116,28 +129,28 @@ export const dispatchGateNotification = async ({ logDoc, student, time12Str, dat
               <h2 style="color: #1e293b; margin: 10px 0 0 0; font-size: 20px;">EduStride Biometric Gate Alert</h2>
             </div>
 
-            <p style="font-size: 14px; margin: 0 0 12px 0;">Dear <strong>${parentName}</strong>,</p>
+            <p style="font-size: 14px; margin: 0 0 12px 0;">Dear <strong>${safeParentName}</strong>,</p>
             <p style="font-size: 14px; line-height: 1.6; color: #334155; margin: 0 0 18px 0;">
-              This is an automated biometric notification confirming that <strong>${student.name}</strong> has <strong>${actionWord}</strong> the campus.
+              This is an automated biometric notification confirming that <strong>${safeStudentName}</strong> has <strong>${safeActionWord}</strong> the campus.
             </p>
 
             <table style="width: 100%; border-collapse: collapse; background: #f8fafc; border-radius: 10px; overflow: hidden; font-size: 13px; margin-bottom: 18px;">
               <tr>
                 <td style="padding: 10px 14px; color: #64748b; border-bottom: 1px solid #e2e8f0;">Student</td>
-                <td style="padding: 10px 14px; font-weight: bold; color: #0f172a; border-bottom: 1px solid #e2e8f0;">${student.name} (Class ${student.class_level}, Roll ${student.roll_number})</td>
+                <td style="padding: 10px 14px; font-weight: bold; color: #0f172a; border-bottom: 1px solid #e2e8f0;">${safeStudentName} (Class ${safeClassLevel}, Roll ${safeRollNumber})</td>
               </tr>
               <tr>
                 <td style="padding: 10px 14px; color: #64748b; border-bottom: 1px solid #e2e8f0;">Event</td>
-                <td style="padding: 10px 14px; font-weight: bold; color: ${accentColor}; border-bottom: 1px solid #e2e8f0;">${logDoc.event_type}</td>
+                <td style="padding: 10px 14px; font-weight: bold; color: ${accentColor}; border-bottom: 1px solid #e2e8f0;">${safeEventType}</td>
               </tr>
               <tr>
                 <td style="padding: 10px 14px; color: #64748b; border-bottom: 1px solid #e2e8f0;">Date &amp; Time (IST)</td>
-                <td style="padding: 10px 14px; font-weight: bold; color: #0f172a; border-bottom: 1px solid #e2e8f0;">${time12Str} &bull; ${dateStr}</td>
+                <td style="padding: 10px 14px; font-weight: bold; color: #0f172a; border-bottom: 1px solid #e2e8f0;">${safeTime} &bull; ${safeDate}</td>
               </tr>
               ${!isEntry && logDoc.duration_minutes !== null ? `
               <tr>
                 <td style="padding: 10px 14px; color: #64748b;">Campus Duration</td>
-                <td style="padding: 10px 14px; font-weight: bold; color: #0f172a;">${formatDuration(logDoc.duration_minutes)}</td>
+                <td style="padding: 10px 14px; font-weight: bold; color: #0f172a;">${safeDuration}</td>
               </tr>` : ''}
             </table>
 
@@ -177,7 +190,8 @@ export const dispatchGateNotification = async ({ logDoc, student, time12Str, dat
           date: dateStr,
           duration_minutes: logDoc.duration_minutes,
           message: plainMessage
-        })
+        }),
+        signal: AbortSignal.timeout(15000)
       });
       if (resp.ok) smsSent = true;
     } catch (err) {

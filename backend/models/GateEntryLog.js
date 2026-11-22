@@ -16,6 +16,13 @@ const gateEntryLogSchema = new mongoose.Schema({
     type: Number,
     default: null
   },
+  scan_id: {
+    type: String
+  },
+  confidence: {
+    type: Number,
+    default: null
+  },
   date: {
     type: String, // YYYY-MM-DD in IST
     required: true
@@ -60,5 +67,6 @@ const gateEntryLogSchema = new mongoose.Schema({
 
 gateEntryLogSchema.index({ date: -1, timestamp: -1 });
 gateEntryLogSchema.index({ student: 1, date: 1, timestamp: -1 });
+gateEntryLogSchema.index({ scan_id: 1 }, { unique: true, sparse: true });
 
 export default mongoose.model('GateEntryLog', gateEntryLogSchema);

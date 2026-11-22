@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import axios from 'axios';
 import { useAuth } from '../context/AuthContext';
 import { useNavigate } from 'react-router-dom';
+import { getTodayIST } from '../utils/istDate';
 import {
   ResponsiveContainer,
   BarChart,
@@ -64,6 +65,23 @@ const SpecialBatchesPanel = () => {
   const [successMsg, setSuccessMsg] = useState('');
 
   const workbenchRef = useRef(null);
+  const timersRef = useRef(new Set());
+
+  const scheduleTimeout = (fn, delay) => {
+    const id = setTimeout(() => {
+      timersRef.current.delete(id);
+      fn();
+    }, delay);
+    timersRef.current.add(id);
+    return id;
+  };
+
+  useEffect(() => {
+    return () => {
+      timersRef.current.forEach((id) => clearTimeout(id));
+      timersRef.current.clear();
+    };
+  }, []);
 
   // Selected Batch Detail Workbench
   const [selectedBatchId, setSelectedBatchId] = useState(null);
@@ -74,7 +92,7 @@ const SpecialBatchesPanel = () => {
   const handleSelectBatch = (id) => {
     setSelectedBatchId(id);
     if (typeof window !== 'undefined' && window.innerWidth < 1024 && workbenchRef.current) {
-      setTimeout(() => {
+      scheduleTimeout(() => {
         workbenchRef.current?.scrollIntoView({ behavior: 'smooth' });
       }, 100);
     }
@@ -121,7 +139,7 @@ const SpecialBatchesPanel = () => {
   });
 
   // Form states for Attendance Register
-  const [attendanceDate, setAttendanceDate] = useState(new Date().toISOString().substring(0, 10));
+  const [attendanceDate, setAttendanceDate] = useState(getTodayIST());
   const [attendanceSession, setAttendanceSession] = useState('Session 1');
   const [attendanceMap, setAttendanceMap] = useState({}); // studentId -> 'Present' | 'Absent' | 'Late' | 'Excused'
   const [attendanceRemarksMap, setAttendanceRemarksMap] = useState({}); // studentId -> remark
@@ -132,7 +150,7 @@ const SpecialBatchesPanel = () => {
     subject: '',
     total_marks: 100,
     passing_marks: 40,
-    date: new Date().toISOString().substring(0, 10),
+    date: getTodayIST(),
     scores: {} // studentId -> marks_obtained
   });
 
@@ -200,7 +218,7 @@ const SpecialBatchesPanel = () => {
   const fetchStudents = async () => {
     if (!canManage) return;
     try {
-      const res = await axios.get('/api/students?limit=500');
+      const res = await axios.get('/api/students?limit=1000');
       if (res.data.success) {
         setStudentsList(res.data.data);
       }
@@ -361,7 +379,7 @@ const SpecialBatchesPanel = () => {
   const filteredBatches = useMemo(() => {
     return batches.filter(batch => {
       if (activeFilterTab === 'My' && user?.role === 'Teacher') {
-        if (batch.instructor?._id !== user._id) return false;
+        if (String(batch.instructor?._id || batch.instructor) !== String(user.id || user._id)) return false;
       }
       if (activeFilterTab === 'Active' && batch.status !== 'Active') return false;
       if (activeFilterTab === 'Archived' && batch.status !== 'Archived') return false;
@@ -416,7 +434,15 @@ const SpecialBatchesPanel = () => {
       setSubmitting(true);
       setError('');
       if (editingBatch) {
-        const res = await axios.put(`/api/special-batches/${editingBatch._id}`, batchForm);
+        // Send ONLY editable metadata on edit so we never overwrite students or schedule with stale sidebar data
+        const editPayload = {
+          name: batchForm.name,
+          subject: batchForm.subject,
+          description: batchForm.description,
+          batch_fee: Number(batchForm.batch_fee) || 0,
+          status: batchForm.status
+        };
+        const res = await axios.put(`/api/special-batches/${editingBatch._id}`, editPayload);
         if (res.data.success) {
           setSuccessMsg('Special batch updated successfully!');
           fetchBatches();
@@ -436,7 +462,7 @@ const SpecialBatchesPanel = () => {
       setError(err.response?.data?.message || 'Failed to save special batch');
     } finally {
       setSubmitting(false);
-      setTimeout(() => setSuccessMsg(''), 4000);
+      scheduleTimeout(() => setSuccessMsg(''), 4000);
     }
   };
 
@@ -466,10 +492,16 @@ const SpecialBatchesPanel = () => {
     try {
       if (isEnrolled) {
         const res = await axios.delete(`/api/special-batches/${selectedBatchDetails._id}/students/${studentId}`);
-        if (res.data.success) fetchBatchDetails(selectedBatchDetails._id);
+        if (res.data.success) {
+          fetchBatchDetails(selectedBatchDetails._id);
+          fetchBatches();
+        }
       } else {
         const res = await axios.post(`/api/special-batches/${selectedBatchDetails._id}/students`, { studentIds: [studentId] });
-        if (res.data.success) fetchBatchDetails(selectedBatchDetails._id);
+        if (res.data.success) {
+          fetchBatchDetails(selectedBatchDetails._id);
+          fetchBatches();
+        }
       }
     } catch (err) {
       console.error('Failed to update student enrollment:', err);
@@ -496,6 +528,7 @@ const SpecialBatchesPanel = () => {
       if (res.data.success) {
         setSuccessMsg('Handout material added to batch!');
         fetchBatchDetails(selectedBatchDetails._id);
+        fetchBatches();
         setShowAddLessonModal(false);
         setLessonForm({ title: '', subject: '', chapter_name: '', content: '', workflow_stage: 'Notes Distributed', file: null });
       }
@@ -503,7 +536,7 @@ const SpecialBatchesPanel = () => {
       setError(err.response?.data?.message || 'Failed to add lesson material');
     } finally {
       setSubmitting(false);
-      setTimeout(() => setSuccessMsg(''), 4000);
+      scheduleTimeout(() => setSuccessMsg(''), 4000);
     }
   };
 
@@ -513,7 +546,10 @@ const SpecialBatchesPanel = () => {
     if (!window.confirm('Delete this study material handout?')) return;
     try {
       const res = await axios.delete(`/api/special-batches/${selectedBatchDetails._id}/extra-lessons/${lessonId}`);
-      if (res.data.success) fetchBatchDetails(selectedBatchDetails._id);
+      if (res.data.success) {
+        fetchBatchDetails(selectedBatchDetails._id);
+        fetchBatches();
+      }
     } catch (err) {
       console.error('Failed to delete lesson:', err);
     }
@@ -546,7 +582,7 @@ const SpecialBatchesPanel = () => {
       setError(err.response?.data?.message || 'Failed to save attendance');
     } finally {
       setSubmitting(false);
-      setTimeout(() => setSuccessMsg(''), 4000);
+      scheduleTimeout(() => setSuccessMsg(''), 4000);
     }
   };
 
@@ -560,14 +596,14 @@ const SpecialBatchesPanel = () => {
         .filter(std => std && std._id)
         .map(std => ({
           student: std._id,
-          marks_obtained: Number((testForm.scores && testForm.scores[std._id]) || 0)
+          marks_obtained: Number(testForm.scores?.[std._id]) || 0
         }));
 
       const res = await axios.post(`/api/special-batches/${selectedBatchDetails._id}/test-scores`, {
         test_name: testForm.test_name,
         subject: testForm.subject || selectedBatchDetails.subject,
-        total_marks: Number(testForm.total_marks || 100),
-        passing_marks: Number(testForm.passing_marks || 40),
+        total_marks: Number(testForm.total_marks) || 100,
+        passing_marks: Number(testForm.passing_marks) || 40,
         date: testForm.date,
         scores: scoresPayload
       });
@@ -581,7 +617,7 @@ const SpecialBatchesPanel = () => {
       setError(err.response?.data?.message || 'Failed to save exam test scores');
     } finally {
       setSubmitting(false);
-      setTimeout(() => setSuccessMsg(''), 4000);
+      scheduleTimeout(() => setSuccessMsg(''), 4000);
     }
   };
 
@@ -614,13 +650,14 @@ const SpecialBatchesPanel = () => {
       if (res.data.success) {
         setSuccessMsg('Schedule slot added to batch timetable!');
         fetchBatchDetails(selectedBatchDetails._id);
+        fetchBatches();
         setShowAddScheduleModal(false);
       }
     } catch (err) {
       setError('Failed to update timetable schedule');
     } finally {
       setSubmitting(false);
-      setTimeout(() => setSuccessMsg(''), 4000);
+      scheduleTimeout(() => setSuccessMsg(''), 4000);
     }
   };
 
@@ -640,6 +677,7 @@ const SpecialBatchesPanel = () => {
           if (res.data.success) {
             setSuccessMsg('Schedule slot removed successfully!');
             fetchBatchDetails(selectedBatchDetails._id);
+            fetchBatches();
             return;
           }
         } catch (err) {
@@ -664,12 +702,13 @@ const SpecialBatchesPanel = () => {
       if (res.data.success) {
         setSuccessMsg('Schedule slot removed successfully!');
         fetchBatchDetails(selectedBatchDetails._id);
+        fetchBatches();
       }
     } catch (err) {
       setError(err.response?.data?.message || 'Failed to remove timetable schedule slot');
     } finally {
       setSubmitting(false);
-      setTimeout(() => setSuccessMsg(''), 4000);
+      scheduleTimeout(() => setSuccessMsg(''), 4000);
     }
   };
 
@@ -687,7 +726,7 @@ const SpecialBatchesPanel = () => {
       setError(err.response?.data?.message || 'Failed to send progress reports');
     } finally {
       setSubmitting(false);
-      setTimeout(() => setSuccessMsg(''), 5000);
+      scheduleTimeout(() => setSuccessMsg(''), 5000);
     }
   };
 
@@ -717,7 +756,7 @@ const SpecialBatchesPanel = () => {
     return selectedBatchDetails.test_scores.map(ts => {
       let sumPct = 0;
       ts.scores?.forEach(sc => {
-        sumPct += (sc.marks_obtained / ts.total_marks) * 100;
+        sumPct += ts.total_marks > 0 ? (sc.marks_obtained / ts.total_marks) * 100 : 0;
       });
       const avgPct = ts.scores?.length > 0 ? (sumPct / ts.scores.length).toFixed(1) : 0;
       return {
@@ -1391,80 +1430,80 @@ const SpecialBatchesPanel = () => {
                             </div>
                           )}
                         </div>
-                      </>
-                    )}
 
-                    {/* Attendance Register Matrix Table */}
-                    <div className="overflow-x-auto rounded-2xl border border-dark-800/80">
-                      <table className="w-full text-left text-xs min-w-[600px]">
-                        <thead className="bg-dark-900/80 text-slate-400 uppercase font-mono text-[10px] border-b border-dark-800">
-                          <tr>
-                            <th className="p-3">Student Name</th>
-                            <th className="p-3">Class Grade</th>
-                            <th className="p-3">Attendance Status</th>
-                            <th className="p-3">Remarks</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-dark-850/60">
-                          {!selectedBatchDetails.students || selectedBatchDetails.students.length === 0 ? (
-                            <tr>
-                              <td colSpan="4" className="p-6 text-center text-slate-500">
-                                No students enrolled to log attendance.
-                              </td>
-                            </tr>
-                          ) : (
-                            selectedBatchDetails.students
-                              .filter(std => std && std._id)
-                              .map(std => {
-                              const currentStatus = attendanceMap[std._id] || 'Present';
-                              return (
-                                <tr key={std._id} className="hover:bg-dark-900/40 transition">
-                                  <td className="p-3 font-bold text-white">{std.name}</td>
-                                  <td className="p-3 font-mono text-slate-400">Class {std.class_level}</td>
-                                  <td className="p-3">
-                                    <div className="flex items-center gap-1.5">
-                                      {['Present', 'Absent', 'Late', 'Excused'].map(st => {
-                                        const isSelected = currentStatus === st;
-                                        let activeStyle = '';
-                                        if (st === 'Present') activeStyle = 'bg-emerald-500 text-white font-bold';
-                                        else if (st === 'Absent') activeStyle = 'bg-rose-500 text-white font-bold';
-                                        else if (st === 'Late') activeStyle = 'bg-amber-500 text-white font-bold';
-                                        else if (st === 'Excused') activeStyle = 'bg-indigo-500 text-white font-bold';
-
-                                        return (
-                                          <button
-                                            key={st}
-                                            disabled={!canManage}
-                                            onClick={() => setAttendanceMap(prev => ({ ...prev, [std._id]: st }))}
-                                            className={`px-2.5 py-1 rounded-lg text-[10px] transition cursor-pointer border ${
-                                              isSelected
-                                                ? activeStyle
-                                                : 'bg-dark-950/60 text-slate-400 border-dark-800 hover:text-white'
-                                            }`}
-                                          >
-                                            {st}
-                                          </button>
-                                        );
-                                      })}
-                                    </div>
-                                  </td>
-                                  <td className="p-3">
-                                    <input
-                                      type="text"
-                                      disabled={!canManage}
-                                      placeholder="Optional remarks..."
-                                      value={attendanceRemarksMap[std._id] || ''}
-                                      onChange={(e) => setAttendanceRemarksMap(prev => ({ ...prev, [std._id]: e.target.value }))}
-                                      className="bg-dark-950 border border-dark-800 rounded-lg px-2.5 py-1 text-xs text-white outline-none w-48"
-                                    />
+                        {/* Staff Attendance Register Matrix Table (Hidden from Students) */}
+                        <div className="overflow-x-auto rounded-2xl border border-dark-800/80">
+                          <table className="w-full text-left text-xs min-w-[600px]">
+                            <thead className="bg-dark-900/80 text-slate-400 uppercase font-mono text-[10px] border-b border-dark-800">
+                              <tr>
+                                <th className="p-3">Student Name</th>
+                                <th className="p-3">Class Grade</th>
+                                <th className="p-3">Attendance Status</th>
+                                <th className="p-3">Remarks</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-dark-850/60">
+                              {!selectedBatchDetails.students || selectedBatchDetails.students.length === 0 ? (
+                                <tr>
+                                  <td colSpan="4" className="p-6 text-center text-slate-500">
+                                    No students enrolled to log attendance.
                                   </td>
                                 </tr>
-                              );
-                            })
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
+                              ) : (
+                                selectedBatchDetails.students
+                                  .filter(std => std && std._id)
+                                  .map(std => {
+                                  const currentStatus = attendanceMap[std._id] || 'Present';
+                                  return (
+                                    <tr key={std._id} className="hover:bg-dark-900/40 transition">
+                                      <td className="p-3 font-bold text-white">{std.name}</td>
+                                      <td className="p-3 font-mono text-slate-400">Class {std.class_level}</td>
+                                      <td className="p-3">
+                                        <div className="flex items-center gap-1.5">
+                                          {['Present', 'Absent', 'Late', 'Excused'].map(st => {
+                                            const isSelected = currentStatus === st;
+                                            let activeStyle = '';
+                                            if (st === 'Present') activeStyle = 'bg-emerald-500 text-white font-bold';
+                                            else if (st === 'Absent') activeStyle = 'bg-rose-500 text-white font-bold';
+                                            else if (st === 'Late') activeStyle = 'bg-amber-500 text-white font-bold';
+                                            else if (st === 'Excused') activeStyle = 'bg-indigo-500 text-white font-bold';
+
+                                            return (
+                                              <button
+                                                key={st}
+                                                disabled={!canManage}
+                                                onClick={() => setAttendanceMap(prev => ({ ...prev, [std._id]: st }))}
+                                                className={`px-2.5 py-1 rounded-lg text-[10px] transition cursor-pointer border ${
+                                                  isSelected
+                                                    ? activeStyle
+                                                    : 'bg-dark-950/60 text-slate-400 border-dark-800 hover:text-white'
+                                                }`}
+                                              >
+                                                {st}
+                                              </button>
+                                            );
+                                          })}
+                                        </div>
+                                      </td>
+                                      <td className="p-3">
+                                        <input
+                                          type="text"
+                                          disabled={!canManage}
+                                          placeholder="Optional remarks..."
+                                          value={attendanceRemarksMap[std._id] || ''}
+                                          onChange={(e) => setAttendanceRemarksMap(prev => ({ ...prev, [std._id]: e.target.value }))}
+                                          className="bg-dark-950 border border-dark-800 rounded-lg px-2.5 py-1 text-xs text-white outline-none w-48"
+                                        />
+                                      </td>
+                                    </tr>
+                                  );
+                                })
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+                      </>
+                    )}
                   </div>
                 )}
 
@@ -1496,7 +1535,9 @@ const SpecialBatchesPanel = () => {
                       ) : (
                         selectedBatchDetails.test_scores.map(ts => {
                           let sumPct = 0;
-                          ts.scores?.forEach(sc => sumPct += (sc.marks_obtained / ts.total_marks) * 100);
+                          ts.scores?.forEach(sc => {
+                            sumPct += ts.total_marks > 0 ? (sc.marks_obtained / ts.total_marks) * 100 : 0;
+                          });
                           const classAvgPct = ts.scores?.length > 0 ? (sumPct / ts.scores.length).toFixed(1) : 0;
 
                           return (
@@ -1537,8 +1578,8 @@ const SpecialBatchesPanel = () => {
                                   const stdName = sc.student?.name || 'Student';
                                   const stdId = sc.student?._id || sc.student;
                                   const isMe = currentStudentId && stdId?.toString() === currentStudentId.toString();
-                                  const pct = ((sc.marks_obtained / ts.total_marks) * 100).toFixed(1);
-                                  const badge = getGradeBadge(pct);
+                                  const pct = ts.total_marks > 0 ? ((sc.marks_obtained / ts.total_marks) * 100).toFixed(1) : '0.0';
+                                  const badge = getGradeBadge(Number(pct));
 
                                   return (
                                     <div
@@ -1551,7 +1592,7 @@ const SpecialBatchesPanel = () => {
                                     >
                                       <div className="flex items-center gap-1.5 truncate">
                                         <span className="text-slate-200 font-medium truncate">{stdName}</span>
-                                        {isMe && <span className="text-[8px] font-extrabold px-1 py-0.2 rounded bg-primary-500 text-white font-mono uppercase shrink-0">YOU</span>}
+                                        {isMe && <span className="text-[8px] font-extrabold px-1 py-0.5 rounded bg-primary-500 text-white font-mono uppercase shrink-0">YOU</span>}
                                       </div>
                                       <div className="flex items-center gap-1.5 shrink-0">
                                         <span className="font-mono font-bold text-white">{sc.marks_obtained}/{ts.total_marks}</span>
@@ -1785,6 +1826,20 @@ const SpecialBatchesPanel = () => {
                     />
                   </div>
                 </div>
+
+                {editingBatch && (
+                  <div>
+                    <label className="text-xs font-bold text-slate-300 block mb-1">Batch Status</label>
+                    <select
+                      value={batchForm.status}
+                      onChange={(e) => setBatchForm(prev => ({ ...prev, status: e.target.value }))}
+                      className="w-full bg-dark-950 border border-dark-800 rounded-xl px-3.5 py-2.5 text-xs text-white outline-none focus:border-primary-500"
+                    >
+                      <option value="Active">Active</option>
+                      <option value="Archived">Archived</option>
+                    </select>
+                  </div>
+                )}
 
                 <div>
                   <label className="text-xs font-bold text-slate-300 block mb-1">Description</label>
@@ -2054,10 +2109,13 @@ const SpecialBatchesPanel = () => {
                             type="number"
                             min="0"
                             max={testForm.total_marks}
-                            value={(testForm.scores && testForm.scores[std._id]) || 0}
+                            value={testForm.scores?.[std._id] ?? ''}
                             onChange={(e) => setTestForm(prev => ({
                               ...prev,
-                              scores: { ...(prev.scores || {}), [std._id]: Number(e.target.value) }
+                              scores: {
+                                ...(prev.scores || {}),
+                                [std._id]: e.target.value === '' ? '' : Number(e.target.value)
+                              }
                             }))}
                             className="w-20 bg-dark-900 border border-dark-800 rounded-lg px-2.5 py-1 text-xs text-white text-right font-mono outline-none focus:border-primary-500"
                           />

@@ -71,35 +71,48 @@ export const uploadToCloud = async (localFilePath, folderName = 'general') => {
  * @param {string} fileUrl - The URL of the file to delete
  */
 export const deleteFromCloud = async (fileUrl) => {
-  if (!fileUrl) return;
+  if (!fileUrl || typeof fileUrl !== 'string') return;
 
-  if (fileUrl.includes('cloudinary.com')) {
+  let parsedUrl = null;
+  if (/^https?:\/\//i.test(fileUrl)) {
+    try {
+      parsedUrl = new URL(fileUrl);
+    } catch {
+      return;
+    }
+  }
+
+  if (parsedUrl && parsedUrl.hostname.toLowerCase().endsWith('cloudinary.com')) {
     if (!isConfigured) return;
     try {
-      // Extract public ID from URL
-      // e.g. https://res.cloudinary.com/cloudName/image/upload/v1234567/aether_portal/avatars/img.jpg
-      // or https://res.cloudinary.com/cloudName/raw/upload/v1234567/aether_portal/handouts/file.pdf
-      const parts = fileUrl.split('/');
-      const filenameWithFolder = parts.slice(-3).join('/'); // dynamic folder + subfolder + filename
-      
-      const isRaw = fileUrl.includes('/raw/upload/');
-      let publicId;
-      const destroyOptions = {};
+      // Parse public_id from pathname after /<resource_type>/upload/(v<digits>/)?
+      const match = parsedUrl.pathname.match(/\/(image|video|raw)\/upload\/(?:v\d+\/)?(.+)$/i);
+      if (!match) {
+        console.warn(`Unable to parse Cloudinary public_id from URL: ${fileUrl}`);
+        return;
+      }
 
-      if (isRaw) {
-        publicId = filenameWithFolder;
+      const resourceType = match[1].toLowerCase();
+      const assetPath = decodeURIComponent(match[2]);
+      const destroyOptions = {};
+      let publicId = assetPath;
+
+      if (resourceType === 'raw') {
         destroyOptions.resource_type = 'raw';
       } else {
-        const dotIndex = filenameWithFolder.lastIndexOf('.');
-        publicId = dotIndex !== -1 ? filenameWithFolder.substring(0, dotIndex) : filenameWithFolder;
+        if (resourceType === 'video') {
+          destroyOptions.resource_type = 'video';
+        }
+        const dotIndex = assetPath.lastIndexOf('.');
+        publicId = dotIndex !== -1 ? assetPath.substring(0, dotIndex) : assetPath;
       }
-      
+
       await cloudinary.uploader.destroy(publicId, destroyOptions);
       console.log(`Deleted cloud asset: ${publicId}`);
     } catch (error) {
       console.error('Failed to delete cloud asset:', error);
     }
-  } else {
+  } else if (!parsedUrl) {
     // Local delete — restrict strictly inside backend/uploads
     const uploadsDir = path.resolve(__dirname, '..', 'uploads');
     const relativePath = fileUrl.replace(/^[/\\]+/, '');

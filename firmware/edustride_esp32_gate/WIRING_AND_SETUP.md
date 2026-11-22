@@ -43,9 +43,9 @@ All pins below are **safe non-strapping GPIOs** (avoiding flash pins 6–11, boo
 | **R307S Fingerprint Sensor** | Pin 2 `GND` | `GND` | Common ground |
 | **R307S Fingerprint Sensor** | Pin 3 `TXD` (Sensor Out) | `GPIO 16` (`RX2`) | UART2 RX (57600 baud, native 3.3V TTL — verify with multimeter!) |
 | **R307S Fingerprint Sensor** | Pin 4 `RXD` (Sensor In) | `GPIO 17` (`TX2`) | UART2 TX (57600 baud) |
-| **R307S Fingerprint Sensor** | Pin 5 `TOUCH` (`WAKEUP`) | `GPIO 4` | Instant hardware finger-touch trigger (zero-heat standby!) |
-| **R307S Fingerprint Sensor** | Pin 6 `3.3VT` | `3V3` | Powers internal capacitive touch IC (`<5µA`) |
-| **Buzzer** | `+` (or `I/O`) | `GPIO 25` | See protection circuit below |
+| **R307S Fingerprint Sensor** | Pin 5 `TOUCH` (`WAKEUP`) | `GPIO 4` | Instant hardware finger-touch trigger (zero-heat standby! If unwired in 4-wire mode, set `#define FP_USE_TOUCH_PIN false` in `config.h`) |
+| **R307S Fingerprint Sensor** | Pin 6 `3.3VT` | `3V3` | Powers internal capacitive touch IC (`<5µA`; only needed when `FP_USE_TOUCH_PIN` is `true`) |
+| **Buzzer** | `+` (or `I/O`) | `GPIO 25` | See protection circuit & active-LOW note below |
 | **Buzzer** | `-` (`GND`) | `GND` | Common ground |
 
 ---
@@ -54,6 +54,7 @@ All pins below are **safe non-strapping GPIOs** (avoiding flash pins 6–11, boo
 
 ### A. Buzzer Protection (ESP32 GPIO Safe Limit = 12–20mA)
 - **3-Pin Buzzer Module (`VCC`, `GND`, `I/O` with onboard transistor):** Connect `VCC → 3V3`, `GND → GND`, `I/O → GPIO 25` directly (<1mA GPIO draw — safe).
+  > **Active-LOW 3-Pin Module Warning (KY-012 / HW-508):** Many common 3-pin active buzzer boards use a PNP driver transistor and beep continuously when `GPIO 25` is `LOW`. If your buzzer stays ON when idle, set `#define BUZZER_ACTIVE_LOW true` in `config.h`.
 - **Bare 2-Pin 3.3V Piezo Buzzer:** Place a **`150Ω–220Ω` resistor** in series between `GPIO 25` and Buzzer `+`.
 - **Bare 2-Pin 5V Loud Magnetic Buzzer:** Drive via an NPN transistor (`BC547` or `2N2222`) + `1kΩ` base resistor + `1N4148` flyback diode:
   ```text
@@ -75,7 +76,8 @@ R307 TXD (5V) ── [ 1kΩ ] ──┬── ESP32 GPIO 16 (RX2, safe ~3.33V)
 
 ### C. Power Stability Recommendations (12V 48W Supply)
 - Add an optional **1A inline fuse** on the 5V buck output wire for dead-short protection (since a 48W supply can deliver 4A).
-- Add an optional **`100µF–470µF` (10V+ electrolytic) capacitor** across `3V3` and `GND` (white stripe = `GND`) to prevent brownout resets during simultaneous Wi-Fi TX + sensor LED spikes.
+- Add a **`470µF–1000µF` (10V+ electrolytic) bulk capacitor** across **`VIN` (`5V`) and `GND`** (white stripe = `GND`) right at the ESP32/R307S power junction to absorb R307S optical LED + Wi-Fi TX current transients before they dip the onboard AMS1117 regulator input.
+- Add an optional **`100µF–470µF` (10V+ electrolytic) capacitor** across `3V3` and `GND` (white stripe = `GND`) for additional 3.3V rail damping.
 
 ---
 
@@ -97,19 +99,25 @@ Before plugging in power for the very first time:
    - File → Preferences → Additional Boards Manager URLs:
      `https://espressif.github.io/arduino-esp32/package_esp32_index.json`
    - Tools → Board → Boards Manager → install **`esp32` by Espressif Systems**.
-   - Select Board: **`ESP32 Dev Module`**.
+   - Select Board: **`ESP32 Dev Module`** (for extra OTA flash headroom, set Tools → Partition Scheme → **`Minimal SPIFFS (1.9MB APP with OTA/190KB SPIFFS)`**, or pass `-PartitionScheme min_spiffs` to `flash.ps1` during initial USB-C flash).
 3. **Install Required Libraries** (Sketch → Include Library → Manage Libraries):
    - `Adafruit Fingerprint Sensor Library` (by Adafruit)
    - `Adafruit SSD1306` (by Adafruit)
    - `Adafruit GFX Library` (by Adafruit)
    - `ArduinoJson` (by Benoit Blanchon)
-4. **Configure `config.h`**:
+4. **Create & Configure `config.h`**:
+   - Copy the template file first:
+     ```powershell
+     copy config.example.h config.h
+     ```
    - Open the **EduStride Mobile App (or Web Portal)** → **Gate Scanner** → expand **ESP32 Setup Credentials**.
    - Copy `SERVER_BASE_URL`, `DEVICE_ID`, and `DEVICE_API_KEY` into `config.h`.
    - Enter your **2.4 GHz** `WIFI_SSID` and `WIFI_PASSWORD`.
-   - Set `BUZZER_IS_ACTIVE` to `true` (active buzzer) or `false` (passive buzzer).
+   - **Rotate `OTA_PASSWORD`**: Replace `"CHANGE_ME_STRONG_OTA_PASSWORD"` with a strong unique password before flashing.
+   - If you are wiring only 4 sensor wires (without Pin 5 `TOUCH` / Pin 6 `3.3VT`), set `#define FP_USE_TOUCH_PIN false`.
+   - Set `BUZZER_IS_ACTIVE` to `true` (active buzzer) or `false` (passive buzzer), and set `BUZZER_ACTIVE_LOW` to `true` if using an active-LOW 3-pin buzzer module (e.g. KY-012 / HW-508).
 5. **Flash Firmware**:
-   - Unplug the 12V adapter, connect ESP32 via USB-C, select the COM port, and click **Upload**.
-   - Open Serial Monitor at **`115200` baud** to confirm `[R307S] Sensor OK!` and `[WIFI] Connected!`.
-   - Open **Gate Scanner** in the EduStride mobile app — within 2 seconds the badge turns **ESP32 Online**!
+   - Unplug the 12V adapter, connect ESP32 via USB-C, select the COM port, and click **Upload** (or run `.\flash.ps1 -UsbPort COM3`).
+   - Open Serial Monitor at **`115200` baud** to confirm `[R307S] Sensor READY!` and `[WIFI] Connected!`.
+   - Open **Gate Scanner** in the EduStride mobile app — within **~12–18 seconds** (after Wi-Fi association, NTP clock sync, first heartbeat, and app poll) the badge turns **ESP32 Online**!
    - You can now toggle **Fingerprint Sensing ON/OFF** wirelessly and click **Enroll** next to any student to register their fingerprint right on the R307S sensor!

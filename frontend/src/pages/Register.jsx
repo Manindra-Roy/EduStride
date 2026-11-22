@@ -53,6 +53,7 @@ const Register = () => {
   const [adminNewPassword, setAdminNewPassword] = useState('');
   const [resettingPassword, setResettingPassword] = useState(false);
   const [showAdminPassword, setShowAdminPassword] = useState(false);
+  const [resetModalError, setResetModalError] = useState('');
 
   // Search queries
   const [searchTeacherQuery, setSearchTeacherQuery] = useState('');
@@ -134,7 +135,7 @@ const Register = () => {
     setError('');
     setSuccess('');
     try {
-      const res = await axios.delete(`/api/classes/${className}`);
+      const res = await axios.delete(`/api/classes/${encodeURIComponent(className)}`);
       if (res.data.success) {
         setSuccess(`Class ${className} deleted successfully!`);
         fetchClasses();
@@ -154,7 +155,7 @@ const Register = () => {
     setError('');
     setSuccess('');
     try {
-      const res = await axios.put(`/api/classes/${editingClassName}`, { newName: editNewName.trim() });
+      const res = await axios.put(`/api/classes/${encodeURIComponent(editingClassName)}`, { newName: editNewName.trim() });
       if (res.data.success) {
         setSuccess(`Successfully renamed Class ${editingClassName} to ${editNewName.trim().toUpperCase()}`);
         setEditingClassName(null);
@@ -209,9 +210,10 @@ const Register = () => {
           
           if (!res.data.initialized) {
             setRole('SuperAdmin');
-          } else if (user) {
-            if (user.role === 'SuperAdmin') setRole('Teacher');
-            else if (user.role === 'Teacher') setRole('Student');
+          } else if (user?.role === 'SuperAdmin') {
+            setRole('Teacher');
+          } else if (user?.role === 'Teacher') {
+            setRole('Student');
           }
         }
       } catch (err) {
@@ -221,14 +223,14 @@ const Register = () => {
       }
     };
     checkInitStatus();
-  }, [user]);
+  }, [user?.id, user?.role]);
 
   // Protect student role redirection
   useEffect(() => {
-    if (user && user.role === 'Student') {
+    if (user?.role === 'Student') {
       navigate('/');
     }
-  }, [user, navigate]);
+  }, [user?.id, user?.role, navigate]);
 
   const fetchTeachers = async () => {
     setLoadingTeachers(true);
@@ -246,10 +248,10 @@ const Register = () => {
   };
 
   useEffect(() => {
-    if (user && user.role === 'SuperAdmin') {
+    if (user?.role === 'SuperAdmin') {
       fetchTeachers();
     }
-  }, [user]);
+  }, [user?.id, user?.role]);
 
   const handleDeleteTeacher = async (teacherId, teacherEmail) => {
     if (!window.confirm(`Are you sure you want to delete the teacher account for ${teacherEmail}? This action cannot be undone.`)) {
@@ -289,10 +291,10 @@ const Register = () => {
 
 
   useEffect(() => {
-    if (user && (user.role === 'SuperAdmin' || user.role === 'Teacher')) {
+    if (user?.role === 'SuperAdmin' || user?.role === 'Teacher') {
       fetchStudents();
     }
-  }, [user]);
+  }, [user?.id, user?.role]);
 
   const handleUpdateStudentEmail = async (e, studentUserId) => {
     e.preventDefault();
@@ -338,6 +340,12 @@ const Register = () => {
     e.preventDefault();
     setError('');
     setSuccess('');
+
+    if (!password || password.length < 6) {
+      setError('Password must be at least 6 characters long.');
+      return;
+    }
+
     setSubmitting(true);
 
     const payload = { email, password, role };
@@ -418,10 +426,11 @@ const Register = () => {
   const handleAdminResetPassword = async (e) => {
     e.preventDefault();
     if (!adminNewPassword || adminNewPassword.length < 6) {
-      setError('New password must be at least 6 characters long.');
+      setResetModalError('New password must be at least 6 characters long.');
       return;
     }
     setResettingPassword(true);
+    setResetModalError('');
     setError('');
     setSuccess('');
     try {
@@ -432,9 +441,10 @@ const Register = () => {
         setSuccess(`Password for ${resetTargetUser.email} has been reset successfully!`);
         setResetTargetUser(null);
         setAdminNewPassword('');
+        setResetModalError('');
       }
     } catch (err) {
-      setError(err.response?.data?.message || 'Failed to reset user password');
+      setResetModalError(err.response?.data?.message || 'Failed to reset user password');
     } finally {
       setResettingPassword(false);
     }
@@ -442,9 +452,11 @@ const Register = () => {
 
   const generateRandomPassword = () => {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$';
+    const randomValues = new Uint32Array(10);
+    window.crypto.getRandomValues(randomValues);
     let rand = '';
-    for (let i = 0; i < 10; i++) {
-      rand += chars.charAt(Math.floor(Math.random() * chars.length));
+    for (let i = 0; i < randomValues.length; i++) {
+      rand += chars.charAt(randomValues[i] % chars.length);
     }
     setAdminNewPassword(rand);
     setShowAdminPassword(true);
@@ -804,7 +816,7 @@ const Register = () => {
                                       />
                                     ) : (
                                       <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-primary-600 to-indigo-400 flex items-center justify-center font-bold text-white text-xs">
-                                        {studentAccount.email[0].toUpperCase()}
+                                        {(studentAccount.email?.[0] || 'S').toUpperCase()}
                                       </div>
                                     )}
                                     <div className="flex-1">
@@ -873,6 +885,7 @@ const Register = () => {
                                           setResetTargetUser({ id: studentAccount._id, email: studentAccount.email, role: studentAccount.role });
                                           setAdminNewPassword('');
                                           setShowAdminPassword(false);
+                                          setResetModalError('');
                                           setError('');
                                           setSuccess('');
                                         }}
@@ -971,7 +984,7 @@ const Register = () => {
                                     />
                                   ) : (
                                     <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-primary-600 to-indigo-400 flex items-center justify-center font-bold text-white text-xs">
-                                      {teacher.email[0].toUpperCase()}
+                                      {(teacher.email?.[0] || 'T').toUpperCase()}
                                     </div>
                                   )}
                                   <div>
@@ -997,6 +1010,7 @@ const Register = () => {
                                       setResetTargetUser({ id: teacher._id, email: teacher.email, role: teacher.role });
                                       setAdminNewPassword('');
                                       setShowAdminPassword(false);
+                                      setResetModalError('');
                                       setError('');
                                       setSuccess('');
                                     }}
@@ -1098,6 +1112,7 @@ const Register = () => {
                       <input
                         type={showPassword ? "text" : "password"}
                         required
+                        minLength={6}
                         value={password}
                         onChange={(e) => {
                           setPassword(e.target.value);
@@ -1178,7 +1193,7 @@ const Register = () => {
                   <button
                     type="submit"
                     disabled={submitting}
-                    className="w-full mt-6 py-3 rounded-xl bg-primary-600 hover:bg-primary-500 active:bg-primary-750 text-white font-medium text-sm transition duration-150 flex items-center justify-center gap-2 shadow-lg hover:shadow-primary-500/10"
+                    className="w-full mt-6 py-3 rounded-xl bg-primary-600 hover:bg-primary-500 active:bg-primary-700 text-white font-medium text-sm transition duration-150 flex items-center justify-center gap-2 shadow-lg hover:shadow-primary-500/10"
                   >
                     {submitting ? (
                       <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
@@ -1289,7 +1304,7 @@ const Register = () => {
               </div>
               <button
                 type="button"
-                onClick={() => setResetTargetUser(null)}
+                onClick={() => { setResetTargetUser(null); setResetModalError(''); }}
                 className="text-slate-400 hover:text-white transition text-sm font-bold p-1"
               >
                 ✕
@@ -1297,6 +1312,12 @@ const Register = () => {
             </div>
 
             <div className="p-5 overflow-y-auto flex-1 overscroll-contain space-y-4">
+              {resetModalError && (
+                <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-300 text-xs font-medium animate-fadeIn">
+                  {resetModalError}
+                </div>
+              )}
+
               <div className="bg-dark-950/60 p-3.5 rounded-xl border border-dark-800 space-y-1.5 text-xs">
                 <div className="flex justify-between">
                   <span className="text-slate-400 font-medium">Target User:</span>
@@ -1345,7 +1366,7 @@ const Register = () => {
                 <div className="flex items-center justify-end gap-2 pt-3 border-t border-dark-800">
                   <button
                     type="button"
-                    onClick={() => setResetTargetUser(null)}
+                    onClick={() => { setResetTargetUser(null); setResetModalError(''); }}
                     className="px-4 py-2 rounded-xl bg-dark-800 hover:bg-dark-750 text-slate-300 font-semibold text-xs transition"
                   >
                     Cancel

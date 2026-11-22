@@ -45,9 +45,4 @@ attendanceSchema.index({ 'records.student': 1, date: -1 });
 
 const Attendance = mongoose.model('Attendance', attendanceSchema);
 
-// Sync indexes to automatically migrate old index { class_level: 1, date: 1 } to { class_level: 1, date: 1, session_name: 1 }
-Attendance.syncIndexes().catch(err => {
-  console.log('[Attendance Index Sync]:', err.message);
-});
-
 export default Attendance;

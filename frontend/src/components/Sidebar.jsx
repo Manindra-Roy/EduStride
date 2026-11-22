@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { useAuth } from '../context/AuthContext';
+import { getDisplayName } from '../utils/istDate';
 import { 
   LayoutDashboard, 
   Users, 
@@ -26,7 +27,6 @@ import { applyThemeAccent, getSavedThemeAccent, themes } from '../config/theme';
 const Sidebar = ({ isOpen, setIsOpen }) => {
   const { user, logout, updateUserProfilePic, updateUserThemeColor } = useAuth();
   const [showProfileModal, setShowProfileModal] = useState(false);
-  const [avatarFile, setAvatarFile] = useState(null);
   const [rawImageSrc, setRawImageSrc] = useState('');
   const [loadedImage, setLoadedImage] = useState(null);
   const [imageDimensions, setImageDimensions] = useState({ width: 0, height: 0 });
@@ -41,6 +41,23 @@ const Sidebar = ({ isOpen, setIsOpen }) => {
   const [activeTheme, setActiveTheme] = useState(user?.theme_color || getSavedThemeAccent());
   const [systemDefaultTheme, setSystemDefaultTheme] = useState('indigo');
   const navigate = useNavigate();
+  const rawImageSrcRef = useRef('');
+  const passwordTimerRef = useRef(null);
+
+  useEffect(() => {
+    rawImageSrcRef.current = rawImageSrc;
+  }, [rawImageSrc]);
+
+  useEffect(() => {
+    return () => {
+      if (rawImageSrcRef.current) {
+        URL.revokeObjectURL(rawImageSrcRef.current);
+      }
+      if (passwordTimerRef.current) {
+        clearTimeout(passwordTimerRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (user) {
@@ -59,11 +76,14 @@ const Sidebar = ({ isOpen, setIsOpen }) => {
 
   const handleCloseModal = () => {
     setShowProfileModal(false);
-    setAvatarFile(null);
     setAvatarError('');
     if (rawImageSrc) {
       URL.revokeObjectURL(rawImageSrc);
       setRawImageSrc('');
+    }
+    if (passwordTimerRef.current) {
+      clearTimeout(passwordTimerRef.current);
+      passwordTimerRef.current = null;
     }
     setLoadedImage(null);
     setImageDimensions({ width: 0, height: 0 });
@@ -104,7 +124,9 @@ const Sidebar = ({ isOpen, setIsOpen }) => {
         setCurrentPassword('');
         setNewPassword('');
         setConfirmPassword('');
-        setTimeout(() => {
+        if (passwordTimerRef.current) clearTimeout(passwordTimerRef.current);
+        passwordTimerRef.current = setTimeout(() => {
+          passwordTimerRef.current = null;
           setShowPasswordSection(false);
           setPasswordSuccess('');
         }, 2000);
@@ -269,70 +291,75 @@ const Sidebar = ({ isOpen, setIsOpen }) => {
     setCropY(e.touches[0].clientY - dragStart.y);
   };
 
-  // Effect to update the compressed/cropped upload blob on pan/zoom changes
-  useEffect(() => {
-    if (!loadedImage) return;
-
-    const canvas = document.createElement('canvas');
-    const size = 500;
-    canvas.width = size;
-    canvas.height = size;
-    const ctx = canvas.getContext('2d');
-
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = 'high';
-
-    // Base dimensions fitting shorter side to canvas
-    let w = size;
-    let h = size;
-    if (loadedImage.width > loadedImage.height) {
-      w = size * (loadedImage.width / loadedImage.height);
-    } else {
-      h = size * (loadedImage.height / loadedImage.width);
-    }
-
-    // Zoom
-    const scaledW = w * cropZoom;
-    const scaledH = h * cropZoom;
-
-    // Symmetrical center crop base coordinates
-    const cx = (size - scaledW) / 2;
-    const cy = (size - scaledH) / 2;
-
-    // Viewport scale offset factor: viewport viewportSize = 192px, canvas size = 500px
-    const scaleRatio = size / 192;
-    const px = cropX * scaleRatio;
-    const py = cropY * scaleRatio;
-
-    // Draw panned/zoomed crop onto the 500x500 canvas
-    ctx.drawImage(loadedImage, cx + px, cy + py, scaledW, scaledH);
-
-    // Convert canvas to high quality JPEG Blob
-    canvas.toBlob((blob) => {
-      if (blob) {
-        const processedFile = new File(
-          [blob], 
-          'avatar.jpg', 
-          { type: 'image/jpeg', lastModified: Date.now() }
-        );
-        setAvatarFile(processedFile);
+  // Render cropped 500x500 JPEG Blob once on submit instead of on every drag/zoom frame
+  const renderCroppedAvatarFile = () =>
+    new Promise((resolve, reject) => {
+      if (!loadedImage) {
+        reject(new Error('No image loaded'));
+        return;
       }
-    }, 'image/jpeg', 0.95);
-  }, [loadedImage, cropZoom, cropX, cropY]);
+
+      const canvas = document.createElement('canvas');
+      const size = 500;
+      canvas.width = size;
+      canvas.height = size;
+      const ctx = canvas.getContext('2d');
+
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+
+      let w = size;
+      let h = size;
+      if (loadedImage.width > loadedImage.height) {
+        w = size * (loadedImage.width / loadedImage.height);
+      } else {
+        h = size * (loadedImage.height / loadedImage.width);
+      }
+
+      const scaledW = w * cropZoom;
+      const scaledH = h * cropZoom;
+      const cx = (size - scaledW) / 2;
+      const cy = (size - scaledH) / 2;
+
+      const scaleRatio = size / 192;
+      const px = cropX * scaleRatio;
+      const py = cropY * scaleRatio;
+
+      ctx.drawImage(loadedImage, cx + px, cy + py, scaledW, scaledH);
+
+      canvas.toBlob(
+        (blob) => {
+          if (!blob) {
+            reject(new Error('Failed to process cropped avatar image.'));
+            return;
+          }
+          resolve(
+            new File([blob], 'avatar.jpg', {
+              type: 'image/jpeg',
+              lastModified: Date.now()
+            })
+          );
+        },
+        'image/jpeg',
+        0.95
+      );
+    });
 
   const handleAvatarUpload = async (e) => {
     e.preventDefault();
-    if (!avatarFile) {
+    if (!loadedImage) {
       setAvatarError('Please select an image file first.');
       return;
     }
 
     setUploadingAvatar(true);
     setAvatarError('');
-    const formData = new FormData();
-    formData.append('avatar', avatarFile);
 
     try {
+      const processedFile = await renderCroppedAvatarFile();
+      const formData = new FormData();
+      formData.append('avatar', processedFile);
+
       const res = await axios.put('/api/auth/profile-pic', formData, {
         headers: {
           'Content-Type': 'multipart/form-data'
@@ -340,7 +367,6 @@ const Sidebar = ({ isOpen, setIsOpen }) => {
       });
       if (res.data.success) {
         updateUserProfilePic(res.data.profile_pic);
-        setAvatarFile(null);
         if (rawImageSrc) {
           URL.revokeObjectURL(rawImageSrc);
           setRawImageSrc('');
@@ -354,7 +380,7 @@ const Sidebar = ({ isOpen, setIsOpen }) => {
         if (fileInput) fileInput.value = '';
       }
     } catch (err) {
-      setAvatarError(err.response?.data?.message || 'Avatar upload failed.');
+      setAvatarError(err.response?.data?.message || err.message || 'Avatar upload failed.');
     } finally {
       setUploadingAvatar(false);
     }
@@ -510,7 +536,7 @@ const Sidebar = ({ isOpen, setIsOpen }) => {
               />
             ) : (
               <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-primary-600 to-indigo-400 flex items-center justify-center font-bold text-white shadow group-hover:from-primary-500 group-hover:to-indigo-350 transition duration-150">
-                {user?.email[0].toUpperCase()}
+                {(user?.email?.[0] || 'U').toUpperCase()}
               </div>
             )}
             <div className="overflow-hidden flex-1">
@@ -561,13 +587,13 @@ const Sidebar = ({ isOpen, setIsOpen }) => {
                     />
                   ) : (
                     <div className="w-24 h-24 rounded-2xl bg-gradient-to-tr from-primary-600 to-indigo-400 flex items-center justify-center font-bold text-white text-4xl shadow-lg">
-                      {user?.email[0].toUpperCase()}
+                      {(user?.email?.[0] || 'U').toUpperCase()}
                     </div>
                   )}
                 </div>
                 <div>
-                  <h4 className="text-base font-bold text-white font-outfit">{user?.studentProfile?.name || 'Aether Member'}</h4>
-                  <span className="text-xs text-primary-400 font-semibold">{user?.role} Account</span>
+                  <h4 className="text-base font-bold text-white font-outfit">{getDisplayName(user) || user?.role || 'EduStride Member'}</h4>
+                  <span className="text-xs text-primary-400 font-semibold">{user?.role || 'EduStride Member'} Account</span>
                 </div>
               </div>
 
@@ -639,7 +665,7 @@ const Sidebar = ({ isOpen, setIsOpen }) => {
 
                   <button
                     type="submit"
-                    disabled={uploadingAvatar || !avatarFile}
+                    disabled={uploadingAvatar || !loadedImage}
                     className="w-full py-2.5 rounded-xl bg-primary-600 hover:bg-primary-500 disabled:opacity-40 disabled:hover:bg-primary-600 text-white font-semibold text-xs transition duration-150 flex items-center justify-center gap-1.5 shadow-md shadow-primary-500/10 cursor-pointer"
                   >
                     {uploadingAvatar ? 'Uploading...' : 'Save New Avatar'}
@@ -762,15 +788,15 @@ const Sidebar = ({ isOpen, setIsOpen }) => {
                   <span className="text-slate-500">Email Address</span>
                   <span className="text-white font-medium">{user?.email}</span>
                 </div>
-                {user?.role === 'Student' && user?.studentProfile && (
+                {user?.role === 'Student' && user?.studentProfile && typeof user.studentProfile === 'object' && (
                   <>
                     <div className="flex justify-between p-2.5 rounded-lg bg-dark-900/40 border border-dark-850">
                       <span className="text-slate-500">Class Level</span>
-                      <span className="text-white font-medium">Class {user.studentProfile.class_level}</span>
+                      <span className="text-white font-medium">Class {user.studentProfile.class_level || 'N/A'}</span>
                     </div>
                     <div className="flex justify-between p-2.5 rounded-lg bg-dark-900/40 border border-dark-850">
                       <span className="text-slate-500">Roll Number</span>
-                      <span className="text-white font-medium font-mono">{user.studentProfile.roll_number}</span>
+                      <span className="text-white font-medium font-mono">{user.studentProfile.roll_number || 'N/A'}</span>
                     </div>
                   </>
                 )}

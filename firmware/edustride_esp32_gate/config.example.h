@@ -34,18 +34,19 @@
 
 #define BUZZER_PIN       25
 #define BUZZER_IS_ACTIVE true
+#define BUZZER_ACTIVE_LOW false // Set to true for active-LOW 3-pin buzzer modules (e.g. KY-012 / HW-508)
 
 // ============================================================================
 // 4. WI-FI OTA (OVER-THE-AIR WIRELESS FLASHING) SETTINGS
 // ============================================================================
 #define OTA_HOSTNAME             "edustride-gate"
-#define OTA_PASSWORD             "edustride-ota-2026"
+#define OTA_PASSWORD             "CHANGE_ME_STRONG_OTA_PASSWORD"
 #define OTA_PORT                 3232
 
 // ============================================================================
 // 5. TIMING, TLS & FIRMWARE METADATA
 // ============================================================================
-#define FIRMWARE_VERSION         "2.3.0-ota"
+#define FIRMWARE_VERSION         "2.4.0-ota"
 #define HEARTBEAT_INTERVAL_MS    5500   // Calm 5.5s interval keeps 3.3V rail quiet for R307S
 #define HTTP_TIMEOUT_MS          12000  // Handles cloud cold-starts cleanly
 #define ENROLL_STEP_TIMEOUT_MS   25000

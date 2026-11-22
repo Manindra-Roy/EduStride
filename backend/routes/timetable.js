@@ -35,16 +35,36 @@ const defaultTimetable = [
   { day: 'Sunday', slots: [] }
 ];
 
+// Serialize singleton seed/update to avoid duplicate timetable documents under concurrent boot requests
+let timetableInitPromise = null;
+
+const getOrCreateTimetable = async () => {
+  const existing = await Timetable.findOne();
+  if (existing) return existing;
+
+  if (!timetableInitPromise) {
+    timetableInitPromise = (async () => {
+      try {
+        const recheck = await Timetable.findOne();
+        if (recheck) return recheck;
+        const created = await Timetable.create({ data: defaultTimetable });
+        console.log('[Seeder] Default Weekly Timetable seeded.');
+        return created;
+      } finally {
+        timetableInitPromise = null;
+      }
+    })();
+  }
+  return timetableInitPromise;
+};
+
 // @desc    Get timetable structure
 // @route   GET /api/timetable
 // @access  Public
 router.get('/', async (req, res, next) => {
   try {
-    let timetable = await Timetable.findOne();
-    if (!timetable) {
-      timetable = await Timetable.create({ data: defaultTimetable });
-      console.log('[Seeder] Default Weekly Timetable seeded.');
-    } else if (timetable.data.length < 7) {
+    const timetable = await getOrCreateTimetable();
+    if (Array.isArray(timetable.data) && timetable.data.length < 7) {
       // Dynamic migration to add Saturday/Sunday if they are missing
       const existingDays = timetable.data.map(d => d.day);
       const migratedData = [...timetable.data];
@@ -70,20 +90,30 @@ router.get('/', async (req, res, next) => {
 // @access  Private (Admin & Teacher only)
 router.put('/', protect, authorize('SuperAdmin', 'Teacher'), async (req, res, next) => {
   try {
-    const { data } = req.body;
-    if (!data || !Array.isArray(data)) {
+    const { data } = req.body || {};
+    if (!Array.isArray(data)) {
       res.status(400);
       throw new Error('Please provide a valid timetable data array');
     }
 
-    let timetable = await Timetable.findOne();
-    if (!timetable) {
-      timetable = await Timetable.create({ data });
-    } else {
-      timetable.data = data;
-      timetable.markModified('data');
-      await timetable.save();
+    for (const entry of data) {
+      if (
+        !entry ||
+        typeof entry !== 'object' ||
+        typeof entry.day !== 'string' ||
+        !entry.day.trim() ||
+        !Array.isArray(entry.slots)
+      ) {
+        res.status(400);
+        throw new Error('Each timetable entry must include a non-empty string day and a slots array');
+      }
     }
+
+    const timetable = await Timetable.findOneAndUpdate(
+      {},
+      { $set: { data } },
+      { upsert: true, new: true }
+    );
 
     invalidateTimetableCache();
     res.json({ success: true, data: timetable.data });

@@ -11,16 +11,44 @@ android {
         applicationId "com.edustride.app"
         minSdk 26
         targetSdk 34
-        versionCode 2
-        versionName "1.1.0"
+        versionCode 3
+        versionName "1.2.0"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        release {
+            def ksProps = new Properties()
+            def ksPropsFile = rootProject.file('keystore.properties')
+            if (ksPropsFile.exists()) {
+                ksPropsFile.withInputStream { ksProps.load(it) }
+            }
+            def ksPath = ksProps.getProperty('EDUSTRIDE_KEYSTORE_PATH') ?: project.findProperty('EDUSTRIDE_KEYSTORE_PATH') ?: System.getenv('EDUSTRIDE_KEYSTORE_PATH')
+            def ksPassword = ksProps.getProperty('EDUSTRIDE_KEYSTORE_PASSWORD') ?: project.findProperty('EDUSTRIDE_KEYSTORE_PASSWORD') ?: System.getenv('EDUSTRIDE_KEYSTORE_PASSWORD')
+            def keyAliasProp = ksProps.getProperty('EDUSTRIDE_KEY_ALIAS') ?: project.findProperty('EDUSTRIDE_KEY_ALIAS') ?: System.getenv('EDUSTRIDE_KEY_ALIAS')
+            def keyPasswordProp = ksProps.getProperty('EDUSTRIDE_KEY_PASSWORD') ?: project.findProperty('EDUSTRIDE_KEY_PASSWORD') ?: System.getenv('EDUSTRIDE_KEY_PASSWORD')
+            if (ksPath && ksPassword && keyAliasProp && keyPasswordProp) {
+                def resolvedKs = new File(ksPath)
+                if (!resolvedKs.isAbsolute()) {
+                    resolvedKs = rootProject.file(ksPath)
+                }
+                storeFile resolvedKs
+                storePassword ksPassword
+                keyAlias keyAliasProp
+                keyPassword keyPasswordProp
+            }
+        }
+    }
+
     buildTypes {
         release {
-            minifyEnabled false
+            minifyEnabled true
+            shrinkResources true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            if (signingConfigs.release.storeFile != null && signingConfigs.release.storeFile.exists()) {
+                signingConfig signingConfigs.release
+            }
         }
     }
     compileOptions {
@@ -32,6 +60,7 @@ android {
     }
     buildFeatures {
         viewBinding true
+        buildConfig true
     }
 }
 
@@ -41,25 +70,15 @@ dependencies {
     implementation 'com.google.android.material:material:1.11.0'
     implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
     implementation 'androidx.swiperefreshlayout:swiperefreshlayout:1.1.0'
-    
+
     // Core SplashScreen API
     implementation 'androidx.core:core-splashscreen:1.0.1'
-    
-    // Retrofit & OkHttp for REST API
-    implementation 'com.squareup.retrofit2:retrofit:2.9.0'
-    implementation 'com.squareup.retrofit2:converter-gson:2.9.0'
-    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
-    implementation 'com.squareup.okhttp3:logging-interceptor:4.12.0'
-    
-    // Socket.io for Real-time Messaging Chat
+
+    // Socket.io for Real-time Background Notifications
     implementation ('io.socket:socket.io-client:2.1.0') {
         exclude group: 'org.json', module: 'json'
     }
-    
-    // Glide for image loading & caching
-    implementation 'com.github.bumptech.glide:glide:4.16.0'
-    annotationProcessor 'com.github.bumptech.glide:compiler:4.16.0'
-    
+
     testImplementation 'junit:junit:4.13.2'
     androidTestImplementation 'androidx.test.ext:junit:1.1.5'
     androidTestImplementation 'androidx.test.espresso:espresso-core:3.5.1'
