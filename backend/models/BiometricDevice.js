@@ -8,7 +8,22 @@ const pendingCommandSchema = new mongoose.Schema({
   },
   action: {
     type: String,
-    enum: ['NONE', 'ENROLL', 'DELETE', 'CLEAR_ALL', 'SYNC_SLOTS'],
+    enum: [
+      'NONE',
+      'ENROLL',
+      'DELETE',
+      'CLEAR_ALL',
+      'SYNC_SLOTS',
+      'TRAY_OPEN',
+      'TRAY_CLOSE',
+      'TRAY_STOP',
+      'TRAY_HOME',
+      'TRAY_NUDGE_OPEN',
+      'TRAY_NUDGE_CLOSE',
+      'TRAY_SET_OPEN',
+      'TRAY_SET_CLOSED',
+      'REBOOT'
+    ],
     default: 'NONE'
   },
   slot_id: {
@@ -86,6 +101,10 @@ const biometricDeviceSchema = new mongoose.Schema({
     type: Boolean,
     default: true
   },
+  device_power_on: {
+    type: Boolean,
+    default: true
+  },
   auto_mark_attendance: {
     type: Boolean,
     default: true
@@ -127,6 +146,37 @@ const biometricDeviceSchema = new mongoose.Schema({
   total_templates: {
     type: Number,
     default: 0
+  },
+  tray_config: {
+    enabled: { type: Boolean, default: true },
+    mode: {
+      type: String,
+      enum: ['LIMIT_360', 'TIMED_360', 'ANGLE_180'],
+      default: 'LIMIT_360'
+    },
+    invert_direction: { type: Boolean, default: false },
+    speed_pct: { type: Number, default: 80, min: 20, max: 100 },
+    stop_us: { type: Number, default: 1500, min: 1350, max: 1650 },
+    open_ms: { type: Number, default: 1060, min: 100, max: 8000 },
+    close_ms: { type: Number, default: 1060, min: 100, max: 8000 },
+    closed_angle: { type: Number, default: 10, min: 0, max: 180 },
+    open_angle: { type: Number, default: 110, min: 0, max: 180 },
+    sweep_speed_dps: { type: Number, default: 120, min: 30, max: 360 },
+    max_run_ms: { type: Number, default: 4500, min: 500, max: 15000 },
+    auto_home_on_boot: { type: Boolean, default: false }
+  },
+  tray_state: {
+    type: String,
+    enum: ['UNKNOWN', 'CLOSED', 'OPEN', 'EXTENDING', 'RETRACTING', 'HOMING', 'STOPPED', 'FAULT', 'EXTENDED', 'RETRACTED'],
+    default: 'UNKNOWN'
+  },
+  tray_fault: {
+    type: String,
+    default: ''
+  },
+  tray_switches: {
+    closed: { type: Boolean, default: false },
+    open: { type: Boolean, default: false }
   }
 }, {
   timestamps: true

@@ -15,10 +15,72 @@ import { dispatchGateNotification } from '../services/gateNotifier.js';
 
 const router = express.Router();
 
-const ONLINE_THRESHOLD_MS = 20000; // 20 seconds (device polls every ~5.5s to keep 3.3V rail quiet for R307S)
+const ONLINE_THRESHOLD_MS = 30000; // 30 seconds (active polls ~5.5s, low-power standby polls ~12s)
 const PENDING_TIMEOUT_MS = 120000; // 2 min waiting for device pickup (ENROLL / SYNC_SLOTS only)
 const IN_PROGRESS_TIMEOUT_MS = 180000; // 3 min waiting for enrollment completion (ENROLL / SYNC_SLOTS only)
-const AUTO_EXPIRABLE_ACTIONS = new Set(['ENROLL', 'SYNC_SLOTS']);
+const AUTO_EXPIRABLE_ACTIONS = new Set([
+  'ENROLL',
+  'SYNC_SLOTS',
+  'TRAY_OPEN',
+  'TRAY_CLOSE',
+  'TRAY_STOP',
+  'TRAY_HOME',
+  'TRAY_NUDGE_OPEN',
+  'TRAY_NUDGE_CLOSE',
+  'TRAY_SET_OPEN',
+  'TRAY_SET_CLOSED',
+  'REBOOT'
+]);
+
+const VALID_TRAY_MODES = new Set(['LIMIT_360', 'TIMED_360', 'ANGLE_180']);
+const VALID_TRAY_STATES = new Set(['UNKNOWN', 'CLOSED', 'OPEN', 'EXTENDING', 'RETRACTING', 'HOMING', 'STOPPED', 'FAULT']);
+
+const DEFAULT_TRAY_CONFIG = Object.freeze({
+  enabled: true,
+  mode: 'LIMIT_360',
+  invert_direction: false,
+  speed_pct: 80,
+  stop_us: 1500,
+  open_ms: 1060,
+  close_ms: 1060,
+  closed_angle: 10,
+  open_angle: 110,
+  sweep_speed_dps: 120,
+  max_run_ms: 4500,
+  auto_home_on_boot: false
+});
+
+const clampInt = (val, min, max, fallback) => {
+  const num = Number(val);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.max(min, Math.min(max, Math.round(num)));
+};
+
+const normalizeTrayState = (raw) => {
+  const s = String(raw || '').trim().toUpperCase();
+  if (s === 'EXTENDED') return 'OPEN';
+  if (s === 'RETRACTED') return 'CLOSED';
+  return VALID_TRAY_STATES.has(s) ? s : 'UNKNOWN';
+};
+
+const normalizeTrayConfig = (raw = {}) => {
+  const src = raw && typeof raw.toObject === 'function' ? raw.toObject() : (raw || {});
+  const modeStr = String(src.mode || '').trim().toUpperCase();
+  return {
+    enabled: src.enabled !== undefined ? Boolean(src.enabled) : DEFAULT_TRAY_CONFIG.enabled,
+    mode: VALID_TRAY_MODES.has(modeStr) ? modeStr : DEFAULT_TRAY_CONFIG.mode,
+    invert_direction: src.invert_direction !== undefined ? Boolean(src.invert_direction) : DEFAULT_TRAY_CONFIG.invert_direction,
+    speed_pct: clampInt(src.speed_pct, 20, 100, DEFAULT_TRAY_CONFIG.speed_pct),
+    stop_us: clampInt(src.stop_us, 1350, 1650, DEFAULT_TRAY_CONFIG.stop_us),
+    open_ms: clampInt(src.open_ms, 100, 8000, DEFAULT_TRAY_CONFIG.open_ms),
+    close_ms: clampInt(src.close_ms, 100, 8000, DEFAULT_TRAY_CONFIG.close_ms),
+    closed_angle: clampInt(src.closed_angle, 0, 180, DEFAULT_TRAY_CONFIG.closed_angle),
+    open_angle: clampInt(src.open_angle, 0, 180, DEFAULT_TRAY_CONFIG.open_angle),
+    sweep_speed_dps: clampInt(src.sweep_speed_dps, 30, 360, DEFAULT_TRAY_CONFIG.sweep_speed_dps),
+    max_run_ms: clampInt(src.max_run_ms, 500, 15000, DEFAULT_TRAY_CONFIG.max_run_ms),
+    auto_home_on_boot: src.auto_home_on_boot !== undefined ? Boolean(src.auto_home_on_boot) : DEFAULT_TRAY_CONFIG.auto_home_on_boot
+  };
+};
 
 // Per-student lock to serialize concurrent scan requests across multiple fingers/scanners & prevent cooldown bypass
 const activeScanLocks = new Map();
@@ -191,6 +253,14 @@ const formatDevice = (device, enrolledCount = null, { includeApiKey = false } = 
   const obj = typeof device.toObject === 'function' ? device.toObject() : { ...device };
   obj.is_online = Boolean(obj.last_heartbeat && (Date.now() - new Date(obj.last_heartbeat).getTime()) < ONLINE_THRESHOLD_MS);
   obj.queue_length = Array.isArray(obj.command_queue) ? obj.command_queue.length : 0;
+  obj.device_power_on = obj.device_power_on !== false;
+  obj.tray_config = normalizeTrayConfig(obj.tray_config);
+  obj.tray_state = normalizeTrayState(obj.tray_state);
+  obj.tray_fault = typeof obj.tray_fault === 'string' ? obj.tray_fault : '';
+  obj.tray_switches = {
+    closed: Boolean(obj.tray_switches?.closed),
+    open: Boolean(obj.tray_switches?.open)
+  };
   if (enrolledCount !== null) {
     obj.enrolled_count = enrolledCount;
   }
@@ -237,7 +307,7 @@ const authenticateDevice = async (req, res, next) => {
 router.get('/device/status', authenticateDevice, async (req, res, next) => {
   try {
     let device = req.device;
-    const { firmware, templates, ip } = req.query;
+    const { firmware, templates, ip, tray, sw, tfault } = req.query;
 
     const now = new Date();
     const updatePatch = { last_heartbeat: now };
@@ -248,6 +318,28 @@ router.get('/device/status', authenticateDevice, async (req, res, next) => {
     if (templates !== undefined && !isNaN(Number(templates))) {
       const cleanTpl = Number(templates);
       if (cleanTpl !== device.total_templates) updatePatch.total_templates = cleanTpl;
+    }
+    if (tray) {
+      const cleanTray = normalizeTrayState(tray);
+      if (cleanTray !== normalizeTrayState(device.tray_state)) {
+        updatePatch.tray_state = cleanTray;
+      }
+      if (cleanTray !== 'FAULT' && device.tray_fault) {
+        updatePatch.tray_fault = '';
+      }
+    }
+    if (typeof sw === 'string' && sw.length === 2 && /^[01]{2}$/.test(sw)) {
+      const swClosed = sw[0] === '1';
+      const swOpen = sw[1] === '1';
+      if (Boolean(device.tray_switches?.closed) !== swClosed || Boolean(device.tray_switches?.open) !== swOpen) {
+        updatePatch.tray_switches = { closed: swClosed, open: swOpen };
+      }
+    }
+    if (tfault !== undefined) {
+      const cleanFault = String(tfault || '').slice(0, 140);
+      if (cleanFault !== (device.tray_fault || '')) {
+        updatePatch.tray_fault = cleanFault;
+      }
     }
     // Only fall back to req.ip when device.ip_address is empty so omitted &ip= never clobbers LAN IP
     const resolvedIp = ip ? String(ip).slice(0, 64) : (!device.ip_address ? (req.ip || '') : '');
@@ -307,13 +399,24 @@ router.get('/device/status', authenticateDevice, async (req, res, next) => {
       await BiometricDevice.updateOne({ _id: device._id }, { $set: updatePatch });
     }
 
+    // Broadcast live tray_state / switches / fault / firmware changes to Gate Scanner monitors immediately
+    if (updatePatch.tray_state || updatePatch.tray_switches || updatePatch.tray_fault !== undefined || updatePatch.firmware_version) {
+      const io = getIO();
+      if (io) {
+        const merged = { ...(typeof device.toObject === 'function' ? device.toObject() : device), ...updatePatch };
+        io.to('GATE_MONITOR').emit('gate_device_updated', formatDevice(merged, null, { includeApiKey: false }));
+      }
+    }
+
     const ist = getISTParts(now);
 
     res.json({
       success: true,
       device_id: device.device_id,
+      device_power_on: device.device_power_on !== false,
       sensing_enabled: device.sensing_enabled,
       cooldown_seconds: device.cooldown_seconds,
+      tray_config: normalizeTrayConfig(device.tray_config),
       server_time_ist: ist.time12Str,
       server_date_ist: ist.dateStr,
       queue_length: Array.isArray(device.command_queue) ? device.command_queue.length : 0,
@@ -363,6 +466,14 @@ router.post('/device/scan', authenticateDevice, async (req, res, next) => {
           attendance_session: existingByScanId.attendance_session
         });
       }
+    }
+
+    if (device.device_power_on === false) {
+      return res.status(403).json({
+        success: false,
+        status: 'PAUSED',
+        message: 'Device is powered OFF (Standby) in app'
+      });
     }
 
     if (!device.sensing_enabled) {
@@ -748,11 +859,23 @@ router.post('/device/command-ack', authenticateDevice, async (req, res, next) =>
           });
         } else if (effectiveAction === 'CLEAR_ALL') {
           await FingerprintTemplate.deleteMany({ device_id: device.device_id });
+        } else if (effectiveAction === 'TRAY_OPEN' || effectiveAction === 'TRAY_SET_OPEN') {
+          device.tray_state = 'OPEN';
+          device.tray_fault = '';
+        } else if (effectiveAction === 'TRAY_CLOSE' || effectiveAction === 'TRAY_SET_CLOSED' || effectiveAction === 'TRAY_HOME') {
+          device.tray_state = 'CLOSED';
+          device.tray_fault = '';
+        } else if (effectiveAction === 'TRAY_STOP') {
+          device.tray_state = 'STOPPED';
         }
 
         device.pending_command.action = 'NONE';
         promotedNext = promoteNextCommand(device);
       } else if (status === 'FAILED') {
+        if (['TRAY_OPEN', 'TRAY_CLOSE', 'TRAY_HOME'].includes(effectiveAction)) {
+          device.tray_state = 'FAULT';
+          device.tray_fault = enrichedMessage || 'Tray limit switch timeout / jam detected';
+        }
         device.pending_command.action = 'NONE';
         promotedNext = promoteNextCommand(device);
       }
@@ -762,6 +885,9 @@ router.post('/device/command-ack', authenticateDevice, async (req, res, next) =>
       const io = getIO();
       if (io) {
         const enrolledCount = await FingerprintTemplate.countDocuments({ device_id: device.device_id });
+        if (String(effectiveAction).startsWith('TRAY_')) {
+          io.to('GATE_MONITOR').emit('gate_device_updated', formatDevice(device, enrolledCount, { includeApiKey: false }));
+        }
         io.to('GATE_MONITOR').emit('gate_command_update', {
           device_id: device.device_id,
           command_id: command_id || currentCmd.command_id || '',
@@ -950,15 +1076,18 @@ router.put('/devices/:deviceId/toggle', protect, authorize('SuperAdmin', 'Teache
       }
 
       const {
+        device_power_on,
         sensing_enabled,
         auto_mark_attendance,
         parent_alerts_enabled,
         cooldown_seconds,
         name,
         pinned_session_name,
+        tray_config,
         regenerate_key
       } = req.body || {};
 
+      if (device_power_on !== undefined) device.device_power_on = Boolean(device_power_on);
       if (sensing_enabled !== undefined) device.sensing_enabled = Boolean(sensing_enabled);
       if (auto_mark_attendance !== undefined) device.auto_mark_attendance = Boolean(auto_mark_attendance);
       if (parent_alerts_enabled !== undefined) device.parent_alerts_enabled = Boolean(parent_alerts_enabled);
@@ -973,6 +1102,10 @@ router.put('/devices/:deviceId/toggle', protect, authorize('SuperAdmin', 'Teache
       }
       if (pinned_session_name !== undefined) {
         device.pinned_session_name = pinned_session_name === null ? '' : String(pinned_session_name).trim();
+      }
+      if (tray_config && typeof tray_config === 'object') {
+        const currentTray = normalizeTrayConfig(device.tray_config);
+        device.tray_config = normalizeTrayConfig({ ...currentTray, ...tray_config });
       }
       if (regenerate_key === true && req.user.role === 'SuperAdmin') {
         device.api_key = crypto.randomBytes(24).toString('hex');
@@ -1033,6 +1166,16 @@ router.post('/devices/:deviceId/enroll', protect, authorize('SuperAdmin', 'Teach
       }
       if (!student) {
         return { httpStatus: 404, body: { success: false, message: 'Student not found' } };
+      }
+
+      if (device.device_power_on === false) {
+        return {
+          httpStatus: 409,
+          body: {
+            success: false,
+            message: 'Device is currently in Power OFF (Standby) mode. Turn Power ON first before enrolling.'
+          }
+        };
       }
 
       if (isActiveCommand(device.pending_command) && ['ENROLL', 'SYNC_SLOTS'].includes(device.pending_command.action)) {
@@ -1264,6 +1407,175 @@ router.post('/devices/:deviceId/sync-slots', protect, authorize('SuperAdmin', 'T
           success: true,
           message: 'Sensor Sync & Repair queued. ESP32 will audit all 1,000 slots on its next heartbeat.',
           data: { pending_command: command }
+        }
+      };
+    });
+
+    return res.status(result.httpStatus).json(result.body);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   POST /api/biometric/devices/:deviceId/tray-command
+// @desc    Queue a remote motorized tray action (open, close, home, stop, nudge, or sync NVS state without moving)
+// @access  Private (SuperAdmin, Teacher)
+router.post('/devices/:deviceId/tray-command', protect, authorize('SuperAdmin', 'Teacher'), async (req, res, next) => {
+  try {
+    const deviceId = String(req.params.deviceId).trim().toUpperCase();
+    const allowedTrayActions = new Set([
+      'TRAY_OPEN',
+      'TRAY_CLOSE',
+      'TRAY_STOP',
+      'TRAY_HOME',
+      'TRAY_NUDGE_OPEN',
+      'TRAY_NUDGE_CLOSE',
+      'TRAY_SET_OPEN',
+      'TRAY_SET_CLOSED'
+    ]);
+
+    const rawAction = String(req.body?.action || '').trim().toUpperCase();
+    if (!allowedTrayActions.has(rawAction)) {
+      return res.status(400).json({ success: false, message: 'Invalid tray action requested' });
+    }
+
+    const isNudge = rawAction === 'TRAY_NUDGE_OPEN' || rawAction === 'TRAY_NUDGE_CLOSE';
+    const nudgeMs = isNudge ? clampInt(req.body?.duration_ms, 50, 3000, 200) : null;
+
+    const labelMap = {
+      TRAY_OPEN: 'Extending scanner tray on ESP32...',
+      TRAY_CLOSE: 'Retracting scanner tray on ESP32...',
+      TRAY_STOP: 'Sending EMERGENCY STOP to scanner tray...',
+      TRAY_HOME: 'Homing scanner tray to CLOSED limit switch...',
+      TRAY_NUDGE_OPEN: `Nudging scanner tray OUT (${nudgeMs}ms)...`,
+      TRAY_NUDGE_CLOSE: `Nudging scanner tray IN (${nudgeMs}ms)...`,
+      TRAY_SET_OPEN: 'Syncing ESP32 saved tray state to OPEN (no motor motion)...',
+      TRAY_SET_CLOSED: 'Syncing ESP32 saved tray state to CLOSED (no motor motion)...'
+    };
+
+    const result = await withDeviceLock(deviceId, async () => {
+      const device = await BiometricDevice.findOne({ device_id: deviceId });
+      if (!device) {
+        return { httpStatus: 404, body: { success: false, message: 'Biometric device not found' } };
+      }
+
+      if (rawAction !== 'TRAY_STOP' && isActiveCommand(device.pending_command) && ['ENROLL', 'SYNC_SLOTS'].includes(device.pending_command.action)) {
+        return {
+          httpStatus: 409,
+          body: {
+            success: false,
+            message: `Finish or cancel the active ${device.pending_command.action} before running a tray command.`
+          }
+        };
+      }
+
+      let command;
+      if (rawAction === 'TRAY_STOP') {
+        // Emergency stop preempts any pending tray commands immediately
+        device.command_queue = (device.command_queue || []).filter(c => !String(c.action || '').startsWith('TRAY_'));
+        device.pending_command = buildCommandPayload({
+          action: 'TRAY_STOP',
+          slot_id: null,
+          student: null,
+          student_name: 'Motorized Tray',
+          step: 'STOPPING',
+          progress: 50,
+          message: labelMap.TRAY_STOP
+        });
+        command = device.pending_command;
+      } else {
+        const enqueued = enqueueDeviceCommand(device, {
+          action: rawAction,
+          slot_id: nudgeMs,
+          student: null,
+          student_name: 'Motorized Tray',
+          step: 'WAITING_DEVICE',
+          progress: 20,
+          message: labelMap[rawAction]
+        });
+        command = enqueued.command;
+      }
+      await device.save();
+
+      const io = getIO();
+      if (io) {
+        io.to('GATE_MONITOR').emit('gate_command_update', {
+          device_id: device.device_id,
+          command_id: device.pending_command.command_id,
+          action: device.pending_command.action,
+          slot_id: device.pending_command.slot_id,
+          status: device.pending_command.status,
+          step: device.pending_command.step || 'WAITING_DEVICE',
+          progress: device.pending_command.progress || 20,
+          student_name: device.pending_command.student_name,
+          message: device.pending_command.message,
+          queue_length: device.command_queue.length
+        });
+      }
+
+      return {
+        httpStatus: 200,
+        body: {
+          success: true,
+          message: labelMap[rawAction],
+          data: { pending_command: command }
+        }
+      };
+    });
+
+    return res.status(result.httpStatus).json(result.body);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   POST /api/biometric/devices/:deviceId/reboot
+// @desc    Queue remote ESP32 software reboot command
+// @access  Private (SuperAdmin, Teacher)
+router.post('/devices/:deviceId/reboot', protect, authorize('SuperAdmin', 'Teacher'), async (req, res, next) => {
+  try {
+    const deviceId = String(req.params.deviceId).trim().toUpperCase();
+
+    const result = await withDeviceLock(deviceId, async () => {
+      const device = await BiometricDevice.findOne({ device_id: deviceId });
+      if (!device) {
+        return { httpStatus: 404, body: { success: false, message: 'Biometric device not found' } };
+      }
+
+      device.command_queue = [];
+      device.pending_command = buildCommandPayload({
+        action: 'REBOOT',
+        slot_id: null,
+        student: null,
+        student_name: device.name || device.device_id,
+        step: 'REBOOTING',
+        progress: 50,
+        message: 'Sending remote reboot command to ESP32...'
+      });
+      await device.save();
+
+      const io = getIO();
+      if (io) {
+        io.to('GATE_MONITOR').emit('gate_command_update', {
+          device_id: device.device_id,
+          command_id: device.pending_command.command_id,
+          action: 'REBOOT',
+          slot_id: null,
+          status: 'PENDING',
+          step: 'REBOOTING',
+          progress: 50,
+          student_name: device.pending_command.student_name,
+          message: device.pending_command.message,
+          queue_length: 0
+        });
+      }
+
+      return {
+        httpStatus: 200,
+        body: {
+          success: true,
+          message: 'Remote reboot queued — ESP32 will restart within a few seconds.',
+          data: { pending_command: device.pending_command }
         }
       };
     });

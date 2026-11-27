@@ -5,6 +5,7 @@ Complete hardware guide for building the EduStride wireless fingerprint attendan
 - **0.96 Inch I2C 4-Pin Blue OLED (SSD1306)**
 - **R307S Optical Fingerprint Sensor Module**
 - **Buzzer**
+- **TowerPro SG90 360° Continuous Rotation Servo** *(optional motorized pop-out scanner tray + optional 2 micro limit switches)*
 - **12V 48W Power Adapter + DC-DC Buck Converter**
 
 ---
@@ -47,6 +48,11 @@ All pins below are **safe non-strapping GPIOs** (avoiding flash pins 6–11, boo
 | **R307S Fingerprint Sensor** | Pin 6 `3.3VT` | `3V3` | Powers internal capacitive touch IC (`<5µA`; only needed when `FP_USE_TOUCH_PIN` is `true`) |
 | **Buzzer** | `+` (or `I/O`) | `GPIO 25` | See protection circuit & active-LOW note below |
 | **Buzzer** | `-` (`GND`) | `GND` | Common ground |
+| **SG90 360° Servo (Tray)** | **Red (`VCC`)** | **Buck `OUT+` (`5.00V`)** | **NEVER connect to `3V3`!** Draws `200–600mA` peaks; unplug while flashing via PC USB-C |
+| **SG90 360° Servo (Tray)** | **Brown/Black (`GND`)** | `GND` | Common ground shared with ESP32 & Buck Converter |
+| **SG90 360° Servo (Tray)** | **Orange/Yellow (`SIG`)** | `GPIO 18` | Safe non-strapping 50Hz PWM pin (detached at rest — zero buzz/creep) |
+| **Limit Switch `CLOSED`** *(optional)* | `NO` / `COM` | `GPIO 26` & `GND` | Set `#define SERVO_USE_LIMIT_SWITCHES true` in `config.h` when installed |
+| **Limit Switch `OPEN`** *(optional)* | `NO` / `COM` | `GPIO 27` & `GND` | Internal `INPUT_PULLUP` (triggers `LOW` when pressed) |
 
 ---
 
@@ -121,3 +127,49 @@ Before plugging in power for the very first time:
    - Open Serial Monitor at **`115200` baud** to confirm `[R307S] Sensor READY!` and `[WIFI] Connected!`.
    - Open **Gate Scanner** in the EduStride mobile app — within **~12–18 seconds** (after Wi-Fi association, NTP clock sync, first heartbeat, and app poll) the badge turns **ESP32 Online**!
    - You can now toggle **Fingerprint Sensing ON/OFF** wirelessly and click **Enroll** next to any student to register their fingerprint right on the R307S sensor!
+
+---
+
+## 6. Motorized Cabinet Tray v3.0 — SG90 + Mouse Microswitch Wiring & Setup
+
+The firmware (`v3.0.0-ota+`) runs a non-blocking **3-Mode Actuator FSM** selectable live in **EduStride App → Gate Control → Settings → Motorized Cabinet Tray (v3.0)**:
+- **`LIMIT_360` (Recommended with Mouse Switches):** Spins until the `OPEN` or `CLOSED` mouse microswitch clicks — **exact millimeter repeatability, zero drift forever**, plus automatic jam-protection cutoff (`max_run_ms` → `FAULT`).
+- **`TIMED_360`:** Open-loop timed spin with independent `Open Time` / `Close Time` and NVS state memory.
+- **`ANGLE_180`:** Smooth angular sweep (`closed_angle` ↔ `open_angle`) for 180° positional servos (e.g., `MG90S`).
+
+### A. 3-Pin Mouse Microswitch Wiring (Zero Resistors Needed!)
+Standard 3-pin computer mouse microswitches (Omron / Kailh / Huano) are ideal endstops because they need only ~50–75 g of click force (won't stall a small SG90!) and last millions of clicks.
+
+```text
+         [o]   <-- Tiny clickable plunger button on top
+      ┌───────┐
+      │ MOUSE │
+      │SWITCH │
+      └─┬─┬─┬─┘
+        │ │ │
+      Pin1 Pin2 Pin3
+      COM   NO   NC (leave unused)
+       │    │
+       │    └── ESP32 GPIO 26 (CLOSED switch)  OR  GPIO 27 (OPEN switch)
+       └─────── ESP32 GND (common ground)
+```
+1. **Pin 1 (directly under the plunger button = `COM`)** → connect to **`GND`**.
+2. **Pin 2 (middle pin = `NO`, Normally Open)** → connect to **`GPIO 26`** (for the **CLOSED** endstop) or **`GPIO 27`** (for the **OPEN** endstop).
+3. **Pin 3 (farthest from button = `NC`)** → leave unconnected.
+4. **Instant Verification:** Power on the ESP32 and click each mouse switch with your finger:
+   - In **EduStride App → Gate Control → Motorized Cabinet Tray**, the **`CLOSED (GPIO 26)`** and **`OPEN (GPIO 27)`** live badges turn **green (`CLICKED`)** within ~5 seconds!
+   - On Serial Monitor (`115200` baud), you immediately see `[SWITCH] CLOSED (GPIO 26) = PRESSED` / `[SWITCH] OPEN (GPIO 27) = PRESSED`.
+
+### B. Mechanical & Power Protection
+1. **Use the `470µF–1000µF` bulk capacitor** across the `5.00V` buck output (`OUT+` / `GND`) to absorb servo startup spikes.
+2. **Disconnect servo `5V` during USB-C flashing** (only power the servo from the `5.00V` buck rail, never from PC USB).
+3. **Protect the plastic SG90 gears from downward finger force:** Support the R307S tray on sliding rails or a cabinet lip so the cabinet frame absorbs student downward finger presses instead of the servo horn.
+4. **Leave flexible wire slack** on the 6 R307S wires so sliding in/out never pulls on the connector.
+
+### C. Live Serial Monitor Commands (`115200` baud)
+Type `help` in Serial Monitor (`.\flash.ps1 -Monitor COM3`):
+- `servo status` — Shows active mode, state, live mouse switch readings, and config.
+- `servo open` / `servo close` / `servo home` / `servo stop` — Non-blocking live test & emergency stop.
+- `servo nudge open 200` / `servo nudge close 200` — Short alignment nudges.
+- `servo state closed` / `servo state open` — Sync saved NVS position without moving the motor.
+- `servo pulse 1500 2000` — Test neutral stop pulse (`stop_us`) if the shaft creeps while braking.

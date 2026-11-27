@@ -74,13 +74,33 @@ const BiometricGatePanel = () => {
   const [selectedDeviceId, setSelectedDeviceId] = useState('GATE-ESP32-01');
   const [loadingDevices, setLoadingDevices] = useState(isStaff);
   const [togglingSensing, setTogglingSensing] = useState(false);
+  const [togglingPower, setTogglingPower] = useState(false);
+  const [rebootingDevice, setRebootingDevice] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
 
   // Setup credentials drawer & device management
   const [showSettingsDrawer, setShowSettingsDrawer] = useState(false);
+  const [showTrayControls, setShowTrayControls] = useState(false);
   const [showCredentials, setShowCredentials] = useState(false);
   const [copiedField, setCopiedField] = useState('');
   const [pinnedSessionInput, setPinnedSessionInput] = useState('');
+  const [trayForm, setTrayForm] = useState({
+    enabled: true,
+    mode: 'LIMIT_360',
+    invert_direction: false,
+    speed_pct: 80,
+    stop_us: 1500,
+    open_ms: 1060,
+    close_ms: 1060,
+    closed_angle: 10,
+    open_angle: 110,
+    sweep_speed_dps: 120,
+    max_run_ms: 4500,
+    auto_home_on_boot: false
+  });
+  const [showTrayAdvanced, setShowTrayAdvanced] = useState(false);
+  const [trayNudgeMs, setTrayNudgeMs] = useState(200);
+  const [sendingTrayCmd, setSendingTrayCmd] = useState('');
   const [showAddDeviceModal, setShowAddDeviceModal] = useState(false);
   const [newDeviceId, setNewDeviceId] = useState('');
   const [newDeviceName, setNewDeviceName] = useState('');
@@ -137,6 +157,26 @@ const BiometricGatePanel = () => {
   useEffect(() => {
     setPinnedSessionInput(activeDevice?.pinned_session_name || '');
   }, [activeDevice?.device_id, activeDevice?.pinned_session_name]);
+
+  const activeTrayConfigKey = JSON.stringify(activeDevice?.tray_config || null);
+  useEffect(() => {
+    if (!activeDevice?.tray_config) return;
+    const tc = activeDevice.tray_config;
+    setTrayForm({
+      enabled: tc.enabled !== false,
+      mode: tc.mode || 'LIMIT_360',
+      invert_direction: Boolean(tc.invert_direction),
+      speed_pct: tc.speed_pct ?? 80,
+      stop_us: tc.stop_us ?? 1500,
+      open_ms: tc.open_ms ?? 1060,
+      close_ms: tc.close_ms ?? 1060,
+      closed_angle: tc.closed_angle ?? 10,
+      open_angle: tc.open_angle ?? 110,
+      sweep_speed_dps: tc.sweep_speed_dps ?? 120,
+      max_run_ms: tc.max_run_ms ?? 4500,
+      auto_home_on_boot: Boolean(tc.auto_home_on_boot)
+    });
+  }, [activeDevice?.device_id, activeTrayConfigKey]);
 
   // Reset live command when switching gate scanner device
   useEffect(() => {
@@ -369,6 +409,54 @@ const BiometricGatePanel = () => {
     };
   }, [userId, studentProfileId, isStaff]);
 
+  // Toggle Device Power ON / Standby (OFF) remotely
+  const handleToggleDevicePower = async () => {
+    if (!activeDevice || togglingPower) return;
+    const isCurrentlyOn = activeDevice.device_power_on !== false;
+    const nextPowerOn = !isCurrentlyOn;
+    setTogglingPower(true);
+    try {
+      const res = await axios.put(`/api/biometric/devices/${activeDevice.device_id}/toggle`, {
+        device_power_on: nextPowerOn
+      });
+      if (res.data.success) {
+        setDevices(prev => prev.map(d => (d.device_id === activeDevice.device_id ? res.data.data : d)));
+        showToastBanner(
+          'success',
+          nextPowerOn
+            ? 'Power ON sent — ESP32 will wake up within ~12 seconds, turn OLED ON, and extend the tray.'
+            : 'Power OFF (Standby) sent — ESP32 will retract tray into cabinet, turn OLED OFF, and enter low-power Wi-Fi.'
+        );
+      }
+    } catch (err) {
+      showToastBanner('error', err.response?.data?.message || 'Failed to switch device power state');
+    } finally {
+      setTogglingPower(false);
+    }
+  };
+
+  // Remotely restart the ESP32 controller
+  const handleRebootDevice = async () => {
+    if (!activeDevice || rebootingDevice) return;
+    const confirmed = window.confirm(
+      `Reboot "${activeDevice.name}" (${activeDevice.device_id}) now?\n\nThe ESP32 will restart and reconnect to Wi-Fi in ~15 seconds.`
+    );
+    if (!confirmed) return;
+
+    setRebootingDevice(true);
+    try {
+      const res = await axios.post(`/api/biometric/devices/${activeDevice.device_id}/reboot`);
+      if (res.data.success) {
+        if (res.data.command) setLiveCommand(res.data.command);
+        showToastBanner('success', res.data.message || 'Reboot queued — ESP32 will restart shortly.');
+      }
+    } catch (err) {
+      showToastBanner('error', err.response?.data?.message || 'Failed to queue remote reboot');
+    } finally {
+      setRebootingDevice(false);
+    }
+  };
+
   // Toggle Fingerprint Sensing ON / OFF remotely
   const handleToggleSensing = async () => {
     if (!activeDevice || togglingSensing) return;
@@ -500,6 +588,116 @@ const BiometricGatePanel = () => {
       fetchDevices(true);
     } catch {
       // ignore
+    }
+  };
+
+  const isTrayConfigDirty = useMemo(() => {
+    const tc = activeDevice?.tray_config;
+    if (!tc) return false;
+    return (
+      Boolean(trayForm.enabled) !== (tc.enabled !== false) ||
+      String(trayForm.mode || 'LIMIT_360') !== String(tc.mode || 'LIMIT_360') ||
+      Boolean(trayForm.invert_direction) !== Boolean(tc.invert_direction) ||
+      Number(trayForm.speed_pct) !== (tc.speed_pct ?? 80) ||
+      Number(trayForm.stop_us) !== (tc.stop_us ?? 1500) ||
+      Number(trayForm.open_ms) !== (tc.open_ms ?? 1060) ||
+      Number(trayForm.close_ms) !== (tc.close_ms ?? 1060) ||
+      Number(trayForm.closed_angle) !== (tc.closed_angle ?? 10) ||
+      Number(trayForm.open_angle) !== (tc.open_angle ?? 110) ||
+      Number(trayForm.sweep_speed_dps) !== (tc.sweep_speed_dps ?? 120) ||
+      Number(trayForm.max_run_ms) !== (tc.max_run_ms ?? 4500) ||
+      Boolean(trayForm.auto_home_on_boot) !== Boolean(tc.auto_home_on_boot)
+    );
+  }, [activeDevice?.tray_config, trayForm]);
+
+  const adjustTrayMs = (field, delta) => {
+    setTrayForm(prev => {
+      const cur = Number(prev[field]);
+      const base = Number.isFinite(cur) ? cur : 1060;
+      const next = Math.max(100, Math.min(8000, Math.round(base + delta)));
+      return { ...prev, [field]: next };
+    });
+  };
+
+  // Save tuned Motorized Tray v3.0 settings (persisted in DB & synced to ESP32 NVS on next ~5.5s heartbeat)
+  const handleSaveTrayConfig = async (customOverride = null, { silentSuccess = false } = {}) => {
+    if (!activeDevice) return false;
+    const cfg = customOverride || trayForm;
+    const numericFields = [
+      { key: 'speed_pct', label: 'Motor Speed (%)', min: 20, max: 100 },
+      { key: 'stop_us', label: 'Stop Neutral (µs)', min: 1350, max: 1650 },
+      { key: 'open_ms', label: 'Open Time (ms)', min: 100, max: 8000 },
+      { key: 'close_ms', label: 'Close Time (ms)', min: 100, max: 8000 },
+      { key: 'closed_angle', label: 'Closed Angle (°)', min: 0, max: 180 },
+      { key: 'open_angle', label: 'Open Angle (°)', min: 0, max: 180 },
+      { key: 'sweep_speed_dps', label: 'Sweep Speed (°/s)', min: 30, max: 360 },
+      { key: 'max_run_ms', label: 'Max Safety Cutoff (ms)', min: 500, max: 15000 }
+    ];
+    const parsed = {};
+    for (const f of numericFields) {
+      const raw = cfg[f.key];
+      if (raw === '' || raw === null || raw === undefined || !Number.isFinite(Number(raw))) {
+        showToastBanner('error', `Please enter a valid number for ${f.label} (${f.min}–${f.max}).`);
+        return false;
+      }
+      const num = Math.round(Number(raw));
+      if (num < f.min || num > f.max) {
+        showToastBanner('error', `${f.label} must be between ${f.min} and ${f.max}.`);
+        return false;
+      }
+      parsed[f.key] = num;
+    }
+
+    setSavingSettings(true);
+    try {
+      const res = await axios.put(`/api/biometric/devices/${activeDevice.device_id}/toggle`, {
+        tray_config: {
+          enabled: Boolean(cfg.enabled),
+          mode: cfg.mode || 'LIMIT_360',
+          invert_direction: Boolean(cfg.invert_direction),
+          auto_home_on_boot: Boolean(cfg.auto_home_on_boot),
+          ...parsed
+        }
+      });
+      if (res.data.success) {
+        setDevices(prev => prev.map(d => (d.device_id === activeDevice.device_id ? res.data.data : d)));
+        if (!silentSuccess) {
+          showToastBanner('success', 'Motorized tray defaults saved & syncing to ESP32 (~5s).');
+        }
+        return true;
+      }
+      return false;
+    } catch (err) {
+      showToastBanner('error', err.response?.data?.message || 'Failed to save tray settings');
+      return false;
+    } finally {
+      setSavingSettings(false);
+    }
+  };
+
+  // Queue a live motorized tray action to ESP32 (auto-saves unsaved edits first!)
+  const handleTrayCommand = async (action, durationMs = null) => {
+    if (!activeDevice || sendingTrayCmd || savingSettings) return;
+    setSendingTrayCmd(action);
+    try {
+      const isMotionCmd = ['TRAY_OPEN', 'TRAY_CLOSE', 'TRAY_HOME', 'TRAY_NUDGE_OPEN', 'TRAY_NUDGE_CLOSE'].includes(action);
+      if (isMotionCmd && isTrayConfigDirty) {
+        const savedOk = await handleSaveTrayConfig(null, { silentSuccess: true });
+        if (!savedOk) return;
+      }
+      const payload = { action };
+      if (durationMs !== null) payload.duration_ms = Number(durationMs);
+      const res = await axios.post(`/api/biometric/devices/${activeDevice.device_id}/tray-command`, payload);
+      if (res.data.success) {
+        if (res.data.data?.pending_command) {
+          setLiveCommand(res.data.data.pending_command);
+        }
+        showToastBanner('success', res.data.message);
+      }
+    } catch (err) {
+      showToastBanner('error', err.response?.data?.message || 'Failed to send tray command');
+    } finally {
+      setSendingTrayCmd('');
     }
   };
 
@@ -768,9 +966,11 @@ const BiometricGatePanel = () => {
             className={`pointer-events-none absolute -top-24 -right-24 w-72 h-72 rounded-full blur-3xl opacity-20 transition-colors duration-500 ${
               !activeDevice?.is_online
                 ? 'bg-slate-500'
-                : activeDevice?.sensing_enabled
-                  ? 'bg-emerald-500'
-                  : 'bg-rose-500'
+                : activeDevice?.device_power_on === false
+                  ? 'bg-amber-500'
+                  : activeDevice?.sensing_enabled
+                    ? 'bg-emerald-500'
+                    : 'bg-rose-500'
             }`}
           />
 
@@ -790,9 +990,11 @@ const BiometricGatePanel = () => {
                   <div className="flex items-start sm:items-center gap-3.5 min-w-0">
                     <div
                       className={`w-12 h-12 sm:w-14 sm:h-14 rounded-2xl flex items-center justify-center border shrink-0 transition-all ${
-                        activeDevice.sensing_enabled
-                          ? 'bg-gradient-to-br from-emerald-500/20 to-teal-500/5 border-emerald-500/35 text-emerald-400 shadow-lg shadow-emerald-500/10'
-                          : 'bg-gradient-to-br from-rose-500/20 to-orange-500/5 border-rose-500/35 text-rose-400 shadow-lg shadow-rose-500/10'
+                        activeDevice.device_power_on === false
+                          ? 'bg-gradient-to-br from-amber-500/20 to-slate-800/20 border-amber-500/35 text-amber-300 shadow-lg shadow-amber-500/10'
+                          : activeDevice.sensing_enabled
+                            ? 'bg-gradient-to-br from-emerald-500/20 to-teal-500/5 border-emerald-500/35 text-emerald-400 shadow-lg shadow-emerald-500/10'
+                            : 'bg-gradient-to-br from-rose-500/20 to-orange-500/5 border-rose-500/35 text-rose-400 shadow-lg shadow-rose-500/10'
                       }`}
                     >
                       <Cpu size={24} />
@@ -816,6 +1018,12 @@ const BiometricGatePanel = () => {
                           {activeDevice.is_online ? <Wifi size={11} /> : <WifiOff size={11} />}
                           {activeDevice.is_online ? 'Online' : 'Offline'}
                         </span>
+                        {activeDevice.device_power_on === false && (
+                          <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full badge-glow-amber">
+                            <Power size={10} />
+                            Standby (OFF)
+                          </span>
+                        )}
                         {sensorDriftDetected && (
                           <button
                             type="button"
@@ -856,31 +1064,81 @@ const BiometricGatePanel = () => {
                     </div>
                   </div>
 
-                  {/* Right: Primary Power Switch + Collapsible Settings Toggle */}
+                  {/* Right: Device Power Switch + Scanner Sensing Switch + Settings Toggle */}
                   <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5 shrink-0">
                     <button
                       type="button"
+                      onClick={handleToggleDevicePower}
+                      disabled={togglingPower}
+                      className={`px-4 py-3 rounded-2xl font-bold text-xs sm:text-sm transition-all flex items-center justify-center gap-2.5 shadow-lg active:scale-[0.98] disabled:opacity-60 ${
+                        activeDevice.device_power_on === false
+                          ? 'bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-500 hover:to-orange-500 text-white shadow-amber-600/25 border border-amber-400/35'
+                          : 'bg-dark-950/90 hover:bg-dark-900 text-slate-100 border border-dark-700 hover:border-amber-500/40'
+                      }`}
+                      title={
+                        activeDevice.device_power_on === false
+                          ? 'Wake ESP32 from Standby (turns OLED ON & extends tray)'
+                          : 'Put ESP32 into Power OFF Standby (retracts tray, OLED OFF, low-power Wi-Fi)'
+                      }
+                    >
+                      <div
+                        className={`p-1.5 rounded-xl ${
+                          activeDevice.device_power_on === false
+                            ? 'bg-white/20 text-white'
+                            : 'bg-amber-500/15 text-amber-300'
+                        }`}
+                      >
+                        <Power size={15} />
+                      </div>
+                      <div className="text-left">
+                        <span className="block leading-tight">
+                          {togglingPower
+                            ? 'Switching...'
+                            : activeDevice.device_power_on === false
+                              ? 'Power OFF'
+                              : 'Power ON'}
+                        </span>
+                        <span
+                          className={`block text-[10px] font-medium ${
+                            activeDevice.device_power_on === false ? 'text-white/85' : 'text-slate-400'
+                          }`}
+                        >
+                          {activeDevice.device_power_on === false ? 'Tap to wake (~12s)' : 'Tap for Standby'}
+                        </span>
+                      </div>
+                    </button>
+
+                    <button
+                      type="button"
                       onClick={handleToggleSensing}
-                      disabled={togglingSensing}
-                      className={`px-5 py-3 rounded-2xl font-bold text-xs sm:text-sm transition-all flex items-center justify-center gap-3 shadow-lg active:scale-[0.98] disabled:opacity-60 ${
-                        activeDevice.sensing_enabled
-                          ? 'bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white shadow-emerald-600/25 border border-emerald-400/30'
-                          : 'bg-gradient-to-r from-rose-600 to-pink-600 hover:from-rose-500 hover:to-pink-500 text-white shadow-rose-600/25 border border-rose-400/30'
+                      disabled={togglingSensing || activeDevice.device_power_on === false}
+                      className={`px-5 py-3 rounded-2xl font-bold text-xs sm:text-sm transition-all flex items-center justify-center gap-3 shadow-lg active:scale-[0.98] disabled:opacity-50 ${
+                        activeDevice.device_power_on === false
+                          ? 'bg-dark-900/90 text-slate-400 border border-dark-800 shadow-none cursor-not-allowed'
+                          : activeDevice.sensing_enabled
+                            ? 'bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white shadow-emerald-600/25 border border-emerald-400/30'
+                            : 'bg-gradient-to-r from-rose-600 to-pink-600 hover:from-rose-500 hover:to-pink-500 text-white shadow-rose-600/25 border border-rose-400/30'
                       }`}
                     >
                       <div className="p-1.5 rounded-xl bg-white/15">
-                        <Power size={16} />
+                        <Fingerprint size={16} />
                       </div>
                       <div className="text-left">
                         <span className="block leading-tight">
                           {togglingSensing
                             ? 'Updating ESP32...'
-                            : activeDevice.sensing_enabled
-                              ? 'Scanner Active'
-                              : 'Scanner Paused'}
+                            : activeDevice.device_power_on === false
+                              ? 'Scanner Asleep'
+                              : activeDevice.sensing_enabled
+                                ? 'Scanner Active'
+                                : 'Scanner Paused'}
                         </span>
                         <span className="block text-[10px] font-medium text-white/80">
-                          {activeDevice.sensing_enabled ? 'Tap to pause sensing' : 'Tap to resume sensing'}
+                          {activeDevice.device_power_on === false
+                            ? 'Wake device first'
+                            : activeDevice.sensing_enabled
+                              ? 'Tap to pause sensing'
+                              : 'Tap to resume sensing'}
                         </span>
                       </div>
                     </button>
@@ -946,6 +1204,33 @@ const BiometricGatePanel = () => {
                     >
                       <Bookmark size={12} className="text-cyan-400" />
                       <span>Session: <strong>{activeDevice.pinned_session_name || 'Auto Timetable'}</strong></span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowSettingsDrawer(true);
+                        setShowTrayControls(true);
+                      }}
+                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border transition hover:brightness-110 ${
+                        activeDevice.tray_state === 'FAULT'
+                          ? 'bg-rose-500/15 border-rose-500/40 text-rose-300'
+                          : activeDevice.tray_state === 'OPEN'
+                            ? 'bg-cyan-500/10 border-cyan-500/30 text-cyan-300'
+                            : 'bg-dark-950/60 border-dark-800 text-slate-300 hover:border-dark-700'
+                      }`}
+                    >
+                      <Sliders size={12} className={activeDevice.tray_state === 'FAULT' ? 'text-rose-400' : 'text-cyan-400'} />
+                      <span>
+                        Tray: <strong>{activeDevice.tray_state || 'UNKNOWN'}</strong>{' '}
+                        <span className="font-mono text-[10px] text-slate-400">
+                          ({activeDevice.tray_config?.mode === 'LIMIT_360'
+                            ? 'Mouse SW'
+                            : activeDevice.tray_config?.mode === 'ANGLE_180'
+                              ? `${activeDevice.tray_config?.closed_angle ?? 10}°-${activeDevice.tray_config?.open_angle ?? 110}°`
+                              : `${activeDevice.tray_config?.open_ms ?? 1060}/${activeDevice.tray_config?.close_ms ?? 1060}ms`})
+                        </span>
+                      </span>
                     </button>
                   </div>
                 )}
@@ -1076,6 +1361,616 @@ const BiometricGatePanel = () => {
                       </div>
                     </div>
 
+                    {/* Collapsible Motorized Tray v3.0 (3-Mode Actuator + Live Mouse Switch Panel) */}
+                    <div className="rounded-xl bg-dark-950/75 border border-dark-800/90 overflow-hidden">
+                      <button
+                        type="button"
+                        onClick={() => setShowTrayControls(prev => !prev)}
+                        className="w-full px-4 py-2.5 flex items-center justify-between text-xs font-semibold text-slate-300 hover:text-white transition"
+                      >
+                        <span className="flex items-center gap-2 flex-wrap">
+                          <Sliders size={13} className="text-cyan-400" />
+                          <span>Motorized Cabinet Tray (v3.0)</span>
+                          <span
+                            className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full border ${
+                              activeDevice.tray_state === 'FAULT'
+                                ? 'bg-rose-500/15 text-rose-300 border-rose-500/40'
+                                : activeDevice.tray_state === 'OPEN'
+                                  ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30'
+                                  : activeDevice.tray_state === 'CLOSED'
+                                    ? 'bg-slate-500/10 text-slate-300 border-slate-500/30'
+                                    : 'bg-amber-500/10 text-amber-300 border-amber-500/30'
+                            }`}
+                          >
+                            {activeDevice.tray_state || 'UNKNOWN'}
+                          </span>
+                          <span className="text-[10px] font-mono px-2 py-0.5 rounded-md bg-dark-900 border border-dark-800 text-cyan-300">
+                            {trayForm.mode === 'LIMIT_360'
+                              ? '360° + Mouse Switches'
+                              : trayForm.mode === 'ANGLE_180'
+                                ? '180° Positional'
+                                : '360° Timed'}
+                          </span>
+                        </span>
+                        {showTrayControls ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
+                      </button>
+
+                      {showTrayControls && (
+                        <div className="px-4 pb-4 pt-3 space-y-4 border-t border-dark-800/70 text-xs">
+                          {/* FAULT Alert Banner */}
+                          {activeDevice.tray_state === 'FAULT' && (
+                            <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/35 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-rose-200">
+                              <div className="flex items-center gap-2 text-[11px]">
+                                <AlertTriangle size={15} className="text-rose-400 shrink-0" />
+                                <span>
+                                  <strong>Tray Safety Fault:</strong> {activeDevice.tray_fault || 'Limit switch was not triggered before safety timeout.'}
+                                </span>
+                              </div>
+                              <button
+                                type="button"
+                                disabled={Boolean(sendingTrayCmd) || !activeDevice.is_online}
+                                onClick={() => handleTrayCommand('TRAY_HOME')}
+                                className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-[11px] font-bold text-white shrink-0 transition disabled:opacity-40"
+                              >
+                                Home &amp; Clear Fault
+                              </button>
+                            </div>
+                          )}
+
+                          {/* Live Mouse Switch Status Strip (works in ALL modes for instant wiring verification!) */}
+                          <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-xl bg-dark-900/80 border border-dark-800">
+                            <span className="text-[11px] font-bold text-slate-300 flex items-center gap-1.5">
+                              <Activity size={13} className="text-cyan-400" />
+                              <span>Live Mouse Limit Switches</span>
+                            </span>
+                            <div className="flex items-center gap-2 text-[11px]">
+                              <span
+                                className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full font-mono font-bold border ${
+                                  activeDevice.tray_switches?.closed
+                                    ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300'
+                                    : 'bg-dark-950 border-dark-800 text-slate-400'
+                                }`}
+                              >
+                                <span className={`w-1.5 h-1.5 rounded-full ${activeDevice.tray_switches?.closed ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'}`} />
+                                CLOSED (GPIO 26): {activeDevice.tray_switches?.closed ? 'CLICKED' : 'OPEN'}
+                              </span>
+                              <span
+                                className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full font-mono font-bold border ${
+                                  activeDevice.tray_switches?.open
+                                    ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300'
+                                    : 'bg-dark-950 border-dark-800 text-slate-400'
+                                }`}
+                              >
+                                <span className={`w-1.5 h-1.5 rounded-full ${activeDevice.tray_switches?.open ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'}`} />
+                                OPEN (GPIO 27): {activeDevice.tray_switches?.open ? 'CLICKED' : 'OPEN'}
+                              </span>
+                            </div>
+                          </div>
+
+                          {/* 3-Mode Actuator Selector */}
+                          <div className="space-y-1.5">
+                            <span className="block text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                              Actuator Control Mode
+                            </span>
+                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                              {[
+                                {
+                                  id: 'LIMIT_360',
+                                  title: '360° + Mouse Switches',
+                                  badge: 'Recommended',
+                                  desc: 'Zero-drift exact stops via GPIO 26/27 microswitches + jam cutoff.'
+                                },
+                                {
+                                  id: 'TIMED_360',
+                                  title: '360° Timed Only',
+                                  badge: 'Bench Test',
+                                  desc: 'Independent Open/Close ms timing with NVS position memory.'
+                                },
+                                {
+                                  id: 'ANGLE_180',
+                                  title: '180° Positional Servo',
+                                  badge: 'MG90S / SG90',
+                                  desc: 'Smooth angular sweep between exact Closed & Open degrees.'
+                                }
+                              ].map(m => (
+                                <button
+                                  key={m.id}
+                                  type="button"
+                                  onClick={() => setTrayForm(prev => ({ ...prev, mode: m.id }))}
+                                  className={`p-3 rounded-xl border text-left transition ${
+                                    trayForm.mode === m.id
+                                      ? 'bg-primary-600/15 border-primary-500/50 text-white shadow-md shadow-primary-600/10'
+                                      : 'bg-dark-900/70 border-dark-800 text-slate-300 hover:border-dark-700'
+                                  }`}
+                                >
+                                  <div className="flex items-center justify-between gap-1.5">
+                                    <span className="font-bold text-xs">{m.title}</span>
+                                    <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded-full ${
+                                      trayForm.mode === m.id
+                                        ? 'bg-primary-500/25 text-primary-200'
+                                        : 'bg-dark-800 text-slate-400'
+                                    }`}>
+                                      {m.badge}
+                                    </span>
+                                  </div>
+                                  <p className="text-[10px] text-slate-400 mt-1 leading-snug">{m.desc}</p>
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+
+                          {/* Live Remote Action Buttons */}
+                          <div className="space-y-2">
+                            <div className="flex items-center justify-between flex-wrap gap-2">
+                              <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                                Live Remote Controls
+                              </span>
+                              {trayForm.mode !== 'ANGLE_180' && (
+                                <div className="flex items-center gap-1.5 text-[11px] text-slate-400">
+                                  <span>Nudge:</span>
+                                  {[100, 200, 400].map(ms => (
+                                    <button
+                                      key={ms}
+                                      type="button"
+                                      onClick={() => setTrayNudgeMs(ms)}
+                                      className={`px-2 py-0.5 rounded-md font-mono font-semibold border transition ${
+                                        trayNudgeMs === ms
+                                          ? 'bg-cyan-500/20 border-cyan-500/40 text-cyan-200'
+                                          : 'bg-dark-900 border-dark-800 text-slate-400 hover:text-white'
+                                      }`}
+                                    >
+                                      {ms}ms
+                                    </button>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+
+                            <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2">
+                              <button
+                                type="button"
+                                disabled={Boolean(sendingTrayCmd) || savingSettings || !activeDevice.is_online || activeDevice.device_power_on === false}
+                                onClick={() => handleTrayCommand('TRAY_OPEN')}
+                                className="px-3 py-2 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/35 text-emerald-200 font-bold text-[11px] transition disabled:opacity-40"
+                              >
+                                {sendingTrayCmd === 'TRAY_OPEN' ? 'Sending...' : 'Test Extend'}
+                              </button>
+                              <button
+                                type="button"
+                                disabled={Boolean(sendingTrayCmd) || savingSettings || !activeDevice.is_online || activeDevice.device_power_on === false}
+                                onClick={() => handleTrayCommand('TRAY_CLOSE')}
+                                className="px-3 py-2 rounded-xl bg-rose-600/20 hover:bg-rose-600/30 border border-rose-500/35 text-rose-200 font-bold text-[11px] transition disabled:opacity-40"
+                              >
+                                {sendingTrayCmd === 'TRAY_CLOSE' ? 'Sending...' : 'Test Retract'}
+                              </button>
+                              <button
+                                type="button"
+                                disabled={Boolean(sendingTrayCmd) || savingSettings || !activeDevice.is_online}
+                                onClick={() => handleTrayCommand('TRAY_STOP')}
+                                className="px-3 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-extrabold text-[11px] transition disabled:opacity-40 shadow-md shadow-rose-600/20"
+                              >
+                                {sendingTrayCmd === 'TRAY_STOP' ? 'Stopping...' : 'STOP'}
+                              </button>
+                              {trayForm.mode === 'LIMIT_360' && (
+                                <button
+                                  type="button"
+                                  disabled={Boolean(sendingTrayCmd) || savingSettings || !activeDevice.is_online || activeDevice.device_power_on === false}
+                                  onClick={() => handleTrayCommand('TRAY_HOME')}
+                                  className="px-3 py-2 rounded-xl bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/35 text-indigo-200 font-bold text-[11px] transition disabled:opacity-40"
+                                >
+                                  {sendingTrayCmd === 'TRAY_HOME' ? 'Homing...' : 'Home (Closed)'}
+                                </button>
+                              )}
+                              {trayForm.mode !== 'ANGLE_180' && (
+                                <>
+                                  <button
+                                    type="button"
+                                    disabled={Boolean(sendingTrayCmd) || savingSettings || !activeDevice.is_online || activeDevice.device_power_on === false}
+                                    onClick={() => handleTrayCommand('TRAY_NUDGE_OPEN', trayNudgeMs)}
+                                    className="px-3 py-2 rounded-xl bg-cyan-600/15 hover:bg-cyan-600/25 border border-cyan-500/30 text-cyan-200 font-semibold text-[11px] transition disabled:opacity-40"
+                                  >
+                                    {sendingTrayCmd === 'TRAY_NUDGE_OPEN' ? 'Nudging...' : 'Nudge Out'}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={Boolean(sendingTrayCmd) || savingSettings || !activeDevice.is_online || activeDevice.device_power_on === false}
+                                    onClick={() => handleTrayCommand('TRAY_NUDGE_CLOSE', trayNudgeMs)}
+                                    className="px-3 py-2 rounded-xl bg-amber-600/15 hover:bg-amber-600/25 border border-amber-500/30 text-amber-200 font-semibold text-[11px] transition disabled:opacity-40"
+                                  >
+                                    {sendingTrayCmd === 'TRAY_NUDGE_CLOSE' ? 'Nudging...' : 'Nudge In'}
+                                  </button>
+                                </>
+                              )}
+                              <button
+                                type="button"
+                                disabled={Boolean(sendingTrayCmd) || savingSettings || !activeDevice.is_online || activeDevice.device_power_on === false}
+                                onClick={() => handleTrayCommand('TRAY_SET_CLOSED')}
+                                className="px-3 py-2 rounded-xl bg-dark-900 hover:bg-dark-800 border border-dark-700 text-slate-200 font-semibold text-[11px] transition disabled:opacity-40"
+                                title="Tell ESP32 the tray is currently CLOSED without spinning motor"
+                              >
+                                Mark Closed
+                              </button>
+                              {trayForm.mode === 'TIMED_360' && (
+                                <button
+                                  type="button"
+                                  disabled={Boolean(sendingTrayCmd) || savingSettings || !activeDevice.is_online || activeDevice.device_power_on === false}
+                                  onClick={() => handleTrayCommand('TRAY_SET_OPEN')}
+                                  className="px-3 py-2 rounded-xl bg-dark-900 hover:bg-dark-800 border border-dark-700 text-slate-200 font-semibold text-[11px] transition disabled:opacity-40"
+                                  title="Tell ESP32 the tray is currently OPEN without spinning motor"
+                                >
+                                  Mark Open
+                                </button>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* MODE-SPECIFIC PARAMETERS */}
+                          {trayForm.mode === 'LIMIT_360' && (
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                              <div className="p-3 rounded-xl bg-dark-900/70 border border-dark-800">
+                                <div className="flex items-center justify-between mb-1.5">
+                                  <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                                    Motor Speed (%)
+                                  </label>
+                                  <span className="text-xs font-mono font-bold text-cyan-300">{trayForm.speed_pct}%</span>
+                                </div>
+                                <input
+                                  type="range"
+                                  min={20}
+                                  max={100}
+                                  step={5}
+                                  value={trayForm.speed_pct}
+                                  onChange={(e) => setTrayForm(prev => ({ ...prev, speed_pct: Number(e.target.value) }))}
+                                  className="w-full accent-primary-500"
+                                />
+                                <p className="text-[10px] text-slate-500 mt-1">
+                                  70–85% gives smooth torque while protecting SG90 plastic gears.
+                                </p>
+                              </div>
+                              <div className="p-3 rounded-xl bg-dark-900/70 border border-dark-800">
+                                <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
+                                  Jam Safety Cutoff (ms)
+                                </label>
+                                <input
+                                  type="number"
+                                  min={500}
+                                  max={15000}
+                                  step={250}
+                                  value={trayForm.max_run_ms}
+                                  onChange={(e) => setTrayForm(prev => ({ ...prev, max_run_ms: e.target.value }))}
+                                  className="w-full px-2.5 py-1.5 rounded-lg bg-dark-950 border border-dark-700 text-xs font-mono text-white"
+                                />
+                                <p className="text-[10px] text-slate-500 mt-1">
+                                  Cuts power &amp; triggers FAULT if mouse switch doesn&apos;t click in time.
+                                </p>
+                              </div>
+                            </div>
+                          )}
+
+                          {trayForm.mode === 'TIMED_360' && (
+                            <div className="space-y-3 pt-1">
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                                  Quick Round Presets
+                                </span>
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                  {[
+                                    { label: '1 Round (~360°)', ms: 530 },
+                                    { label: '2 Rounds (~720°)', ms: 1060 },
+                                    { label: '3 Rounds (~1080°)', ms: 1590 }
+                                  ].map(preset => (
+                                    <button
+                                      key={preset.ms}
+                                      type="button"
+                                      onClick={() => setTrayForm(prev => ({ ...prev, open_ms: preset.ms, close_ms: preset.ms }))}
+                                      className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition ${
+                                        Number(trayForm.open_ms) === preset.ms && Number(trayForm.close_ms) === preset.ms
+                                          ? 'bg-primary-500/20 border-primary-500/40 text-primary-200'
+                                          : 'bg-dark-900 border-dark-800 text-slate-300 hover:border-dark-700 hover:text-white'
+                                      }`}
+                                    >
+                                      {preset.label}
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+
+                              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                                <div>
+                                  <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
+                                    Open Time (ms)
+                                  </label>
+                                  <input
+                                    type="number"
+                                    min={100}
+                                    max={8000}
+                                    step={20}
+                                    value={trayForm.open_ms}
+                                    onChange={(e) => setTrayForm(prev => ({ ...prev, open_ms: e.target.value }))}
+                                    className="w-full px-2.5 py-1.5 rounded-lg bg-dark-900 border border-dark-700 text-xs font-mono text-white"
+                                  />
+                                  <div className="grid grid-cols-4 gap-1 mt-1">
+                                    {[-50, -20, 20, 50].map(d => (
+                                      <button
+                                        key={d}
+                                        type="button"
+                                        onClick={() => adjustTrayMs('open_ms', d)}
+                                        className="py-0.5 rounded bg-dark-900 hover:bg-dark-800 border border-dark-800 text-[10px] font-mono text-slate-300 transition"
+                                      >
+                                        {d > 0 ? `+${d}` : d}
+                                      </button>
+                                    ))}
+                                  </div>
+                                </div>
+                                <div>
+                                  <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
+                                    Close Time (ms)
+                                  </label>
+                                  <input
+                                    type="number"
+                                    min={100}
+                                    max={8000}
+                                    step={20}
+                                    value={trayForm.close_ms}
+                                    onChange={(e) => setTrayForm(prev => ({ ...prev, close_ms: e.target.value }))}
+                                    className="w-full px-2.5 py-1.5 rounded-lg bg-dark-900 border border-dark-700 text-xs font-mono text-white"
+                                  />
+                                  <div className="grid grid-cols-4 gap-1 mt-1">
+                                    {[-50, -20, 20, 50].map(d => (
+                                      <button
+                                        key={d}
+                                        type="button"
+                                        onClick={() => adjustTrayMs('close_ms', d)}
+                                        className="py-0.5 rounded bg-dark-900 hover:bg-dark-800 border border-dark-800 text-[10px] font-mono text-slate-300 transition"
+                                      >
+                                        {d > 0 ? `+${d}` : d}
+                                      </button>
+                                    ))}
+                                  </div>
+                                </div>
+                                <div className="p-2.5 rounded-xl bg-dark-900/70 border border-dark-800">
+                                  <div className="flex items-center justify-between mb-1">
+                                    <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                                      Speed (%)
+                                    </label>
+                                    <span className="text-xs font-mono font-bold text-cyan-300">{trayForm.speed_pct}%</span>
+                                  </div>
+                                  <input
+                                    type="range"
+                                    min={20}
+                                    max={100}
+                                    step={5}
+                                    value={trayForm.speed_pct}
+                                    onChange={(e) => setTrayForm(prev => ({ ...prev, speed_pct: Number(e.target.value) }))}
+                                    className="w-full accent-primary-500"
+                                  />
+                                </div>
+                              </div>
+                            </div>
+                          )}
+
+                          {trayForm.mode === 'ANGLE_180' && (
+                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
+                              <div className="p-3 rounded-xl bg-dark-900/70 border border-dark-800">
+                                <div className="flex items-center justify-between mb-1">
+                                  <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                                    Closed Angle
+                                  </label>
+                                  <span className="text-xs font-mono font-bold text-slate-200">{trayForm.closed_angle}°</span>
+                                </div>
+                                <input
+                                  type="range"
+                                  min={0}
+                                  max={180}
+                                  step={1}
+                                  value={trayForm.closed_angle}
+                                  onChange={(e) => setTrayForm(prev => ({ ...prev, closed_angle: Number(e.target.value) }))}
+                                  className="w-full accent-primary-500"
+                                />
+                              </div>
+                              <div className="p-3 rounded-xl bg-dark-900/70 border border-dark-800">
+                                <div className="flex items-center justify-between mb-1">
+                                  <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                                    Open Angle
+                                  </label>
+                                  <span className="text-xs font-mono font-bold text-emerald-300">{trayForm.open_angle}°</span>
+                                </div>
+                                <input
+                                  type="range"
+                                  min={0}
+                                  max={180}
+                                  step={1}
+                                  value={trayForm.open_angle}
+                                  onChange={(e) => setTrayForm(prev => ({ ...prev, open_angle: Number(e.target.value) }))}
+                                  className="w-full accent-emerald-500"
+                                />
+                              </div>
+                              <div className="p-3 rounded-xl bg-dark-900/70 border border-dark-800">
+                                <div className="flex items-center justify-between mb-1">
+                                  <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                                    Sweep Speed
+                                  </label>
+                                  <span className="text-xs font-mono font-bold text-cyan-300">{trayForm.sweep_speed_dps}°/s</span>
+                                </div>
+                                <input
+                                  type="range"
+                                  min={30}
+                                  max={360}
+                                  step={10}
+                                  value={trayForm.sweep_speed_dps}
+                                  onChange={(e) => setTrayForm(prev => ({ ...prev, sweep_speed_dps: Number(e.target.value) }))}
+                                  className="w-full accent-cyan-500"
+                                />
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Toggles + Collapsible Advanced Trim + Save Row */}
+                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-1">
+                            <div className="flex flex-wrap items-center gap-4">
+                              <label className="inline-flex items-center gap-2 cursor-pointer text-[11px] text-slate-300">
+                                <input
+                                  type="checkbox"
+                                  checked={trayForm.enabled}
+                                  onChange={(e) => setTrayForm(prev => ({ ...prev, enabled: e.target.checked }))}
+                                  className="rounded border-dark-700 bg-dark-900 text-primary-500"
+                                />
+                                <span>Tray Enabled</span>
+                              </label>
+                              {trayForm.mode !== 'ANGLE_180' && (
+                                <label className="inline-flex items-center gap-2 cursor-pointer text-[11px] text-slate-300">
+                                  <input
+                                    type="checkbox"
+                                    checked={trayForm.invert_direction}
+                                    onChange={(e) => setTrayForm(prev => ({ ...prev, invert_direction: e.target.checked }))}
+                                    className="rounded border-dark-700 bg-dark-900 text-primary-500"
+                                  />
+                                  <span>Invert Direction</span>
+                                </label>
+                              )}
+                              {trayForm.mode === 'LIMIT_360' && (
+                                <label className="inline-flex items-center gap-2 cursor-pointer text-[11px] text-slate-300">
+                                  <input
+                                    type="checkbox"
+                                    checked={trayForm.auto_home_on_boot}
+                                    onChange={(e) => setTrayForm(prev => ({ ...prev, auto_home_on_boot: e.target.checked }))}
+                                    className="rounded border-dark-700 bg-dark-900 text-primary-500"
+                                  />
+                                  <span>Auto-Home on Boot</span>
+                                </label>
+                              )}
+                              {trayForm.mode !== 'ANGLE_180' && (
+                                <button
+                                  type="button"
+                                  onClick={() => setShowTrayAdvanced(prev => !prev)}
+                                  className="text-[11px] text-cyan-400 hover:text-cyan-300 underline underline-offset-2"
+                                >
+                                  {showTrayAdvanced ? 'Hide Neutral Trim' : 'Advanced Neutral Trim'}
+                                </button>
+                              )}
+                            </div>
+
+                            <div className="flex items-center gap-2 flex-wrap">
+                              {isTrayConfigDirty && (
+                                <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                                  Unsaved
+                                </span>
+                              )}
+                              <button
+                                type="button"
+                                disabled={savingSettings}
+                                onClick={() => {
+                                  const defaults = {
+                                    enabled: true,
+                                    mode: 'LIMIT_360',
+                                    invert_direction: false,
+                                    speed_pct: 80,
+                                    stop_us: 1500,
+                                    open_ms: 1060,
+                                    close_ms: 1060,
+                                    closed_angle: 10,
+                                    open_angle: 110,
+                                    sweep_speed_dps: 120,
+                                    max_run_ms: 4500,
+                                    auto_home_on_boot: false
+                                  };
+                                  setTrayForm(defaults);
+                                  handleSaveTrayConfig(defaults);
+                                }}
+                                className="px-3 py-1.5 rounded-lg bg-dark-900 hover:bg-dark-800 border border-dark-700 text-[11px] font-semibold text-slate-300 transition disabled:opacity-40"
+                              >
+                                Reset Factory Default
+                              </button>
+                              <button
+                                type="button"
+                                disabled={savingSettings}
+                                onClick={() => handleSaveTrayConfig()}
+                                className="px-3.5 py-1.5 rounded-lg bg-primary-600 hover:bg-primary-500 text-[11px] font-bold text-white transition disabled:opacity-40 shadow-md shadow-primary-600/20"
+                              >
+                                {savingSettings ? 'Syncing...' : 'Save Default & Sync ESP32'}
+                              </button>
+                            </div>
+                          </div>
+
+                          {/* Optional Advanced Neutral Trim (hidden by default to keep UI super clean!) */}
+                          {showTrayAdvanced && trayForm.mode !== 'ANGLE_180' && (
+                            <div className="p-3 rounded-xl bg-dark-900/70 border border-dark-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                              <div>
+                                <span className="text-[11px] font-bold text-white block">Stop Neutral Trim (µs)</span>
+                                <span className="text-[10px] text-slate-400">
+                                  Only adjust (1350–1650 µs) if your 360° SG90 creeps slightly during braking.
+                                </span>
+                              </div>
+                              <input
+                                type="number"
+                                min={1350}
+                                max={1650}
+                                step={5}
+                                value={trayForm.stop_us}
+                                onChange={(e) => setTrayForm(prev => ({ ...prev, stop_us: e.target.value }))}
+                                className="w-28 px-2.5 py-1.5 rounded-lg bg-dark-950 border border-dark-700 text-xs font-mono text-white shrink-0"
+                              />
+                            </div>
+                          )}
+
+                          <p className="text-[11px] text-slate-400 leading-relaxed bg-dark-900/70 border border-dark-800/80 rounded-lg px-3 py-2">
+                            <strong className="text-cyan-300">Mouse Switch Wiring:</strong> Wire each 3-pin mouse microswitch with <strong>Pin 1 (under button = COM) → GND</strong> and <strong>Pin 2 (middle = NO) → GPIO 26 (CLOSED) / GPIO 27 (OPEN)</strong>. Click each switch by hand and watch the live badges above turn green before testing!
+                          </p>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Remote Power & ESP32 Maintenance Bar */}
+                    <div className="p-3.5 rounded-xl bg-dark-950/75 border border-dark-800/90 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5 text-xs font-bold text-white">
+                          <Power size={14} className={activeDevice.device_power_on === false ? 'text-amber-400' : 'text-emerald-400'} />
+                          <span>
+                            Device Power &amp; Maintenance:{' '}
+                            <span className={activeDevice.device_power_on === false ? 'text-amber-400' : 'text-emerald-400'}>
+                              {activeDevice.device_power_on === false ? 'STANDBY (OFF)' : 'POWERED ON'}
+                            </span>
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-slate-400 mt-0.5 leading-snug">
+                          {activeDevice.device_power_on === false
+                            ? 'OLED display is OFF, cabinet tray is closed, and Wi-Fi is in low-power standby (wakes in ~12s).'
+                            : 'Put hardware into low-power Standby (OLED OFF + tray retracted) or remotely reboot ESP32.'}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0 flex-wrap">
+                        <button
+                          type="button"
+                          disabled={togglingPower}
+                          onClick={handleToggleDevicePower}
+                          className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold border transition disabled:opacity-40 ${
+                            activeDevice.device_power_on === false
+                              ? 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-400/30'
+                              : 'bg-amber-500/15 hover:bg-amber-500/25 text-amber-200 border-amber-500/35'
+                          }`}
+                        >
+                          <Power size={12} />
+                          <span>
+                            {togglingPower
+                              ? 'Switching...'
+                              : activeDevice.device_power_on === false
+                                ? 'Wake Device (Power ON)'
+                                : 'Power OFF (Standby)'}
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={rebootingDevice || !activeDevice.is_online}
+                          onClick={handleRebootDevice}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 text-[11px] font-bold transition disabled:opacity-40"
+                          title="Remotely restart ESP32 (reconnects in ~15 seconds)"
+                        >
+                          <RotateCcw size={12} className={rebootingDevice ? 'animate-spin' : ''} />
+                          <span>{rebootingDevice ? 'Rebooting...' : 'Reboot ESP32'}</span>
+                        </button>
+                      </div>
+                    </div>
+
                     {/* Collapsible ESP32 Firmware Setup Credentials (SuperAdmin Only) */}
                     {isSuperAdmin && (
                       <div className="rounded-xl bg-dark-950/75 border border-dark-800/90 overflow-hidden">
@@ -1154,7 +2049,7 @@ const BiometricGatePanel = () => {
             </div>
             <div className="text-xs min-w-0">
               <p className="font-bold uppercase tracking-wider flex items-center gap-2 flex-wrap">
-                <span>{liveCommand.action !== 'NONE' ? liveCommand.action.replace('_', ' ') : 'Device Command'}</span>
+                <span>{liveCommand.action !== 'NONE' ? liveCommand.action.replaceAll('_', ' ') : 'Device Command'}</span>
                 <span className="text-[10px] px-2 py-0.5 rounded-full bg-black/25 border border-white/10">
                   {liveCommand.status}
                 </span>
