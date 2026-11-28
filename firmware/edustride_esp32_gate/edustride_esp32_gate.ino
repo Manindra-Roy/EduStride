@@ -30,7 +30,7 @@
 #include "config.h"
 
 #ifndef FIRMWARE_VERSION
-#define FIRMWARE_VERSION "3.1.2-ota"
+#define FIRMWARE_VERSION "3.2.0-ota"
 #endif
 #ifndef SERVER_FALLBACK_URL
 #define SERVER_FALLBACK_URL ""
@@ -205,6 +205,7 @@ TrayConfig pendingTrayCfg = trayCfg;
 volatile bool hasIncomingTrayCfg = false;
 
 volatile TrayState trayState = TRAY_ST_UNKNOWN;
+volatile int8_t lastTrayDirAttempt = 0; // +1 = last OPEN, -1 = last CLOSED, 0 = unknown
 volatile bool swClosedPressed = false;
 volatile bool swOpenPressed = false;
 char trayFaultMsg[96] = "";
@@ -217,12 +218,20 @@ String serialCmdBuffer = "";
 int64_t trayMotionStartUs = 0;
 int64_t trayMotionDurationUs = 0;
 int trayMotionPulseUs = 1500;
+int trayLastWrittenPulseUs = 0;
+float trayPosNorm = 0.0f;            // Smart position estimator: 0.0=CLOSED .. 1.0=OPEN
+float trayStartPosNorm = 0.0f;       // Position when current motion began
+int trayLearnedOpenMs = 0;           // Auto-learned LIMIT_360 full open travel time (NVS)
+int trayLearnedCloseMs = 0;          // Auto-learned LIMIT_360 full close travel time (NVS)
+int trayLearnedSpeedPct = 0;         // Speed % at which learned times were measured
+bool trayMotionIsFullSweep = false;  // Eligible to update auto-learned travel time
 bool trayBraking = false;
 unsigned long trayBrakeUntilMs = 0;
 bool trayBrakeBeepError = false;
 bool trayBrakeBeepNotice = false;
 unsigned long trayFingerWaitStartMs = 0;
 bool trayPendingRetractAfterLift = false;
+bool trayPendingRetractForce = false;
 unsigned long trayLastOledMs = 0;
 float trayAngleCur = (float)SERVO_CLOSED_ANGLE;
 float trayAngleStart = (float)SERVO_CLOSED_ANGLE;
@@ -2293,6 +2302,12 @@ void pollTraySwitches() {
   } else if (now - swClosedChangeMs >= 15UL && swClosedPressed != rawC) {
     swClosedPressed = rawC;
     Serial.printf("[SWITCH] CLOSED (GPIO %d) = %s\n", SERVO_LIMIT_CLOSED_PIN, rawC ? "PRESSED" : "RELEASED");
+    // Smart passive self-healing: if idle and physically seated on CLOSED switch, sync state & clear stale fault
+    if (rawC && !swOpenPressed && !isTrayMoving() && trayState != TRAY_ST_CLOSED) {
+      persistTrayOpenState(false);
+      trayPosNorm = 0.0f;
+      Serial.println("[SERVO] Passive sync: CLOSED switch pressed while idle -> state=CLOSED");
+    }
   }
 
   bool rawO = readRawSwitchOpen();
@@ -2302,6 +2317,12 @@ void pollTraySwitches() {
   } else if (now - swOpenChangeMs >= 15UL && swOpenPressed != rawO) {
     swOpenPressed = rawO;
     Serial.printf("[SWITCH] OPEN   (GPIO %d) = %s\n", SERVO_LIMIT_OPEN_PIN, rawO ? "PRESSED" : "RELEASED");
+    // Smart passive self-healing: if idle and physically seated on OPEN switch, sync state & clear stale fault
+    if (rawO && !swClosedPressed && !isTrayMoving() && trayState != TRAY_ST_OPEN) {
+      persistTrayOpenState(true);
+      trayPosNorm = 1.0f;
+      Serial.println("[SERVO] Passive sync: OPEN switch pressed while idle -> state=OPEN");
+    }
   }
 #endif
 }
@@ -2340,11 +2361,58 @@ int angleToPulseUs(float deg) {
   return (int)(500.0f + (c * 2000.0f) / 180.0f + 0.5f);
 }
 
-int get360PulseForDirection(bool extend) {
+int get360PulseForSpeed(bool extend, int speedPct) {
   bool forward = trayCfg.invertDirection ? !extend : extend;
-  int delta = (500 * constrain(trayCfg.speedPct, 20, 100)) / 100;
+  int delta = (500 * constrain(speedPct, 20, 100)) / 100;
   int target = forward ? (trayCfg.stopUs + delta) : (trayCfg.stopUs - delta);
   return constrain(target, 500, 2500);
+}
+
+int get360PulseForDirection(bool extend) {
+  return get360PulseForSpeed(extend, trayCfg.speedPct);
+}
+
+void saveLearnedTrayTimesToNvs() {
+  if (trayPrefs.begin("edustride_tray", false)) {
+    trayPrefs.putInt("learn_open", trayLearnedOpenMs);
+    trayPrefs.putInt("learn_close", trayLearnedCloseMs);
+    trayPrefs.putInt("learn_spd", trayLearnedSpeedPct);
+    trayPrefs.end();
+  }
+}
+
+void clearLearnedTrayTimes(const char* reason = "") {
+  trayLearnedOpenMs = 0;
+  trayLearnedCloseMs = 0;
+  trayLearnedSpeedPct = trayCfg.speedPct;
+  saveLearnedTrayTimesToNvs();
+  if (reason && reason[0] != '\0') {
+    Serial.printf("[SERVO] Cleared learned travel times (%s)\n", reason);
+  }
+}
+
+void recordLearnedTravelTime(bool isOpenDir, int elapsedMs) {
+  if (elapsedMs < 250 || elapsedMs > trayCfg.maxRunMs) return;
+  if (trayLearnedSpeedPct != trayCfg.speedPct) {
+    trayLearnedOpenMs = 0;
+    trayLearnedCloseMs = 0;
+    trayLearnedSpeedPct = trayCfg.speedPct;
+  }
+  int& slot = isOpenDir ? trayLearnedOpenMs : trayLearnedCloseMs;
+  slot = (slot == 0) ? elapsedMs : ((slot * 7 + elapsedMs * 3) / 10);
+  saveLearnedTrayTimesToNvs();
+  int smartCutoff = constrain(max(slot + 900, (slot * 17) / 10), 900, trayCfg.maxRunMs);
+  Serial.printf("[SERVO] Smart learned %s time = %dms (jam cutoff=%dms @ %d%% spd)\n",
+                isOpenDir ? "OPEN" : "CLOSE", slot, smartCutoff, trayCfg.speedPct);
+}
+
+unsigned long getSmartLimitTimeoutMs(bool extend, bool isHoming) {
+  if (isHoming) return (unsigned long)trayCfg.maxRunMs;
+  if (trayLearnedSpeedPct != trayCfg.speedPct) return (unsigned long)trayCfg.maxRunMs;
+  int learned = extend ? trayLearnedOpenMs : trayLearnedCloseMs;
+  if (learned < 250) return (unsigned long)trayCfg.maxRunMs;
+  int smartMs = constrain(max(learned + 900, (learned * 17) / 10), 900, trayCfg.maxRunMs);
+  return (unsigned long)smartMs;
 }
 
 void servoAttachPwm() {
@@ -2400,6 +2468,8 @@ void servoIdleLow() {
 
 void persistTrayOpenState(bool isOpen) {
   trayState = isOpen ? TRAY_ST_OPEN : TRAY_ST_CLOSED;
+  lastTrayDirAttempt = isOpen ? 1 : -1;
+  trayPosNorm = isOpen ? 1.0f : 0.0f;
   setTrayFaultReason("");
   if (trayPrefs.begin("edustride_tray", false)) {
     trayPrefs.putBool("extended", isOpen);
@@ -2452,6 +2522,12 @@ void applyIncomingTrayConfigIfNeeded() {
   );
   if (!changed) return;
 
+  bool speedOrInvertChanged = (
+    nextCfg.speedPct != trayCfg.speedPct ||
+    nextCfg.invertDirection != trayCfg.invertDirection ||
+    nextCfg.stopUs != trayCfg.stopUs
+  );
+
   if (stateMutex && xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
     trayCfg = nextCfg;
     xSemaphoreGive(stateMutex);
@@ -2459,6 +2535,9 @@ void applyIncomingTrayConfigIfNeeded() {
     trayCfg = nextCfg;
   }
   saveTrayConfigToNvs(trayCfg);
+  if (speedOrInvertChanged) {
+    clearLearnedTrayTimes("speed/direction/stop changed");
+  }
   Serial.printf("[SERVO] Live config synced: mode=%s en=%d spd=%d%% stop=%d open=%dms close=%dms ang=%d..%d max=%dms inv=%d\n",
                 trayModeToStr(trayCfg.mode), trayCfg.enabled ? 1 : 0, trayCfg.speedPct, trayCfg.stopUs,
                 trayCfg.openMs, trayCfg.closeMs, trayCfg.closedAngle, trayCfg.openAngle,
@@ -2489,6 +2568,7 @@ void servoEmergencyStop(const char* reason = "") {
 #if SERVO_ENABLED
   bool wasMoving = isTrayMoving();
   trayPendingRetractAfterLift = false;
+  trayPendingRetractForce = false;
   trayBraking = false;
   trayBrakeUntilMs = 0;
   trayBrakeBeepError = false;
@@ -2547,6 +2627,14 @@ void initServoTrayHardware() {
     trayCfg.maxRunMs = constrain(trayPrefs.getInt("max_run_ms", SERVO_MAX_RUN_MS), 500, 15000);
     trayCfg.autoHomeOnBoot = trayPrefs.getBool("auto_home", SERVO_AUTO_HOME_ON_BOOT);
     savedOpen = trayPrefs.getBool("extended", false);
+    trayLearnedOpenMs = constrain(trayPrefs.getInt("learn_open", 0), 0, 15000);
+    trayLearnedCloseMs = constrain(trayPrefs.getInt("learn_close", 0), 0, 15000);
+    trayLearnedSpeedPct = trayPrefs.getInt("learn_spd", trayCfg.speedPct);
+    if (trayLearnedSpeedPct != trayCfg.speedPct) {
+      trayLearnedOpenMs = 0;
+      trayLearnedCloseMs = 0;
+      trayLearnedSpeedPct = trayCfg.speedPct;
+    }
     trayPrefs.end();
   }
 
@@ -2558,11 +2646,14 @@ void initServoTrayHardware() {
   } else {
     trayState = savedOpen ? TRAY_ST_OPEN : TRAY_ST_CLOSED;
   }
+  lastTrayDirAttempt = (trayState == TRAY_ST_OPEN) ? 1 : -1;
+  trayPosNorm = (trayState == TRAY_ST_OPEN) ? 1.0f : 0.0f;
   trayAngleCur = (trayState == TRAY_ST_OPEN) ? (float)trayCfg.openAngle : (float)trayCfg.closedAngle;
 
-  Serial.printf("[SERVO] v3.0 Ready (GPIO %d, mode=%s, state=%s, swClosed=%d swOpen=%d)\n",
+  Serial.printf("[SERVO] v3.2 Smart Ready (GPIO %d, mode=%s, state=%s, swC=%d swO=%d, learn=%d/%dms)\n",
                 SERVO_PIN, trayModeToStr(trayCfg.mode), trayStateToApiString(trayState),
-                swClosedPressed ? 1 : 0, swOpenPressed ? 1 : 0);
+                swClosedPressed ? 1 : 0, swOpenPressed ? 1 : 0,
+                trayLearnedOpenMs, trayLearnedCloseMs);
 #else
   trayCfg.enabled = false;
   trayState = TRAY_ST_OPEN;
@@ -2572,21 +2663,53 @@ void initServoTrayHardware() {
 
 void drawTrayMotionOled(int pct) {
   if (!oledReady) return;
+  lastDrawnX = 999;
   const char* title = "MOVING TRAY";
   if (trayState == TRAY_ST_EXTENDING || trayState == TRAY_ST_NUDGING_OPEN) title = "EXTENDING TRAY";
   else if (trayState == TRAY_ST_RETRACTING || trayState == TRAY_ST_NUDGING_CLOSE) title = "RETRACTING TRAY";
   else if (trayState == TRAY_ST_HOMING) title = "HOMING TRAY";
 
-  String line3 = String("Mode: ") + trayModeToStr(trayCfg.mode);
-  String line4 = "SW C:" + String(swClosedPressed ? "1" : "0") + " O:" + String(swOpenPressed ? "1" : "0") + "  " + String(constrain(pct, 0, 100)) + "%";
-  showOledStatus(title, trayActiveSubtitle, line3, line4);
+  int clamped = constrain(pct, 0, 100);
+  display.clearDisplay();
+  display.fillRect(0, 0, SCREEN_WIDTH, 14, SSD1306_WHITE);
+  display.setTextColor(SSD1306_BLACK);
+  display.setTextSize(1);
+  display.setCursor(4, 3);
+  display.print(title);
+
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(2, 18);
+  display.print(trayActiveSubtitle.substring(0, 21));
+
+  display.setCursor(2, 31);
+  display.print(trayModeToStr(trayCfg.mode));
+  display.print(" C:");
+  display.print(swClosedPressed ? "1" : "0");
+  display.print(" O:");
+  display.print(swOpenPressed ? "1" : "0");
+
+  // Graphical progress bar + percentage
+  display.drawRoundRect(2, 46, 94, 12, 3, SSD1306_WHITE);
+  int fillW = (90 * clamped) / 100;
+  if (fillW > 0) {
+    display.fillRoundRect(4, 48, fillW, 8, 2, SSD1306_WHITE);
+  }
+  display.setCursor(100, 48);
+  display.print(clamped);
+  display.print("%");
+  display.display();
 }
 
-void beginTrayDrive(TrayState motionState, int pulseUs, unsigned long durationMs, const char* subtitle, bool beepOnDone) {
+void beginTrayDrive(TrayState motionState, int pulseUs, unsigned long durationMs, const char* subtitle, bool beepOnDone, bool isFullSweep = false) {
   // Briefly wait for any Core 0 HTTPS burst to clear so 5V/3.3V rails stay rock-solid
   unsigned long waitStart = millis();
   while (wifiBusy && millis() - waitStart < 1200UL) {
     delay(15);
+  }
+  // Smooth 50ms neutral pause if reversing an active 360° motor (protects plastic gears from snap-reverse)
+  if (servoMoving && trayCfg.mode != TRAY_MODE_ANGLE_180) {
+    servoWritePulseUs(trayCfg.stopUs);
+    delay(50);
   }
   servoMoving = true;
   trayBraking = false;
@@ -2594,12 +2717,19 @@ void beginTrayDrive(TrayState motionState, int pulseUs, unsigned long durationMs
   trayBrakeBeepError = false;
   trayBrakeBeepNotice = false;
   trayState = motionState;
+  trayStartPosNorm = trayPosNorm;
+  trayMotionIsFullSweep = isFullSweep;
+  if (motionState == TRAY_ST_EXTENDING) lastTrayDirAttempt = 1;
+  else if (motionState == TRAY_ST_RETRACTING || motionState == TRAY_ST_HOMING) lastTrayDirAttempt = -1;
   trayMotionPulseUs = pulseUs;
   trayMotionDurationUs = (int64_t)durationMs * 1000LL;
   trayMotionStartUs = esp_timer_get_time();
   trayActiveSubtitle = (subtitle && subtitle[0] != '\0') ? String(subtitle) : String("Motorized Tray");
   trayMotionBeepOnFinish = beepOnDone;
   trayLastOledMs = 0;
+
+  bool is360Sweep = (trayCfg.mode != TRAY_MODE_ANGLE_180) &&
+    (motionState == TRAY_ST_EXTENDING || motionState == TRAY_ST_RETRACTING || motionState == TRAY_ST_HOMING);
 
   if (trayCfg.mode == TRAY_MODE_ANGLE_180 && (motionState == TRAY_ST_EXTENDING || motionState == TRAY_ST_RETRACTING || motionState == TRAY_ST_HOMING)) {
     trayAngleStart = trayAngleCur;
@@ -2608,8 +2738,17 @@ void beginTrayDrive(TrayState motionState, int pulseUs, unsigned long durationMs
     unsigned long sweepMs = (unsigned long)((diff * 1000.0f) / (float)max(30, trayCfg.sweepSpeedDps));
     if (sweepMs < 180UL) sweepMs = 180UL;
     trayMotionDurationUs = (int64_t)sweepMs * 1000LL;
-    servoWritePulseUs(angleToPulseUs(trayAngleStart));
+    int startUs = angleToPulseUs(trayAngleStart);
+    trayLastWrittenPulseUs = startUs;
+    servoWritePulseUs(startUs);
+  } else if (is360Sweep) {
+    // Soft-start at ~50% of target speed (min 28% to clear deadband) and ramp smoothly in tickServoTray()
+    int startSpd = max(28, trayCfg.speedPct / 2);
+    int startUs = get360PulseForSpeed(motionState == TRAY_ST_EXTENDING, startSpd);
+    trayLastWrittenPulseUs = startUs;
+    servoWritePulseUs(startUs);
   } else {
+    trayLastWrittenPulseUs = pulseUs;
     servoWritePulseUs(pulseUs);
   }
   drawTrayMotionOled(0);
@@ -2622,7 +2761,18 @@ bool startTrayExtend(const char* subtitle = "Scanner Activated", bool forceMove 
   return false;
 #else
   if (!trayCfg.enabled && !forceMove) return false;
+  // Never double-start if already extending or finishing brake into OPEN
+  if (trayState == TRAY_ST_EXTENDING || (trayBraking && trayState == TRAY_ST_OPEN)) {
+    return true;
+  }
   trayPendingRetractAfterLift = false;
+  trayPendingRetractForce = false;
+
+  // Never repeat an automatic OPEN run if already OPEN or if the last automatic OPEN already timed out/faulted
+  if (!forceMove && (trayState == TRAY_ST_OPEN || (trayState == TRAY_ST_FAULT && lastTrayDirAttempt > 0))) {
+    Serial.println("[SERVO] Tray already OPEN (or faulted extending) — skipping duplicate extend.");
+    return false;
+  }
   setTrayFaultReason("");
 
   if (trayCfg.mode == TRAY_MODE_LIMIT_360) {
@@ -2641,21 +2791,27 @@ bool startTrayExtend(const char* subtitle = "Scanner Activated", bool forceMove 
       Serial.println("[SERVO] Already at OPEN mouse switch.");
       return false;
     }
-    beginTrayDrive(TRAY_ST_EXTENDING, get360PulseForDirection(true), (unsigned long)trayCfg.maxRunMs, subtitle, beepOnDone);
+    bool fullSweep = (trayState == TRAY_ST_CLOSED || swClosedPressed || trayPosNorm <= 0.15f);
+    unsigned long smartTimeoutMs = getSmartLimitTimeoutMs(true, false);
+    beginTrayDrive(TRAY_ST_EXTENDING, get360PulseForDirection(true), smartTimeoutMs, subtitle, beepOnDone, fullSweep);
     return true;
   }
   if (trayCfg.mode == TRAY_MODE_ANGLE_180) {
-    if (!forceMove && trayState == TRAY_ST_OPEN) return false;
-    beginTrayDrive(TRAY_ST_EXTENDING, angleToPulseUs(trayCfg.openAngle), 600, subtitle, beepOnDone);
+    beginTrayDrive(TRAY_ST_EXTENDING, angleToPulseUs(trayCfg.openAngle), 600, subtitle, beepOnDone, false);
     return true;
   }
-  // TIMED_360
-  if (!forceMove && trayState == TRAY_ST_OPEN) return false;
+  // TIMED_360 with smart partial-travel compensation on automatic reversals
   if (swOpenPressed && !swClosedPressed) {
     persistTrayOpenState(true);
     return false;
   }
-  beginTrayDrive(TRAY_ST_EXTENDING, get360PulseForDirection(true), (unsigned long)trayCfg.openMs, subtitle, beepOnDone);
+  unsigned long runMs = (unsigned long)trayCfg.openMs;
+  if (!forceMove && trayPosNorm > 0.08f && trayPosNorm < 0.92f) {
+    float rem = 1.0f - trayPosNorm;
+    runMs = min((unsigned long)trayCfg.openMs, max(180UL, (unsigned long)(trayCfg.openMs * rem) + 80UL));
+    Serial.printf("[SERVO] Smart partial-open from %.0f%% -> %lums\n", trayPosNorm * 100.0f, runMs);
+  }
+  beginTrayDrive(TRAY_ST_EXTENDING, get360PulseForDirection(true), runMs, subtitle, beepOnDone, false);
   return true;
 #endif
 }
@@ -2667,30 +2823,19 @@ bool startTrayRetract(const char* subtitle = "Scanner Paused", bool forceMove = 
   return false;
 #else
   if (!trayCfg.enabled && !forceMove && !isHoming) return false;
-  setTrayFaultReason("");
-
-  // Anti-pinch check: if a student's finger is on the R307S glass, wait briefly before closing!
-#if FP_USE_TOUCH_PIN
-  if (!isHoming && !skipPinchCheck && sensorReady && touchPinTriggered() && !trayPendingRetractAfterLift) {
-    trayPendingRetractAfterLift = true;
-    trayFingerWaitStartMs = millis();
-    trayActiveSubtitle = (subtitle && subtitle[0] != '\0') ? String(subtitle) : String("Closing cabinet");
-    trayMotionBeepOnFinish = beepOnDone;
-    showOledStatus("REMOVE FINGER", "Closing scanner", "Lift finger to", "retract tray...");
-    beepNotice();
-    return true;
-  }
-#endif
-  trayPendingRetractAfterLift = false;
-
-  // ANGLE_180: smooth sweep to closedAngle for BOTH normal retract and TRAY_HOME (never seek limit switches!)
-  if (trayCfg.mode == TRAY_MODE_ANGLE_180) {
-    if (!forceMove && !isHoming && trayState == TRAY_ST_CLOSED) return false;
-    beginTrayDrive(isHoming ? TRAY_ST_HOMING : TRAY_ST_RETRACTING, angleToPulseUs(trayCfg.closedAngle), 600, subtitle, beepOnDone);
+  // Never double-start if already retracting/homing or finishing brake into CLOSED
+  if (!isHoming && (trayState == TRAY_ST_RETRACTING || trayState == TRAY_ST_HOMING || (trayBraking && trayState == TRAY_ST_CLOSED))) {
     return true;
   }
 
-  // LIMIT_360: seek CLOSED mouse switch up to maxRunMs
+  // Never repeat an automatic CLOSE run if already CLOSED or if the last automatic CLOSE already timed out/faulted
+  // (e.g., clicking "Scanner Active -> Pause" and then "Power ON -> Standby" must NEVER run the servo twice!)
+  if (!forceMove && !isHoming && (trayState == TRAY_ST_CLOSED || (trayState == TRAY_ST_FAULT && lastTrayDirAttempt < 0))) {
+    Serial.println("[SERVO] Tray already CLOSED (or faulted retracting) — skipping duplicate retract.");
+    return false;
+  }
+
+  // Check endstops BEFORE anti-pinch so touch-pad noise never triggers a second run!
   if (trayCfg.mode == TRAY_MODE_LIMIT_360) {
     if (swClosedPressed && swOpenPressed) {
       String errMsg = "Both limit switches active — check wiring!";
@@ -2707,17 +2852,51 @@ bool startTrayRetract(const char* subtitle = "Scanner Paused", bool forceMove = 
       Serial.println("[SERVO] Already at CLOSED mouse switch.");
       return false;
     }
-    beginTrayDrive(isHoming ? TRAY_ST_HOMING : TRAY_ST_RETRACTING, get360PulseForDirection(false), (unsigned long)trayCfg.maxRunMs, subtitle, beepOnDone);
+  } else if (trayCfg.mode == TRAY_MODE_TIMED_360) {
+    if (swClosedPressed && !swOpenPressed) {
+      persistTrayOpenState(false);
+      return false;
+    }
+  }
+  setTrayFaultReason("");
+
+  // Anti-pinch check: if a student's finger is on the R307S glass, wait briefly before closing!
+#if FP_USE_TOUCH_PIN
+  if (!isHoming && !skipPinchCheck && sensorReady && touchPinTriggered() && !trayPendingRetractAfterLift) {
+    trayPendingRetractAfterLift = true;
+    trayPendingRetractForce = forceMove;
+    trayFingerWaitStartMs = millis();
+    trayActiveSubtitle = (subtitle && subtitle[0] != '\0') ? String(subtitle) : String("Closing cabinet");
+    trayMotionBeepOnFinish = beepOnDone;
+    showOledStatus("REMOVE FINGER", "Closing scanner", "Lift finger to", "retract tray...");
+    beepNotice();
+    return true;
+  }
+#endif
+  trayPendingRetractAfterLift = false;
+  trayPendingRetractForce = false;
+
+  // ANGLE_180: smooth sweep to closedAngle for BOTH normal retract and TRAY_HOME (never seek limit switches!)
+  if (trayCfg.mode == TRAY_MODE_ANGLE_180) {
+    beginTrayDrive(isHoming ? TRAY_ST_HOMING : TRAY_ST_RETRACTING, angleToPulseUs(trayCfg.closedAngle), 600, subtitle, beepOnDone, false);
     return true;
   }
 
-  // TIMED_360: always use closeMs (even on TRAY_HOME!) so plastic gears never grind for full maxRunMs
-  if (!forceMove && !isHoming && trayState == TRAY_ST_CLOSED) return false;
-  if (swClosedPressed && !swOpenPressed) {
-    persistTrayOpenState(false);
-    return false;
+  // LIMIT_360: seek CLOSED mouse switch with smart learned jam cutoff (full maxRunMs on explicit Home)
+  if (trayCfg.mode == TRAY_MODE_LIMIT_360) {
+    bool fullSweep = !isHoming && (trayState == TRAY_ST_OPEN || swOpenPressed || trayPosNorm >= 0.85f);
+    unsigned long smartTimeoutMs = getSmartLimitTimeoutMs(false, isHoming);
+    beginTrayDrive(isHoming ? TRAY_ST_HOMING : TRAY_ST_RETRACTING, get360PulseForDirection(false), smartTimeoutMs, subtitle, beepOnDone, fullSweep);
+    return true;
   }
-  beginTrayDrive(isHoming ? TRAY_ST_HOMING : TRAY_ST_RETRACTING, get360PulseForDirection(false), (unsigned long)trayCfg.closeMs, subtitle, beepOnDone);
+
+  // TIMED_360: smart partial-travel compensation on automatic close (full closeMs on explicit force/Home)
+  unsigned long runMs = (unsigned long)trayCfg.closeMs;
+  if (!forceMove && !isHoming && trayPosNorm > 0.08f && trayPosNorm < 0.92f) {
+    runMs = min((unsigned long)trayCfg.closeMs, max(180UL, (unsigned long)(trayCfg.closeMs * trayPosNorm) + 80UL));
+    Serial.printf("[SERVO] Smart partial-close from %.0f%% -> %lums\n", trayPosNorm * 100.0f, runMs);
+  }
+  beginTrayDrive(isHoming ? TRAY_ST_HOMING : TRAY_ST_RETRACTING, get360PulseForDirection(false), runMs, subtitle, beepOnDone, false);
   return true;
 #endif
 }
@@ -2828,8 +3007,10 @@ void tickServoTray() {
     bool fingerStillOn = false;
 #endif
     if (!fingerStillOn) {
+      bool savedForce = trayPendingRetractForce;
       trayPendingRetractAfterLift = false;
-      if (!startTrayRetract(trayActiveSubtitle.c_str(), true, trayMotionBeepOnFinish, false, true)) {
+      trayPendingRetractForce = false;
+      if (!startTrayRetract(trayActiveSubtitle.c_str(), savedForce, trayMotionBeepOnFinish, false, true)) {
         if (trayState != TRAY_ST_FAULT) {
           finishTrayCmdAck(true, "Tray already at CLOSED position.");
           clearMessageHold();
@@ -2837,14 +3018,16 @@ void tickServoTray() {
         }
       }
     } else if (now - trayFingerWaitStartMs >= 2500UL) {
+      bool savedForce = trayPendingRetractForce;
       trayPendingRetractAfterLift = false;
+      trayPendingRetractForce = false;
       // Check optically if the touch pin merely drifted (moisture/humidity) vs. a real finger on the prism
       if (sensorReady && finger.getImage() == FINGERPRINT_NOFINGER) {
 #if FP_USE_TOUCH_PIN
         touchIdleLevel = digitalRead(FP_TOUCH_PIN);
         Serial.printf("[R307S] Auto-recalibrated drifted touch pin before retract (idle=%s)\n", touchIdleLevel == HIGH ? "HIGH" : "LOW");
 #endif
-        if (!startTrayRetract(trayActiveSubtitle.c_str(), true, trayMotionBeepOnFinish, false, true)) {
+        if (!startTrayRetract(trayActiveSubtitle.c_str(), savedForce, trayMotionBeepOnFinish, false, true)) {
           if (trayState != TRAY_ST_FAULT) {
             finishTrayCmdAck(true, "Tray already at CLOSED position.");
             clearMessageHold();
@@ -2875,23 +3058,75 @@ void tickServoTray() {
   if (!activelyMoving) return;
 
   int64_t elapsedUs = esp_timer_get_time() - trayMotionStartUs;
+  long elapsedMs = (long)(elapsedUs / 1000LL);
 
-  // 3. Instant mouse-switch stop check (works in LIMIT_360 AND as bonus hardware safety in TIMED_360!)
+  // 3. Instant mouse-switch stop & wiring fault guard (works in LIMIT_360 AND as bonus safety in TIMED_360!)
   if (trayCfg.mode != TRAY_MODE_ANGLE_180) {
+    if (swClosedPressed && swOpenPressed) {
+      Serial.println("[SERVO] FAULT: Both limit switches pressed simultaneously during motion!");
+      completeTrayMotion(TRAY_ST_FAULT, false, "Both switches active — check GPIO 26/27 wiring!");
+      return;
+    }
     if ((st == TRAY_ST_EXTENDING || st == TRAY_ST_NUDGING_OPEN) && swOpenPressed) {
-      Serial.printf("[SERVO] OPEN mouse switch triggered at %lldms!\n", elapsedUs / 1000LL);
-      completeTrayMotion(TRAY_ST_OPEN, true, "Tray reached OPEN switch (" + String((long)(elapsedUs / 1000LL)) + "ms).");
+      Serial.printf("[SERVO] OPEN mouse switch triggered at %ldms!\n", elapsedMs);
+      if (trayCfg.mode == TRAY_MODE_LIMIT_360 && st == TRAY_ST_EXTENDING && trayMotionIsFullSweep) {
+        recordLearnedTravelTime(true, (int)elapsedMs);
+      }
+      completeTrayMotion(TRAY_ST_OPEN, true, "Tray reached OPEN switch (" + String(elapsedMs) + "ms).");
       return;
     }
     if ((st == TRAY_ST_RETRACTING || st == TRAY_ST_HOMING || st == TRAY_ST_NUDGING_CLOSE) && swClosedPressed) {
-      Serial.printf("[SERVO] CLOSED mouse switch triggered at %lldms!\n", elapsedUs / 1000LL);
-      completeTrayMotion(TRAY_ST_CLOSED, true, "Tray reached CLOSED switch (" + String((long)(elapsedUs / 1000LL)) + "ms).");
+      Serial.printf("[SERVO] CLOSED mouse switch triggered at %ldms!\n", elapsedMs);
+      if (trayCfg.mode == TRAY_MODE_LIMIT_360 && st == TRAY_ST_RETRACTING && trayMotionIsFullSweep) {
+        recordLearnedTravelTime(false, (int)elapsedMs);
+      }
+      completeTrayMotion(TRAY_ST_CLOSED, true, "Tray reached CLOSED switch (" + String(elapsedMs) + "ms).");
       return;
     }
   }
 
-  // 4. Smooth angular sweep update for 180° positional servos
-  if (trayCfg.mode == TRAY_MODE_ANGLE_180 && (st == TRAY_ST_EXTENDING || st == TRAY_ST_RETRACTING || st == TRAY_ST_HOMING)) {
+  // 3B. Smart continuous position estimator (0.0=CLOSED .. 1.0=OPEN)
+  bool movingOut = (st == TRAY_ST_EXTENDING || st == TRAY_ST_NUDGING_OPEN);
+  int refFullMs = movingOut
+    ? ((trayCfg.mode == TRAY_MODE_LIMIT_360 && trayLearnedOpenMs >= 250) ? trayLearnedOpenMs : trayCfg.openMs)
+    : ((trayCfg.mode == TRAY_MODE_LIMIT_360 && trayLearnedCloseMs >= 250) ? trayLearnedCloseMs : trayCfg.closeMs);
+  float deltaNorm = (float)elapsedMs / (float)max(200, refFullMs);
+  trayPosNorm = constrain(movingOut ? (trayStartPosNorm + deltaNorm) : (trayStartPosNorm - deltaNorm), 0.0f, 1.0f);
+
+  // 4. Smart soft-start & soft-landing speed ramping for 360° servos (protects plastic gears & prevents switch bounce!)
+  bool is360Sweep = (trayCfg.mode != TRAY_MODE_ANGLE_180) &&
+    (st == TRAY_ST_EXTENDING || st == TRAY_ST_RETRACTING || st == TRAY_ST_HOMING);
+  if (is360Sweep) {
+    int targetSpd = trayCfg.speedPct;
+    int startSpd = max(28, trayCfg.speedPct / 2);
+    int approachSpd = max(28, (trayCfg.speedPct * 55) / 100);
+    int desiredSpd = targetSpd;
+
+    // Soft-start over first 160ms
+    if (elapsedMs < 160L) {
+      desiredSpd = startSpd + (int)(((long)(targetSpd - startSpd) * elapsedMs) / 160L);
+    } else {
+      // Soft-landing deceleration over final 220ms before expected target
+      long expectedMs = 0;
+      if (trayCfg.mode == TRAY_MODE_TIMED_360) {
+        expectedMs = (long)(trayMotionDurationUs / 1000LL);
+      } else if (trayCfg.mode == TRAY_MODE_LIMIT_360 && trayLearnedSpeedPct == trayCfg.speedPct) {
+        expectedMs = (st == TRAY_ST_EXTENDING) ? trayLearnedOpenMs : trayLearnedCloseMs;
+      }
+      if (expectedMs >= 450L && elapsedMs >= (expectedMs - 220L)) {
+        long intoDecel = elapsedMs - (expectedMs - 220L);
+        long clampedDecel = min(220L, max(0L, intoDecel));
+        desiredSpd = targetSpd - (int)(((long)(targetSpd - approachSpd) * clampedDecel) / 220L);
+      }
+    }
+
+    int desiredPulse = get360PulseForSpeed(st == TRAY_ST_EXTENDING, desiredSpd);
+    if (abs(desiredPulse - trayLastWrittenPulseUs) >= 4) {
+      trayLastWrittenPulseUs = desiredPulse;
+      servoWritePulseUs(desiredPulse);
+    }
+  } else if (trayCfg.mode == TRAY_MODE_ANGLE_180 && (st == TRAY_ST_EXTENDING || st == TRAY_ST_RETRACTING || st == TRAY_ST_HOMING)) {
+    // Smooth angular sweep update for 180° positional servos
     float frac = (trayMotionDurationUs > 0) ? min(1.0f, (float)elapsedUs / (float)trayMotionDurationUs) : 1.0f;
     float desired = trayAngleStart + (trayAngleTarget - trayAngleStart) * frac;
     if (fabs(desired - trayAngleCur) >= 0.8f || frac >= 1.0f) {
@@ -2900,14 +3135,21 @@ void tickServoTray() {
     }
   }
 
-  // 5. Refresh OLED progress screen calmly every 140ms (zero I2C lag!)
+  // 5. Refresh OLED progress screen calmly every 140ms (uses learned travel time in LIMIT_360 for accurate bar!)
   if (now - trayLastOledMs >= 140UL) {
     trayLastOledMs = now;
-    int pct = (trayMotionDurationUs > 0) ? (int)((elapsedUs * 100LL) / trayMotionDurationUs) : 100;
+    int pct = 100;
+    if (trayCfg.mode == TRAY_MODE_LIMIT_360 && (st == TRAY_ST_EXTENDING || st == TRAY_ST_RETRACTING)) {
+      int learned = (st == TRAY_ST_EXTENDING) ? trayLearnedOpenMs : trayLearnedCloseMs;
+      long denomMs = (learned >= 250) ? learned : (long)(trayMotionDurationUs / 1000LL);
+      pct = (denomMs > 0) ? min(99, (int)((elapsedMs * 100L) / denomMs)) : 99;
+    } else if (trayMotionDurationUs > 0) {
+      pct = (int)((elapsedUs * 100LL) / trayMotionDurationUs);
+    }
     drawTrayMotionOled(pct);
   }
 
-  // 6. Check deadline completion or LIMIT_360 jam fault timeout
+  // 6. Check deadline completion or LIMIT_360 smart jam fault timeout
   if (elapsedUs >= trayMotionDurationUs) {
     if (st == TRAY_ST_NUDGING_OPEN || st == TRAY_ST_NUDGING_CLOSE) {
       TrayState restored = swOpenPressed ? TRAY_ST_OPEN : (swClosedPressed ? TRAY_ST_CLOSED : TRAY_ST_STOPPED);
@@ -2915,9 +3157,10 @@ void tickServoTray() {
       return;
     }
     if (trayCfg.mode == TRAY_MODE_LIMIT_360) {
-      // Safety cutoff: mouse switch did NOT click within max_run_ms!
+      // Smart jam / missed-switch cutoff
       String side = (st == TRAY_ST_EXTENDING) ? "OPEN" : "CLOSED";
-      String errMsg = side + " switch not hit in " + String(trayCfg.maxRunMs) + "ms";
+      long cutoffMs = (long)(trayMotionDurationUs / 1000LL);
+      String errMsg = side + " switch not hit in " + String(cutoffMs) + "ms";
       Serial.printf("[SERVO] FAULT: %s\n", errMsg.c_str());
       completeTrayMotion(TRAY_ST_FAULT, false, errMsg);
       return;
@@ -2945,9 +3188,10 @@ void waitTrayMotionComplete(unsigned long maxWaitMs) {
 }
 
 void printServoStatusToSerial() {
-  Serial.println("----- SERVO TRAY v3.0 STATUS -----");
-  Serial.printf("Enabled:        %s | Mode: %s | State: %s\n",
-                trayCfg.enabled ? "YES" : "NO", trayModeToStr(trayCfg.mode), trayStateToApiString(trayState));
+  Serial.println("----- SERVO TRAY v3.2 SMART STATUS -----");
+  Serial.printf("Enabled:        %s | Mode: %s | State: %s | Pos: %.0f%% | LastDir: %d\n",
+                trayCfg.enabled ? "YES" : "NO", trayModeToStr(trayCfg.mode), trayStateToApiString(trayState),
+                trayPosNorm * 100.0f, (int)lastTrayDirAttempt);
   Serial.printf("Signal Pin:     GPIO %d (16-bit 50.000Hz LEDC)\n", SERVO_PIN);
   Serial.printf("Mouse Switches: CLOSED(GPIO %d)=%s | OPEN(GPIO %d)=%s\n",
                 SERVO_LIMIT_CLOSED_PIN, swClosedPressed ? "PRESSED" : "open",
@@ -2955,12 +3199,14 @@ void printServoStatusToSerial() {
   Serial.printf("360 Settings:   speed=%d%% stop=%dus open=%dms close=%dms maxRun=%dms invert=%s\n",
                 trayCfg.speedPct, trayCfg.stopUs, trayCfg.openMs, trayCfg.closeMs,
                 trayCfg.maxRunMs, trayCfg.invertDirection ? "true" : "false");
+  Serial.printf("Smart Learned:  open=%dms close=%dms (at %d%% spd)\n",
+                trayLearnedOpenMs, trayLearnedCloseMs, trayLearnedSpeedPct);
   Serial.printf("180 Settings:   closed=%ddeg open=%ddeg sweep=%ddps cur=%.1fdeg\n",
                 trayCfg.closedAngle, trayCfg.openAngle, trayCfg.sweepSpeedDps, trayAngleCur);
   if (trayFaultMsg[0] != '\0') {
     Serial.printf("Fault:          %s\n", trayFaultMsg);
   }
-  Serial.println("----------------------------------");
+  Serial.println("----------------------------------------");
 }
 
 void processSerialCommand(String cmd) {
@@ -2971,21 +3217,24 @@ void processSerialCommand(String cmd) {
   lower.toLowerCase();
 
   if (lower == "help" || lower == "?") {
-    Serial.println("EduStride Motorized Tray v3.0 CLI (115200 baud):");
-    Serial.println("  servo status                 -> Show mode, state, live mouse switches & config");
-    Serial.println("  servo open                   -> Extend tray (non-blocking)");
-    Serial.println("  servo close                  -> Retract tray (non-blocking)");
+    Serial.println("EduStride Motorized Tray v3.2 Smart CLI (115200 baud):");
+    Serial.println("  servo status                 -> Show mode, state, position, learned times & switches");
+    Serial.println("  servo open                   -> Extend tray (non-blocking soft-start)");
+    Serial.println("  servo close                  -> Retract tray (non-blocking soft-start)");
     Serial.println("  servo home                   -> Home to CLOSED mouse switch & clear FAULT");
     Serial.println("  servo stop                   -> Immediate EMERGENCY STOP");
     Serial.println("  servo nudge open <ms>        -> Nudge outward for <ms>");
     Serial.println("  servo nudge close <ms>       -> Nudge inward for <ms>");
     Serial.println("  servo state open|closed      -> Sync saved NVS state without moving motor");
+    Serial.println("  servo resetlearn             -> Clear auto-learned travel times");
     Serial.println("  servo pulse <us> <ms>        -> Raw test pulse (500..2500us) for <ms>");
     return;
   }
 
   if (lower == "servo status") {
     printServoStatusToSerial();
+  } else if (lower == "servo resetlearn") {
+    clearLearnedTrayTimes("Serial CLI");
   } else if (lower == "servo stop") {
     servoEmergencyStop("Serial CLI");
     finishTrayCmdAck(true, "Stopped via Serial CLI.");
@@ -3233,6 +3482,10 @@ void enterDeviceStandbyNow() {
 void wakeDeviceFromStandby() {
   standbyWaitingRetract = false;
   deviceInStandby = false;
+  // Stop any in-progress retract BEFORE blocking boot animation so servo never spins unchecked!
+  if (isTrayMoving() && trayState != TRAY_ST_EXTENDING) {
+    servoEmergencyStop("Wake from Standby");
+  }
   WiFi.setSleep(false);
   nextBlinkMs = millis() + 2000UL;
   nextBehaviorMs = millis() + 3000UL;
@@ -3396,19 +3649,32 @@ void loop() {
     }
   } else if (trayBootSynced && prevDevicePowerObserved != devicePowerOn) {
     prevDevicePowerObserved = devicePowerOn;
+    prevSensingObserved = sensingEnabled;
     if (!devicePowerOn) {
       Serial.println("[POWER] App requested POWER OFF (Standby)...");
-      if (isTrayMoving()) servoEmergencyStop("Power OFF");
+      bool alreadyClosing = (
+        trayState == TRAY_ST_RETRACTING ||
+        trayState == TRAY_ST_HOMING ||
+        trayPendingRetractAfterLift ||
+        (trayBraking && trayState == TRAY_ST_CLOSED)
+      );
+      if (isTrayMoving() && !alreadyClosing) {
+        servoEmergencyStop("Power OFF");
+      }
       showOledStatus("POWERING OFF", "Standby Mode", "Closing cabinet...", "Wake from App");
-      beepExit();
       standbyWaitingRetract = true;
-      if (trayState != TRAY_ST_CLOSED && trayCfg.enabled) {
-        if (!startTrayRetract("Powering OFF", false, false, false)) {
+      if (alreadyClosing) {
+        Serial.println("[POWER] Tray already retracting — waiting for clean close before Standby.");
+      } else {
+        beepExit();
+        if (trayState != TRAY_ST_CLOSED && trayCfg.enabled) {
+          if (!startTrayRetract("Powering OFF", false, false, false)) {
+            enterDeviceStandbyNow();
+          }
+        } else {
+          delay(500);
           enterDeviceStandbyNow();
         }
-      } else {
-        delay(500);
-        enterDeviceStandbyNow();
       }
     } else {
       wakeDeviceFromStandby();

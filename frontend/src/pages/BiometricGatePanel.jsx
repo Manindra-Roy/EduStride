@@ -1086,7 +1086,7 @@ const BiometricGatePanel = () => {
                     <button
                       type="button"
                       onClick={handleToggleDevicePower}
-                      disabled={togglingPower}
+                      disabled={togglingPower || togglingSensing}
                       className={`px-4 py-3 rounded-2xl font-bold text-xs sm:text-sm transition-all flex items-center justify-center gap-2.5 shadow-lg active:scale-[0.98] disabled:opacity-60 ${
                         activeDevice.device_power_on === false
                           ? 'bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-500 hover:to-orange-500 text-white shadow-amber-600/25 border border-amber-400/35'
@@ -1128,7 +1128,7 @@ const BiometricGatePanel = () => {
                     <button
                       type="button"
                       onClick={handleToggleSensing}
-                      disabled={togglingSensing || activeDevice.device_power_on === false}
+                      disabled={togglingSensing || togglingPower || activeDevice.device_power_on === false}
                       className={`px-5 py-3 rounded-2xl font-bold text-xs sm:text-sm transition-all flex items-center justify-center gap-3 shadow-lg active:scale-[0.98] disabled:opacity-50 ${
                         activeDevice.device_power_on === false
                           ? 'bg-dark-900/90 text-slate-400 border border-dark-800 shadow-none cursor-not-allowed'
@@ -1387,7 +1387,7 @@ const BiometricGatePanel = () => {
                       >
                         <span className="flex items-center gap-2 flex-wrap">
                           <Sliders size={13} className="text-cyan-400" />
-                          <span>Motorized Cabinet Tray (v3.0)</span>
+                          <span>Motorized Cabinet Tray (v3.2 Smart)</span>
                           <span
                             className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full border ${
                               activeDevice.tray_state === 'FAULT'
@@ -1421,6 +1421,11 @@ const BiometricGatePanel = () => {
                                 <AlertTriangle size={15} className="text-rose-400 shrink-0" />
                                 <span>
                                   <strong>Tray Safety Fault:</strong> {activeDevice.tray_fault || 'Limit switch was not triggered before safety timeout.'}
+                                  {trayForm.mode === 'LIMIT_360' && !activeDevice.tray_switches?.closed && !activeDevice.tray_switches?.open && (
+                                    <span className="block text-[10px] text-rose-300/80 mt-0.5">
+                                      Tip: Check mouse switch alignment on GPIO 26/27, or switch to 360° Timed mode if switches aren&apos;t connected.
+                                    </span>
+                                  )}
                                 </span>
                               </div>
                               <button
@@ -1958,7 +1963,7 @@ const BiometricGatePanel = () => {
                       <div className="flex items-center gap-2 shrink-0 flex-wrap">
                         <button
                           type="button"
-                          disabled={togglingPower}
+                          disabled={togglingPower || togglingSensing}
                           onClick={handleToggleDevicePower}
                           className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold border transition disabled:opacity-40 ${
                             activeDevice.device_power_on === false
