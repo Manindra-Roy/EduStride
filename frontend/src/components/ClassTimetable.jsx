@@ -45,45 +45,56 @@ const getInitials = (name = '') => {
   return parts[0] ? parts[0].substring(0, 2).toUpperCase() : 'ED';
 };
 
-// Helper: parse slot time string like "09:00 AM" or "09:00 AM - 10:00 AM" to minutes from midnight
+// Helper: parse slot time string (12-hour AM/PM or 24-hour HH:MM, including "04:00 - 05:00 PM") to minutes from midnight
 const parseTimeToMinutes = (timeStr) => {
   if (!timeStr) return null;
-  const parts = timeStr.split('-').map(s => s.trim());
-  const startTimeRaw = parts[0];
-  
-  const match = startTimeRaw.match(/(\d+):(\d+)\s*(AM|PM)/i);
-  if (!match) return null;
-  
-  let hours = parseInt(match[1], 10);
-  const minutes = parseInt(match[2], 10);
-  const period = match[3].toUpperCase();
-  
+  const parts = String(timeStr).split('-').map(s => s.trim());
+  const startMatch = parts[0].match(/^(\d{1,2}):(\d{2})(?:\s*(AM|PM))?/i);
+  if (!startMatch) return null;
+
+  let hours = parseInt(startMatch[1], 10);
+  const minutes = parseInt(startMatch[2], 10);
+  let period = startMatch[3] ? startMatch[3].toUpperCase() : null;
+
+  let endMatch = null;
+  if (parts.length > 1) {
+    endMatch = parts[1].match(/^(\d{1,2}):(\d{2})(?:\s*(AM|PM))?/i);
+    if (!period && endMatch?.[3] && hours >= 1 && hours <= 12) {
+      const endH = parseInt(endMatch[1], 10);
+      const endP = endMatch[3].toUpperCase();
+      period = (hours <= endH || endH === 12) ? endP : (endP === 'PM' ? 'AM' : 'PM');
+    }
+  }
+
   if (period === 'PM' && hours < 12) hours += 12;
   if (period === 'AM' && hours === 12) hours = 0;
-  
+  if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return null;
+
   const startMins = hours * 60 + minutes;
-  
   let endMins = startMins + 60;
-  if (parts.length > 1) {
-    const endMatch = parts[1].match(/(\d+):(\d+)\s*(AM|PM)/i);
-    if (endMatch) {
-      let endHours = parseInt(endMatch[1], 10);
-      const endMinutes = parseInt(endMatch[2], 10);
-      const endPeriod = endMatch[3].toUpperCase();
-      if (endPeriod === 'PM' && endHours < 12) endHours += 12;
-      if (endPeriod === 'AM' && endHours === 12) endHours = 0;
+  if (endMatch) {
+    let endHours = parseInt(endMatch[1], 10);
+    const endMinutes = parseInt(endMatch[2], 10);
+    const endPeriod = endMatch[3] ? endMatch[3].toUpperCase() : null;
+    if (endPeriod === 'PM' && endHours < 12) endHours += 12;
+    if (endPeriod === 'AM' && endHours === 12) endHours = 0;
+    if (endHours >= 0 && endHours <= 23 && endMinutes >= 0 && endMinutes <= 59) {
       endMins = endHours * 60 + endMinutes;
     }
   }
-  
+
   return { startMins, endMins };
 };
 
-// Get current day string e.g. "Monday"
-const getCurrentDayName = () => {
-  const dayIndex = new Date().getDay();
+// Get current IST day name & minutes from midnight (matches EduStride IST backend clock)
+const getISTClockState = () => {
+  const ist = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
+  const dayIndex = ist.getUTCDay();
   const mappedIndex = dayIndex === 0 ? 6 : dayIndex - 1;
-  return DAYS_OF_WEEK[mappedIndex];
+  return {
+    dayName: DAYS_OF_WEEK[mappedIndex],
+    minutes: ist.getUTCHours() * 60 + ist.getUTCMinutes()
+  };
 };
 
 export default function ClassTimetable({
@@ -94,12 +105,13 @@ export default function ClassTimetable({
   loading = false,
   availableClasses = ['VII', 'VIII', 'IX', 'X']
 }) {
-  const todayName = getCurrentDayName();
-  const [selectedDay, setSelectedDay] = useState(todayName);
+  const initialClock = getISTClockState();
+  const [todayName, setTodayName] = useState(initialClock.dayName);
+  const [selectedDay, setSelectedDay] = useState(initialClock.dayName);
   const [selectedGradeFilter, setSelectedGradeFilter] = useState(studentGrade || 'ALL');
   const [viewMode, setViewMode] = useState('agenda'); // 'agenda' or 'weekly'
   const [searchQuery, setSearchQuery] = useState('');
-  const [currentTimeMinutes, setCurrentTimeMinutes] = useState(0);
+  const [currentTimeMinutes, setCurrentTimeMinutes] = useState(initialClock.minutes);
 
   const safeTimetable = useMemo(() => Array.isArray(timetable) ? timetable : [], [timetable]);
   const safeClasses = useMemo(() => Array.isArray(availableClasses) ? availableClasses : ['VII', 'VIII', 'IX', 'X'], [availableClasses]);
@@ -111,11 +123,12 @@ export default function ClassTimetable({
     }
   }, [studentGrade, userRole]);
 
-  // Live clock interval
+  // Live IST clock interval (automatically updates day across midnight!)
   useEffect(() => {
     const updateTime = () => {
-      const now = new Date();
-      setCurrentTimeMinutes(now.getHours() * 60 + now.getMinutes());
+      const clock = getISTClockState();
+      setTodayName(clock.dayName);
+      setCurrentTimeMinutes(clock.minutes);
     };
     updateTime();
     const interval = setInterval(updateTime, 30000);

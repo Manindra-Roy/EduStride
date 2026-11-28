@@ -11,6 +11,9 @@ const getSmtpTransporter = () => {
       host: process.env.EMAIL_HOST || 'smtp.ethereal.email',
       port: parseInt(process.env.EMAIL_PORT, 10) || 587,
       secure: process.env.EMAIL_SECURE === 'true',
+      connectionTimeout: 10000,
+      greetingTimeout: 10000,
+      socketTimeout: 15000,
       auth: {
         user: process.env.EMAIL_USER || 'mock_user',
         pass: process.env.EMAIL_PASS || 'mock_password'

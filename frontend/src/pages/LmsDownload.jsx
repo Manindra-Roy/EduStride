@@ -53,24 +53,29 @@ const LmsDownload = () => {
   // Fetch filter subjects based on active selection
   useEffect(() => {
     if (!selectedClass) return;
+    const controller = new AbortController();
     const fetchFilterSubjects = async () => {
       try {
         const res = selectedClass === 'All'
-          ? await axios.get('/api/subjects')
-          : await axios.get('/api/subjects', { params: { class_level: selectedClass } });
+          ? await axios.get('/api/subjects', { signal: controller.signal })
+          : await axios.get('/api/subjects', { params: { class_level: selectedClass }, signal: controller.signal });
         if (res.data.success && Array.isArray(res.data.data)) {
           const subjectNames = [...new Set(res.data.data.map(s => s.name))];
           setFilterSubjects(subjectNames);
         }
       } catch (err) {
+        if (err?.name === 'CanceledError' || err?.code === 'ERR_CANCELED') return;
         console.error('Failed to load filter subjects:', err);
       }
     };
     fetchFilterSubjects();
+    return () => controller.abort();
   }, [selectedClass]);
 
   // Fetch upload subjects based on the form class level target
   useEffect(() => {
+    if (!showUploadModal) return;
+    const controller = new AbortController();
     const fetchUploadSubjects = async () => {
       if (!uploadForm.class_level) {
         setUploadSubjects([]);
@@ -79,24 +84,26 @@ const LmsDownload = () => {
       }
       try {
         const res = await axios.get('/api/subjects', {
-          params: { class_level: uploadForm.class_level }
+          params: { class_level: uploadForm.class_level },
+          signal: controller.signal
         });
         if (res.data.success && Array.isArray(res.data.data)) {
           const subjectNames = res.data.data.map(s => s.name);
           setUploadSubjects(subjectNames);
-          if (subjectNames.length === 0) {
-            setUploadForm(prev => ({ ...prev, subject: '' }));
-          } else if (!subjectNames.includes(uploadForm.subject)) {
-            setUploadForm(prev => ({ ...prev, subject: subjectNames[0] }));
-          }
+          setUploadForm(prev => ({
+            ...prev,
+            subject: subjectNames.length === 0
+              ? ''
+              : (subjectNames.includes(prev.subject) ? prev.subject : subjectNames[0])
+          }));
         }
       } catch (err) {
+        if (err?.name === 'CanceledError' || err?.code === 'ERR_CANCELED') return;
         console.error('Failed to load upload subjects:', err);
       }
     };
-    if (showUploadModal) {
-      fetchUploadSubjects();
-    }
+    fetchUploadSubjects();
+    return () => controller.abort();
   }, [uploadForm.class_level, showUploadModal]);
 
   useEffect(() => {
@@ -119,29 +126,34 @@ const LmsDownload = () => {
   const pipelineStates = ['Drafting', 'Notes Distributed', 'Assignment Assigned', 'Revised'];
 
   // Fetch handouts
-  const fetchMaterials = async () => {
+  const fetchMaterials = async (signal) => {
     setLoading(true);
     try {
       const params = {};
-      if (user.role !== 'Student' && selectedClass !== 'All') {
+      if (user?.role !== 'Student' && selectedClass !== 'All') {
         params.class_level = selectedClass;
       }
       if (selectedSubject !== 'All') {
         params.subject = selectedSubject;
       }
-      const res = await axios.get('/api/study-materials', { params });
+      const res = await axios.get('/api/study-materials', { params, signal });
       if (res.data.success) {
         setMaterials(res.data.data);
       }
     } catch (err) {
+      if (err?.name === 'CanceledError' || err?.code === 'ERR_CANCELED') return;
       console.error('Failed to load study materials:', err);
     } finally {
-      setLoading(false);
+      if (!signal?.aborted) {
+        setLoading(false);
+      }
     }
   };
 
   useEffect(() => {
-    fetchMaterials();
+    const controller = new AbortController();
+    fetchMaterials(controller.signal);
+    return () => controller.abort();
   }, [selectedClass, selectedSubject]);
 
   // File selection with 10 MB client-side validation
@@ -189,7 +201,7 @@ const LmsDownload = () => {
         setShowUploadModal(false);
         setUploadForm({
           class_level: classes[0] || '',
-          subject: uploadSubjects[0] || '',
+          subject: '',
           chapter_name: '',
           status: 'Drafting'
         });
@@ -434,7 +446,7 @@ const LmsDownload = () => {
                   <label className="block text-xs font-semibold text-slate-400 mb-1.5">Class Target</label>
                   <select
                     value={uploadForm.class_level}
-                    onChange={(e) => setUploadForm({ ...uploadForm, class_level: e.target.value })}
+                    onChange={(e) => setUploadForm({ ...uploadForm, class_level: e.target.value, subject: '' })}
                     className="w-full px-3 py-2.5 rounded-lg bg-dark-900 border border-dark-850 text-white text-xs outline-none"
                   >
                     {classes.map(c => <option key={c} value={c}>Class {c}</option>)}

@@ -30,10 +30,11 @@ class BackgroundSocketService : Service() {
         private const val FOREGROUND_NOTIFICATION_ID = 1001
     }
 
-    private var socket: Socket? = null
-    private var currentSocketUrl: String? = null
-    private var currentClassRooms: String? = null
-    private var currentAuthToken: String? = null
+    private val socketLock = Any()
+    @Volatile private var socket: Socket? = null
+    @Volatile private var currentSocketUrl: String? = null
+    @Volatile private var currentClassRooms: String? = null
+    @Volatile private var currentAuthToken: String? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -121,27 +122,28 @@ class BackgroundSocketService : Service() {
         val savedSocketUrl = prefs.getString("socket_url", "").orEmpty().trim()
         val webUrl = prefs.getString("web_url", "https://edustride.in").orEmpty().ifBlank { "https://edustride.in" }
 
-        // Deriving socket API URL (if localhost/local IP on 3000, redirect to 5000)
+        // Deriving socket API URL (never fall back to static Vercel frontend edustride.in with no Socket.IO server)
         val socketUrl = when {
             savedSocketUrl.isNotEmpty() -> savedSocketUrl
             webUrl.contains(":3000") -> webUrl.replace(":3000", ":5000")
-            else -> webUrl
+            else -> ""
         }
 
-        if (classLevel.isEmpty() || authToken.isEmpty()) {
-            Log.d(TAG, "No authenticated user session registered yet. Stopping service.")
+        if (classLevel.isEmpty() || authToken.isEmpty() || socketUrl.isEmpty()) {
+            Log.d(TAG, "No authenticated user session or backend socket URL registered yet. Stopping service.")
             stopSelf()
             return
         }
 
-        // Skip redundant teardown/reconnect when config is unchanged and socket is already active
-        if (socket != null &&
-            currentSocketUrl == socketUrl &&
-            currentClassRooms == classLevel &&
-            currentAuthToken == authToken &&
-            socket?.connected() == true
-        ) {
-            return
+        // Skip redundant teardown/reconnect when config is unchanged and socket is already connecting/connected
+        synchronized(socketLock) {
+            if (socket != null &&
+                currentSocketUrl == socketUrl &&
+                currentClassRooms == classLevel &&
+                currentAuthToken == authToken
+            ) {
+                return
+            }
         }
 
         val roomList = classLevel.split(",").map { it.trim() }.filter { it.isNotEmpty() }
@@ -152,8 +154,6 @@ class BackgroundSocketService : Service() {
             .orEmpty()
 
         try {
-            teardownSocket()
-
             val opts = IO.Options().apply {
                 transports = arrayOf("websocket", "polling")
                 reconnection = true
@@ -162,12 +162,19 @@ class BackgroundSocketService : Service() {
                 timeout = 15000L
                 auth = mapOf("token" to authToken)
             }
-            currentSocketUrl = socketUrl
-            currentClassRooms = classLevel
-            currentAuthToken = authToken
-            socket = IO.socket(socketUrl, opts)
 
-            socket?.on(Socket.EVENT_CONNECT) {
+            val createdSocket: Socket
+            synchronized(socketLock) {
+                teardownSocketLocked()
+                currentSocketUrl = socketUrl
+                currentClassRooms = classLevel
+                currentAuthToken = authToken
+                createdSocket = IO.socket(socketUrl, opts)
+                socket = createdSocket
+            }
+
+            createdSocket.on(Socket.EVENT_CONNECT) {
+                if (socket !== createdSocket) return@on
                 Log.d(TAG, "Socket connected to $socketUrl")
                 // Deduplicate room joins so each unique room is emitted once
                 val uniqueRooms = linkedSetOf<String>()
@@ -181,19 +188,24 @@ class BackgroundSocketService : Service() {
                 }
                 uniqueRooms.add("ALL")
                 for (room in uniqueRooms) {
-                    socket?.emit("join_room", room)
+                    createdSocket.emit("join_room", room)
                 }
             }
 
-            socket?.on(Socket.EVENT_CONNECT_ERROR) { args ->
+            createdSocket.on(Socket.EVENT_CONNECT_ERROR) { args ->
+                if (socket !== createdSocket) return@on
                 val rawError = extractSocketErrorMessage(args)
                 Log.w(TAG, "Socket connect_error: $rawError")
                 if (rawError.contains("Authentication", ignoreCase = true) ||
                     rawError.contains("Invalid or expired", ignoreCase = true) ||
+                    rawError.contains("Session invalidated", ignoreCase = true) ||
                     rawError.contains("User not found", ignoreCase = true)
                 ) {
                     Log.w(TAG, "Authentication rejected by server. Clearing token and stopping service.")
-                    teardownSocket()
+                    synchronized(socketLock) {
+                        if (socket !== createdSocket) return@on
+                        teardownSocketLocked()
+                    }
                     getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                         .edit()
                         .putString("auth_token", "")
@@ -202,8 +214,8 @@ class BackgroundSocketService : Service() {
                 }
             }
 
-            socket?.on("new_message") { args ->
-                if (args.isEmpty()) return@on
+            createdSocket.on("new_message") { args ->
+                if (socket !== createdSocket || args.isEmpty()) return@on
                 try {
                     val data = args[0] as? JSONObject ?: return@on
                     val msgClass = data.optString("class_level").trim()
@@ -212,11 +224,8 @@ class BackgroundSocketService : Service() {
                     val senderId = data.optString("sender_id").trim()
                     val messageText = data.optString("message_text")
 
-                    val isSelf = if (senderId.isNotEmpty() && ownUserId.isNotEmpty()) {
-                        senderId == ownUserId
-                    } else {
-                        name.isNotEmpty() && senderName == name
-                    }
+                    val isSelf = (senderId.isNotEmpty() && ownUserId.isNotEmpty() && senderId == ownUserId) ||
+                        (!isStaffAll && name.isNotEmpty() && senderName.equals(name, ignoreCase = true))
                     if (isSelf) return@on
 
                     val roomTitle = when {
@@ -240,8 +249,8 @@ class BackgroundSocketService : Service() {
                 }
             }
 
-            socket?.on("new_study_material") { args ->
-                if (args.isEmpty()) return@on
+            createdSocket.on("new_study_material") { args ->
+                if (socket !== createdSocket || args.isEmpty()) return@on
                 try {
                     val data = args[0] as? JSONObject ?: return@on
                     val batchId = data.optString("batchId").trim()
@@ -277,7 +286,7 @@ class BackgroundSocketService : Service() {
                             title = notifTitle,
                             message = notifBody,
                             tag = "batch-lms-${batchId.ifEmpty { System.currentTimeMillis().toString() }}",
-                            targetRoute = "/special-batches"
+                            targetRoute = if (isStaffAll) "/special-batches" else "/"
                         )
                     } else {
                         if (!isStaffAll &&
@@ -306,8 +315,8 @@ class BackgroundSocketService : Service() {
                 }
             }
 
-            socket?.on("new_notice") { args ->
-                if (args.isEmpty()) return@on
+            createdSocket.on("new_notice") { args ->
+                if (socket !== createdSocket || args.isEmpty()) return@on
                 try {
                     val data = args[0] as? JSONObject ?: return@on
                     val subject = data.optString("subject").trim()
@@ -334,8 +343,8 @@ class BackgroundSocketService : Service() {
                 }
             }
 
-            socket?.on("incoming_call") { args ->
-                if (args.isEmpty()) return@on
+            createdSocket.on("incoming_call") { args ->
+                if (socket !== createdSocket || args.isEmpty()) return@on
                 try {
                     val data = args[0] as? JSONObject ?: return@on
                     val callClass = data.optString("class_level").trim()
@@ -365,7 +374,20 @@ class BackgroundSocketService : Service() {
                 }
             }
 
-            socket?.connect()
+            createdSocket.on("call_ended") { args ->
+                if (socket !== createdSocket || args.isEmpty()) return@on
+                try {
+                    val data = args[0] as? JSONObject ?: return@on
+                    val callClass = data.optString("class_level").trim()
+                    if (callClass.isNotEmpty()) {
+                        NotificationManagerCompat.from(this@BackgroundSocketService).cancel("call-$callClass".hashCode())
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error handling call_ended", e)
+                }
+            }
+
+            createdSocket.connect()
         } catch (e: Exception) {
             Log.e(TAG, "Socket setup failed", e)
         }
@@ -469,13 +491,19 @@ class BackgroundSocketService : Service() {
         }
     }
 
-    private fun teardownSocket() {
+    private fun teardownSocketLocked() {
         socket?.off()
         socket?.disconnect()
         socket = null
         currentSocketUrl = null
         currentClassRooms = null
         currentAuthToken = null
+    }
+
+    private fun teardownSocket() {
+        synchronized(socketLock) {
+            teardownSocketLocked()
+        }
     }
 
     override fun onDestroy() {

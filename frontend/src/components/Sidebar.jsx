@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { useAuth } from '../context/AuthContext';
+import { socket } from '../config/socket';
 import { getDisplayName } from '../utils/istDate';
 import { 
   LayoutDashboard, 
@@ -25,7 +26,7 @@ import Logo from './Logo';
 import { applyThemeAccent, getSavedThemeAccent, themes } from '../config/theme';
 
 const Sidebar = ({ isOpen, setIsOpen }) => {
-  const { user, logout, updateUserProfilePic, updateUserThemeColor } = useAuth();
+  const { user, logout, refreshToken, updateUserProfilePic, updateUserThemeColor } = useAuth();
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [rawImageSrc, setRawImageSrc] = useState('');
   const [loadedImage, setLoadedImage] = useState(null);
@@ -43,6 +44,7 @@ const Sidebar = ({ isOpen, setIsOpen }) => {
   const navigate = useNavigate();
   const rawImageSrcRef = useRef('');
   const passwordTimerRef = useRef(null);
+  const themeSeqRef = useRef(0);
 
   useEffect(() => {
     rawImageSrcRef.current = rawImageSrc;
@@ -120,6 +122,13 @@ const Sidebar = ({ isOpen, setIsOpen }) => {
         newPassword
       });
       if (res.data.success) {
+        if (res.data.token) {
+          refreshToken(res.data.token);
+          if (socket.connected) {
+            socket.disconnect();
+          }
+          socket.connect();
+        }
         setPasswordSuccess('Password updated successfully!');
         setCurrentPassword('');
         setNewPassword('');
@@ -139,6 +148,7 @@ const Sidebar = ({ isOpen, setIsOpen }) => {
   };
 
   const handleThemeChange = async (themeKey) => {
+    const reqSeq = ++themeSeqRef.current;
     try {
       setActiveTheme(themeKey);
       
@@ -147,12 +157,14 @@ const Sidebar = ({ isOpen, setIsOpen }) => {
       } else {
         // Fetch and apply the current global default system theme
         const res = await axios.get('/api/system/theme');
+        if (reqSeq !== themeSeqRef.current) return;
         const defaultColor = res.data.success ? res.data.theme_color : 'indigo';
         applyThemeAccent(defaultColor);
       }
       
       // Update account theme in database (saves null if inheriting system default)
       await axios.put('/api/auth/theme', { theme_color: themeKey });
+      if (reqSeq !== themeSeqRef.current) return;
       
       // Sync update with Auth Context
       updateUserThemeColor(themeKey);
@@ -233,10 +245,12 @@ const Sidebar = ({ isOpen, setIsOpen }) => {
     }
 
     const src = URL.createObjectURL(file);
+    rawImageSrcRef.current = src;
     setRawImageSrc(src);
 
     const img = new Image();
     img.onload = () => {
+      if (rawImageSrcRef.current !== src) return;
       setLoadedImage(img);
       const viewportSize = 192; // 48 * 4 = 192px
       let w = viewportSize;
@@ -252,7 +266,13 @@ const Sidebar = ({ isOpen, setIsOpen }) => {
       setCropY(0);
     };
     img.onerror = () => {
-      setAvatarError('Failed to load image for position adjustments.');
+      URL.revokeObjectURL(src);
+      if (rawImageSrcRef.current === src) {
+        rawImageSrcRef.current = '';
+        setRawImageSrc('');
+        setLoadedImage(null);
+        setAvatarError('Failed to load image for position adjustments.');
+      }
     };
     img.src = src;
   };

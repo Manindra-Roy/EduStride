@@ -33,7 +33,7 @@ const RemoteAudioPlayer = ({ stream }) => {
 };
 
 export const CallProvider = ({ children }) => {
-  const { user } = useAuth();
+  const { user, loading: authLoading, logout } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
 
@@ -58,6 +58,7 @@ export const CallProvider = ({ children }) => {
   const userRef = useRef(user);
   const peerConnectionsRef = useRef(new Map()); // Map<socketId, RTCPeerConnection>
   const pendingIceCandidatesRef = useRef(new Map()); // Map<socketId, RTCIceCandidateInit[]>
+  const startingCallRef = useRef(false);
 
   useEffect(() => {
     userRef.current = user;
@@ -79,7 +80,7 @@ export const CallProvider = ({ children }) => {
     isCallHostRef.current = isCallHost;
   }, [isCallHost]);
 
-  const closePeerConnection = useCallback((socketId) => {
+  const closePeerConnection = useCallback((socketId, { preservePendingIce = false } = {}) => {
     const pc = peerConnectionsRef.current.get(socketId);
     if (pc) {
       try {
@@ -92,7 +93,9 @@ export const CallProvider = ({ children }) => {
       }
       peerConnectionsRef.current.delete(socketId);
     }
-    pendingIceCandidatesRef.current.delete(socketId);
+    if (!preservePendingIce) {
+      pendingIceCandidatesRef.current.delete(socketId);
+    }
     setRemoteStreams(prev => prev.filter(s => s.socketId !== socketId));
   }, []);
 
@@ -113,7 +116,7 @@ export const CallProvider = ({ children }) => {
   }, []);
 
   const createPeerConnection = useCallback((targetSocketId, peerMeta, room) => {
-    closePeerConnection(targetSocketId);
+    closePeerConnection(targetSocketId, { preservePendingIce: true });
 
     const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
 
@@ -389,6 +392,9 @@ export const CallProvider = ({ children }) => {
 
   // Global socket calling, WebRTC signaling & notification events listener
   useEffect(() => {
+    // Wait until initial /api/auth/me resolves so page reload never wipes Android background sync session
+    if (authLoading) return;
+
     if (!userId) {
       handleEndCall(false);
       setIncomingCall(null);
@@ -409,11 +415,10 @@ export const CallProvider = ({ children }) => {
       return;
     }
 
-    if (!socket.connected) {
-      socket.connect();
-    }
+    let effectCancelled = false;
 
     const syncNativeBridge = (roomsList) => {
+      if (effectCancelled) return;
       const currentUser = userRef.current;
       if (window.AndroidNotificationBridge && currentUser) {
         try {
@@ -433,6 +438,7 @@ export const CallProvider = ({ children }) => {
     };
 
     const joinClassrooms = async () => {
+      if (effectCancelled || !socket.connected) return;
       const joinedRooms = new Set();
       if (userRole === 'Student') {
         if (studentClassLevel) {
@@ -446,6 +452,7 @@ export const CallProvider = ({ children }) => {
         }
         try {
           const batchRes = await axios.get('/api/special-batches');
+          if (effectCancelled) return;
           if (batchRes.data.success && Array.isArray(batchRes.data.data)) {
             batchRes.data.data.forEach(b => {
               const bRoom = `BATCH_${b._id}`;
@@ -456,12 +463,14 @@ export const CallProvider = ({ children }) => {
         } catch {
           // Non-fatal: student still receives class notifications
         }
+        if (effectCancelled) return;
         socket.emit('join_room', 'ALL');
       } else {
         socket.emit('join_room', 'ALL');
         joinedRooms.add('All');
         try {
           const res = await axios.get('/api/classes');
+          if (effectCancelled) return;
           if (res.data.success && Array.isArray(res.data.data)) {
             res.data.data.forEach(room => {
               socket.emit('join_room', room);
@@ -475,6 +484,7 @@ export const CallProvider = ({ children }) => {
             });
           }
         } catch {
+          if (effectCancelled) return;
           ['VII', 'VIII', 'IX', 'X'].forEach(room => {
             socket.emit('join_room', room);
             joinedRooms.add(room);
@@ -482,6 +492,7 @@ export const CallProvider = ({ children }) => {
         }
         try {
           const batchRes = await axios.get('/api/special-batches');
+          if (effectCancelled) return;
           if (batchRes.data.success && Array.isArray(batchRes.data.data)) {
             batchRes.data.data.forEach(b => {
               const bRoom = `BATCH_${b._id}`;
@@ -493,10 +504,16 @@ export const CallProvider = ({ children }) => {
           // Non-fatal
         }
       }
-      syncNativeBridge(Array.from(joinedRooms));
+      if (!effectCancelled) {
+        syncNativeBridge(Array.from(joinedRooms));
+      }
     };
 
-    joinClassrooms();
+    if (socket.connected) {
+      joinClassrooms();
+    } else {
+      socket.connect();
+    }
 
     const handleGlobalIncomingCall = (data) => {
       if (!data) return;
@@ -718,7 +735,12 @@ export const CallProvider = ({ children }) => {
     };
 
     const handleConnectError = (err) => {
-      console.error('Global Socket connection error:', err.message);
+      const msg = err?.message || '';
+      console.error('Global Socket connection error:', msg);
+      if (/invalid|expired|invalidated|authentication required|user not found/i.test(msg)) {
+        socket.disconnect();
+        logout();
+      }
     };
 
     const handleDisconnect = (reason) => {
@@ -740,6 +762,7 @@ export const CallProvider = ({ children }) => {
     socket.on('new_notice', handleNewNoticeGlobal);
 
     return () => {
+      effectCancelled = true;
       socket.off('connect', handleConnect);
       socket.off('connect_error', handleConnectError);
       socket.off('disconnect', handleDisconnect);
@@ -755,10 +778,12 @@ export const CallProvider = ({ children }) => {
       socket.off('new_notice', handleNewNoticeGlobal);
     };
   }, [
+    authLoading,
     userId,
     userRole,
     studentProfileId,
     studentClassLevel,
+    logout,
     addToast,
     clearAllToasts,
     sendBrowserNotification,
@@ -769,15 +794,27 @@ export const CallProvider = ({ children }) => {
   ]);
 
   const handleStartCall = useCallback(async (isHost = false, roomOverride = null) => {
+    if (startingCallRef.current || activeCallRef.current) return;
     const targetRoom = roomOverride || currentRoomRef.current;
     const currentUser = userRef.current;
     if (!targetRoom || !currentUser) return;
+    if (!socket.connected) {
+      alert('Cannot start or join a call while disconnected. Please wait for reconnection.');
+      return;
+    }
 
+    startingCallRef.current = true;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: false,
         audio: true
       });
+
+      // Guard against logout, disconnect, or another call starting while permission dialog was open
+      if (!userRef.current || !socket.connected || activeCallRef.current) {
+        stream.getTracks().forEach(track => track.stop());
+        return;
+      }
 
       const callObj = { stream, room: targetRoom };
       activeCallRef.current = callObj;
@@ -795,21 +832,19 @@ export const CallProvider = ({ children }) => {
 
       const callerName = getDisplayName(currentUser);
 
-      if (socket.connected) {
-        if (isActuallyHost) {
-          socket.emit('start_call', {
-            class_level: targetRoom,
-            caller_name: callerName,
-            hostEmail: currentUser.email
-          });
-          setActiveRoomCall({
-            class_level: targetRoom,
-            caller_name: callerName,
-            hostEmail: currentUser.email
-          });
-        } else {
-          socket.emit('join_call', { class_level: targetRoom });
-        }
+      if (isActuallyHost) {
+        socket.emit('start_call', {
+          class_level: targetRoom,
+          caller_name: callerName,
+          hostEmail: currentUser.email
+        });
+        setActiveRoomCall({
+          class_level: targetRoom,
+          caller_name: callerName,
+          hostEmail: currentUser.email
+        });
+      } else {
+        socket.emit('join_call', { class_level: targetRoom });
       }
 
       if (callTimerRef.current) clearInterval(callTimerRef.current);
@@ -819,6 +854,8 @@ export const CallProvider = ({ children }) => {
     } catch (err) {
       console.error('Failed to get media devices:', err);
       alert('Could not access microphone. Please check system permissions.');
+    } finally {
+      startingCallRef.current = false;
     }
   }, []);
 
@@ -1037,7 +1074,7 @@ export const CallProvider = ({ children }) => {
             </button>
             
             <button
-              onClick={() => navigate('/chats')}
+              onClick={() => navigate('/chats', { state: { targetRoom: activeCall.room || currentRoom } })}
               className="p-2 rounded-lg bg-dark-955 border border-dark-850 hover:bg-dark-850 text-slate-350 hover:text-white transition active:scale-95 cursor-pointer"
               title="Maximize call"
             >

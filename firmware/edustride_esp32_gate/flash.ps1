@@ -19,7 +19,7 @@ param(
   [string]$OtaIp = "",
   [string]$OtaPassword = "",
   [string]$Monitor = "",
-  [string]$PartitionScheme = ""
+  [string]$PartitionScheme = "min_spiffs"
 )
 
 $ErrorActionPreference = "Stop"

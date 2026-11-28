@@ -10,6 +10,8 @@ import { protect, authorize } from '../middleware/auth.js';
 import { deleteFromCloud } from '../services/cloudStorage.js';
 import {
   getISTParts,
+  makeSheetLockKey,
+  withSheetLock,
   recalculateRollNumbers,
   recalculateMonthlyAttendance,
   emitAttendanceUpdated
@@ -630,41 +632,50 @@ router.post('/attendance/bulk', protect, authorize('SuperAdmin', 'Teacher'), asy
     const trackingMonth = cleanDateStr.substring(0, 7); // format: YYYY-MM
     const cleanSession = (typeof session_name === 'string' && session_name.trim()) ? session_name.trim() : 'Session 1';
 
-    // Preserve any existing biometric entry/exit remarks when teachers save manual attendance
-    const existingSheet = await Attendance.findOne({
-      class_level: cleanClassLevel,
-      date: normalizedDate,
-      session_name: cleanSession
-    });
-    const existingRemarksByStudent = new Map();
-    if (existingSheet && Array.isArray(existingSheet.records)) {
-      existingSheet.records.forEach(r => {
-        if (r.student && r.remarks) {
-          existingRemarksByStudent.set(r.student.toString(), r.remarks);
-        }
-      });
-    }
+    // Serialize manual attendance save with concurrent biometric gate scans on the same sheet
+    const lockKey = makeSheetLockKey(cleanClassLevel, cleanDateStr, cleanSession);
+    await withSheetLock(lockKey, async () => {
+      // Preserve any existing biometric entry/exit remarks when teachers save manual attendance
+      const existingSheet = await Attendance.findOne({
+        class_level: cleanClassLevel,
+        date: normalizedDate,
+        session_name: cleanSession
+      }).lean();
+      const existingRemarksByStudent = new Map();
+      if (existingSheet && Array.isArray(existingSheet.records)) {
+        existingSheet.records.forEach(r => {
+          if (r.student && r.remarks) {
+            existingRemarksByStudent.set(r.student.toString(), r.remarks);
+          }
+        });
+      }
 
-    // Prepare records for the Attendance model (preserving explicit Late/Excused status when sent)
-    const records = attendance_list.map(record => {
-      const explicitStatus = typeof record.status === 'string' && ALLOWED_ATTENDANCE_STATUSES.includes(record.status)
-        ? record.status
-        : null;
-      return {
-        student: record.student_id,
-        status: explicitStatus || (record.attended ? 'Present' : 'Absent'),
-        remarks: record.remarks !== undefined
-          ? String(record.remarks)
-          : (existingRemarksByStudent.get(String(record.student_id)) || '')
-      };
-    });
+      // Deduplicate by student_id & guard against null entries (last-write-wins prevents >100% monthly tally)
+      const dedupedRecords = new Map();
+      for (const record of attendance_list) {
+        if (!record || !record.student_id) continue;
+        const sid = String(record.student_id).trim();
+        if (!sid) continue;
+        const explicitStatus = typeof record.status === 'string' && ALLOWED_ATTENDANCE_STATUSES.includes(record.status)
+          ? record.status
+          : null;
+        dedupedRecords.set(sid, {
+          student: sid,
+          status: explicitStatus || (record.attended ? 'Present' : 'Absent'),
+          remarks: record.remarks !== undefined
+            ? String(record.remarks)
+            : (existingRemarksByStudent.get(sid) || '')
+        });
+      }
+      const records = Array.from(dedupedRecords.values());
 
-    // Upsert attendance sheet for this specific session
-    await Attendance.findOneAndUpdate(
-      { class_level: cleanClassLevel, date: normalizedDate, session_name: cleanSession },
-      { class_level: cleanClassLevel, date: normalizedDate, session_name: cleanSession, records },
-      { upsert: true, new: true }
-    );
+      // Upsert attendance sheet for this specific session
+      await Attendance.findOneAndUpdate(
+        { class_level: cleanClassLevel, date: normalizedDate, session_name: cleanSession },
+        { $set: { class_level: cleanClassLevel, date: normalizedDate, session_name: cleanSession, records } },
+        { upsert: true, new: true }
+      );
+    });
 
     // Recalculate monthly attendance & dynamic roll numbers for all active students in the class
     await recalculateMonthlyAttendance(cleanClassLevel, trackingMonth);
@@ -697,12 +708,15 @@ router.get('/:id/attendance', protect, async (req, res, next) => {
       throw new Error('Not authorized to access other student attendance records');
     }
 
-    const attendanceSheets = await Attendance.find({
-      'records.student': studentId
-    }).sort({ date: -1, createdAt: -1 });
+    const attendanceSheets = await Attendance.find(
+      { 'records.student': studentId },
+      { class_level: 1, date: 1, session_name: 1, createdAt: 1, records: { $elemMatch: { student: studentId } } }
+    )
+      .sort({ date: -1, createdAt: -1 })
+      .lean();
 
     const history = attendanceSheets.map(sheet => {
-      const record = sheet.records.find(r => r.student.toString() === studentId);
+      const record = Array.isArray(sheet.records) ? sheet.records[0] : null;
       return {
         date: sheet.date,
         session_name: sheet.session_name || 'Session 1',
@@ -900,15 +914,30 @@ router.post('/promote', protect, authorize('SuperAdmin'), async (req, res, next)
     }
 
     const processedStudents = [];
+    const skippedAlreadyPromoted = [];
     const affectedClasses = new Set();
     if (cleanSourceClass) affectedClasses.add(cleanSourceClass);
     affectedClasses.add(cleanTargetClass);
 
+    // Batch-fetch all fee ledgers in 1 query instead of N sequential queries
+    const existingLedgers = await FeeLedger.find({
+      student_id: { $in: students.map(s => s._id) }
+    }).lean();
+    const ledgerByStudentId = new Map(existingLedgers.map(l => [String(l.student_id), l]));
+
     try {
       for (const student of students) {
-        const currentLedger = await FeeLedger.findOne({ student_id: student._id });
+        const currentLedger = ledgerByStudentId.get(String(student._id)) || null;
         const ledgerMonths = currentLedger ? currentLedger.months : [];
         const archivedYear = currentLedger?.year ?? (parsedYear - 1);
+
+        // Idempotency guard: skip if this student was already promoted/archived for this academic year
+        const alreadyArchivedForYear = Array.isArray(student.academic_history) &&
+          student.academic_history.some(h => h.academic_year === archivedYear && Number(currentLedger?.year) === parsedYear);
+        if (alreadyArchivedForYear) {
+          skippedAlreadyPromoted.push(String(student._id));
+          continue;
+        }
 
         // 1. Archive current academic and fee data
         const archiveRecord = {

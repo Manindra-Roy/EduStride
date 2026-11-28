@@ -7,6 +7,10 @@ import { protect, authorize } from '../middleware/auth.js';
 const router = express.Router();
 
 const ALLOWED_FEE_STATUSES = ['Paid', 'Unpaid', 'Partial/Pending'];
+const WEBHOOK_REPLAY_WINDOW_MS = 5 * 60 * 1000;
+
+const generateReceiptId = (prefix = 'REC') =>
+  `${prefix}-${Date.now()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
 
 const verifyWebhookSignature = (rawBody, providedSig, secret) => {
   if (!providedSig || typeof providedSig !== 'string' || !secret) return false;
@@ -26,8 +30,15 @@ const verifyWebhookSignature = (rawBody, providedSig, secret) => {
 
 router.get('/stats', protect, authorize('SuperAdmin'), async (req, res, next) => {
   try {
-    const ledgers = await FeeLedger.find().populate('student_id');
-    const activeStudents = await Student.find({ status: 'Active' });
+    const [ledgers, activeStudents] = await Promise.all([
+      FeeLedger.find()
+        .select('student_id months')
+        .populate('student_id', 'status is_free_tier monthly_fee')
+        .lean(),
+      Student.find({ status: 'Active' })
+        .select('is_free_tier monthly_fee')
+        .lean()
+    ]);
     const totalExpectedRevenue = activeStudents.reduce((sum, s) => sum + ((s.is_free_tier ? 0 : (s.monthly_fee || 0)) * 12), 0);
 
     let actualCollectedRevenue = 0;
@@ -38,7 +49,7 @@ router.get('/stats', protect, authorize('SuperAdmin'), async (req, res, next) =>
     ledgers.forEach(ledger => {
       if (ledger.student_id && ledger.student_id.status === 'Active') {
         if (ledger.student_id.is_free_tier) return;
-        ledger.months.forEach(m => {
+        (ledger.months || []).forEach(m => {
           actualCollectedRevenue += m.amount_paid || 0;
           if (m.status === 'Paid') paidMonthsCount++;
           else if (m.status === 'Unpaid') unpaidMonthsCount++;
@@ -89,7 +100,7 @@ router.get('/ledger/:student_id', protect, async (req, res, next) => {
   }
 });
 
-// @desc    Manual payment override/update
+// @desc    Manual payment override/update (atomic per-month update — zero cross-month overwrite race)
 // @route   PUT /api/fees/manual
 // @access  Private (SuperAdmin/Teacher)
 router.put('/manual', protect, authorize('SuperAdmin', 'Teacher'), async (req, res, next) => {
@@ -106,24 +117,30 @@ router.put('/manual', protect, authorize('SuperAdmin', 'Teacher'), async (req, r
       throw new Error('Invalid fee status');
     }
 
-    const ledger = await FeeLedger.findOne({ student_id });
-    if (!ledger) {
+    const existingLedger = await FeeLedger.findOne(
+      { student_id },
+      { months: { $elemMatch: { month_name } } }
+    ).lean();
+    if (!existingLedger) {
       res.status(404);
       throw new Error('Ledger not found');
     }
 
-    const monthObj = ledger.months.find(m => m.month_name === month_name);
-    if (!monthObj) {
+    const existingMonth = Array.isArray(existingLedger.months) ? existingLedger.months[0] : null;
+    if (!existingMonth) {
       res.status(400);
       throw new Error('Invalid month name');
     }
 
-    monthObj.status = status;
+    let updateFields;
     if (status === 'Unpaid') {
-      monthObj.payment_date = null;
-      monthObj.amount_paid = 0;
-      monthObj.receipt_id = null;
-      monthObj.transaction_method = null;
+      updateFields = {
+        'months.$.status': 'Unpaid',
+        'months.$.payment_date': null,
+        'months.$.amount_paid': 0,
+        'months.$.receipt_id': null,
+        'months.$.transaction_method': null
+      };
     } else {
       const parsedAmount = amount_paid === undefined || amount_paid === null || amount_paid === ''
         ? 0
@@ -133,19 +150,24 @@ router.put('/manual', protect, authorize('SuperAdmin', 'Teacher'), async (req, r
         throw new Error('amount_paid must be a non-negative finite number');
       }
 
-      monthObj.amount_paid = parsedAmount;
-      if (status === 'Paid') {
-        monthObj.payment_date = new Date();
-      } else if (status === 'Partial/Pending') {
-        monthObj.payment_date = monthObj.amount_paid > 0 ? new Date() : null;
-      }
-      monthObj.receipt_id = receipt_id ? String(receipt_id) : (monthObj.receipt_id || `REC-${Date.now().toString().substring(6)}`);
-      monthObj.transaction_method = transaction_method ? String(transaction_method) : (monthObj.transaction_method || 'Manual Cash/Bank');
+      const paymentDate = status === 'Paid'
+        ? new Date()
+        : (parsedAmount > 0 ? new Date() : null);
+
+      updateFields = {
+        'months.$.status': status,
+        'months.$.amount_paid': parsedAmount,
+        'months.$.payment_date': paymentDate,
+        'months.$.receipt_id': receipt_id ? String(receipt_id).trim() : (existingMonth.receipt_id || generateReceiptId('REC')),
+        'months.$.transaction_method': transaction_method ? String(transaction_method).trim() : (existingMonth.transaction_method || 'Manual Cash/Bank')
+      };
     }
 
-    await ledger.save();
-
-    const populatedLedger = await FeeLedger.findById(ledger._id).populate('student_id');
+    const populatedLedger = await FeeLedger.findOneAndUpdate(
+      { student_id, 'months.month_name': month_name },
+      { $set: updateFields },
+      { new: true }
+    ).populate('student_id');
 
     res.json({ success: true, data: populatedLedger });
   } catch (error) {
@@ -153,7 +175,7 @@ router.put('/manual', protect, authorize('SuperAdmin', 'Teacher'), async (req, r
   }
 });
 
-// @desc    Webhook receiver for external payment gateways (HMAC-SHA256 verified)
+// @desc    Webhook receiver for external payment gateways (HMAC-SHA256 + atomic idempotency + amount validation)
 // @route   POST /api/fees/webhook
 // @access  Signed Webhook
 router.post('/webhook', async (req, res, next) => {
@@ -172,54 +194,102 @@ router.post('/webhook', async (req, res, next) => {
       return res.status(401).json({ success: false, message: 'Invalid webhook signature' });
     }
 
+    // Optional replay-window check if caller sends x-webhook-timestamp (seconds or ms epoch)
+    const rawTs = req.headers['x-webhook-timestamp'] || req.body?.timestamp;
+    if (rawTs !== undefined && rawTs !== null && String(rawTs).trim() !== '') {
+      const numericTs = Number(rawTs);
+      const tsMs = numericTs > 1e12 ? numericTs : numericTs * 1000;
+      if (!Number.isFinite(tsMs) || Math.abs(Date.now() - tsMs) > WEBHOOK_REPLAY_WINDOW_MS) {
+        return res.status(400).json({ success: false, message: 'Webhook timestamp expired or outside allowed window' });
+      }
+    }
+
     const { student_id, month_name, amount, payment_method, receipt_id } = req.body || {};
 
     const parsedAmount = Number(amount);
+    const cleanReceiptId = typeof receipt_id === 'string' ? receipt_id.trim() : '';
     if (
       typeof student_id !== 'string' ||
       typeof month_name !== 'string' ||
+      !cleanReceiptId ||
       !Number.isFinite(parsedAmount) ||
       parsedAmount <= 0
     ) {
-      return res.status(400).json({ success: false, message: 'Invalid payment hook payload' });
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid payment hook payload (student_id, month_name, receipt_id, and positive amount are required)'
+      });
     }
 
-    const ledger = await FeeLedger.findOne({ student_id });
-    if (!ledger) {
+    const [ledger, student] = await Promise.all([
+      FeeLedger.findOne({ student_id }).lean(),
+      Student.findById(student_id).select('monthly_fee is_free_tier').lean()
+    ]);
+    if (!ledger || !student) {
       return res.status(404).json({ success: false, message: 'Student ledger not found' });
     }
 
-    const monthObj = ledger.months.find(m => m.month_name === month_name);
+    const existingReceipt = (ledger.months || []).find(m => m.receipt_id === cleanReceiptId);
+    if (existingReceipt) {
+      return res.status(200).json({
+        success: true,
+        duplicate: true,
+        message: `Webhook receipt ${cleanReceiptId} was already processed`,
+        data: existingReceipt
+      });
+    }
+
+    const monthObj = (ledger.months || []).find(m => m.month_name === month_name);
     if (!monthObj) {
       return res.status(400).json({ success: false, message: 'Invalid month in webhook payload' });
     }
 
-    // Idempotency check by receipt_id
-    const cleanReceiptId = receipt_id ? String(receipt_id).trim() : '';
-    if (cleanReceiptId) {
-      const existingReceipt = ledger.months.find(m => m.receipt_id === cleanReceiptId);
-      if (existingReceipt) {
-        return res.status(200).json({
-          success: true,
-          duplicate: true,
-          message: `Webhook receipt ${cleanReceiptId} was already processed`,
-          data: existingReceipt
-        });
-      }
+    const expectedMonthlyFee = student.is_free_tier ? 0 : (Number(student.monthly_fee) || 0);
+    const cumulativePaid = (Number(monthObj.amount_paid) || 0) + parsedAmount;
+    const computedStatus = (expectedMonthlyFee <= 0 || cumulativePaid >= expectedMonthlyFee)
+      ? 'Paid'
+      : 'Partial/Pending';
+
+    // Atomic conditional update prevents concurrent duplicate webhook retries from double-crediting
+    const updatedLedger = await FeeLedger.findOneAndUpdate(
+      {
+        student_id,
+        months: {
+          $elemMatch: {
+            month_name,
+            receipt_id: { $ne: cleanReceiptId }
+          }
+        },
+        'months.receipt_id': { $ne: cleanReceiptId }
+      },
+      {
+        $set: {
+          'months.$.status': computedStatus,
+          'months.$.amount_paid': cumulativePaid,
+          'months.$.payment_date': new Date(),
+          'months.$.receipt_id': cleanReceiptId,
+          'months.$.transaction_method': payment_method ? String(payment_method).trim() : 'Online Gateway'
+        }
+      },
+      { new: true }
+    ).lean();
+
+    if (!updatedLedger) {
+      const latest = await FeeLedger.findOne({ student_id }).lean();
+      const dup = (latest?.months || []).find(m => m.receipt_id === cleanReceiptId);
+      return res.status(200).json({
+        success: true,
+        duplicate: true,
+        message: `Webhook receipt ${cleanReceiptId} was already processed`,
+        data: dup || null
+      });
     }
 
-    monthObj.status = 'Paid';
-    monthObj.amount_paid = parsedAmount;
-    monthObj.payment_date = new Date();
-    monthObj.receipt_id = cleanReceiptId || `WEBHOOK-${Date.now().toString().substring(6)}`;
-    monthObj.transaction_method = payment_method ? String(payment_method) : 'Online Gateway';
-
-    await ledger.save();
-
+    const updatedMonth = (updatedLedger.months || []).find(m => m.month_name === month_name);
     res.status(200).json({
       success: true,
       message: `Webhook transaction processed successfully for student ID ${student_id}, Month: ${month_name}`,
-      data: monthObj
+      data: updatedMonth
     });
   } catch (error) {
     next(error);

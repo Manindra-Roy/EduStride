@@ -349,8 +349,12 @@ router.get('/device/status', authenticateDevice, async (req, res, next) => {
 
     const needsTimeoutCheck = Boolean(
       device.pending_command &&
-      AUTO_EXPIRABLE_ACTIONS.has(device.pending_command.action) &&
-      (device.pending_command.status === 'PENDING' || device.pending_command.status === 'IN_PROGRESS')
+      (
+        (AUTO_EXPIRABLE_ACTIONS.has(device.pending_command.action) &&
+          (device.pending_command.status === 'PENDING' || device.pending_command.status === 'IN_PROGRESS')) ||
+        (['DELETE', 'CLEAR_ALL'].includes(device.pending_command.action) &&
+          device.pending_command.status === 'IN_PROGRESS')
+      )
     );
     const needsQueuePromote = Boolean(
       !isActiveCommand(device.pending_command) &&
@@ -365,7 +369,7 @@ router.get('/device/status', authenticateDevice, async (req, res, next) => {
 
         let commandMutated = false;
 
-        // Only auto-expire ENROLL and SYNC_SLOTS; never drop maintenance commands (DELETE / CLEAR_ALL)
+        // Auto-expire ENROLL / SYNC_SLOTS / TRAY_*; recover stale IN_PROGRESS DELETE / CLEAR_ALL back to PENDING
         if (fresh.pending_command && AUTO_EXPIRABLE_ACTIONS.has(fresh.pending_command.action)) {
           const cmdStatus = fresh.pending_command.status;
           const refTime = fresh.pending_command.updated_at || fresh.pending_command.requested_at;
@@ -380,6 +384,21 @@ router.get('/device/status', authenticateDevice, async (req, res, next) => {
             fresh.pending_command.action = 'NONE';
             fresh.pending_command.updated_at = now;
             promoteNextCommand(fresh);
+            commandMutated = true;
+          }
+        } else if (
+          fresh.pending_command &&
+          ['DELETE', 'CLEAR_ALL'].includes(fresh.pending_command.action) &&
+          fresh.pending_command.status === 'IN_PROGRESS'
+        ) {
+          const refTime = fresh.pending_command.updated_at || fresh.pending_command.requested_at;
+          const elapsed = refTime ? now.getTime() - new Date(refTime).getTime() : 0;
+          if (elapsed > IN_PROGRESS_TIMEOUT_MS) {
+            // Re-arm idempotent maintenance command so a rebooted ESP32 completes it instead of deadlocking the queue
+            fresh.pending_command.status = 'PENDING';
+            fresh.pending_command.step = 'RETRYING';
+            fresh.pending_command.message = 'Device restarted during erase — re-queued automatically.';
+            fresh.pending_command.updated_at = now;
             commandMutated = true;
           }
         } else if (!isActiveCommand(fresh.pending_command) && Array.isArray(fresh.command_queue) && fresh.command_queue.length > 0) {
@@ -468,7 +487,9 @@ router.post('/device/scan', authenticateDevice, async (req, res, next) => {
       }
     }
 
-    if (device.device_power_on === false) {
+    const isOfflineReplay = req.body?.offline_replay === true && Boolean(cleanScanId);
+
+    if (!isOfflineReplay && device.device_power_on === false) {
       return res.status(403).json({
         success: false,
         status: 'PAUSED',
@@ -476,7 +497,7 @@ router.post('/device/scan', authenticateDevice, async (req, res, next) => {
       });
     }
 
-    if (!device.sensing_enabled) {
+    if (!isOfflineReplay && !device.sensing_enabled) {
       return res.status(403).json({
         success: false,
         status: 'PAUSED',
@@ -812,6 +833,13 @@ router.post('/device/command-ack', authenticateDevice, async (req, res, next) =>
         }
       }
 
+      if (!['IN_PROGRESS', 'COMPLETED', 'FAILED'].includes(status)) {
+        return {
+          httpStatus: 400,
+          body: { success: false, message: 'Invalid command acknowledgement status.' }
+        };
+      }
+
       const effectiveStep = step !== undefined ? String(step) : (status === 'COMPLETED' ? 'DONE' : (currentCmd.step || ''));
       const effectiveProgress = progress !== undefined && Number.isFinite(Number(progress))
         ? Math.max(0, Math.min(100, Math.round(Number(progress))))
@@ -872,7 +900,11 @@ router.post('/device/command-ack', authenticateDevice, async (req, res, next) =>
         device.pending_command.action = 'NONE';
         promotedNext = promoteNextCommand(device);
       } else if (status === 'FAILED') {
-        if (['TRAY_OPEN', 'TRAY_CLOSE', 'TRAY_HOME'].includes(effectiveAction)) {
+        const isSoftRejection =
+          effectiveStep === 'STANDBY' ||
+          effectiveStep === 'REJECTED' ||
+          /standby|anti-pinch/i.test(enrichedMessage || '');
+        if (!isSoftRejection && ['TRAY_OPEN', 'TRAY_CLOSE', 'TRAY_HOME'].includes(effectiveAction)) {
           device.tray_state = 'FAULT';
           device.tray_fault = enrichedMessage || 'Tray limit switch timeout / jam detected';
         }
@@ -940,18 +972,78 @@ router.post('/device/command-ack', authenticateDevice, async (req, res, next) =>
 // @access  Device (x-device-key)
 router.post('/device/sync-slots', authenticateDevice, async (req, res, next) => {
   try {
+    if (!Array.isArray(req.body?.hardware_slots)) {
+      return res.status(400).json({
+        success: false,
+        message: 'hardware_slots must be an explicit array of occupied slot IDs.'
+      });
+    }
+
     const result = await withDeviceLock(req.device.device_id, async () => {
-      const device = req.device;
-      const rawSlots = Array.isArray(req.body?.hardware_slots) ? req.body.hardware_slots : [];
+      const device = await BiometricDevice.findOne({ device_id: req.device.device_id });
+      if (!device) {
+        return { httpStatus: 404, body: { success: false, message: 'Biometric device not found.' } };
+      }
+
+      // Refuse to prune slots while an enrollment is active on this scanner
+      if (
+        device.pending_command?.action === 'ENROLL' &&
+        ['PENDING', 'IN_PROGRESS'].includes(device.pending_command.status)
+      ) {
+        return {
+          httpStatus: 409,
+          body: {
+            success: false,
+            message: 'Cannot sync slots while an enrollment command is active on this scanner.'
+          }
+        };
+      }
+
+      const rawSlots = req.body.hardware_slots;
       const hwSlotSet = new Set(
         rawSlots
           .map(s => Number(s))
           .filter(s => Number.isInteger(s) && s >= 1 && s <= 1000)
       );
 
+      const sensorVerified = req.body?.sensor_verified === true;
+      const confirmEmpty = req.body?.confirm_empty === true;
+      const hasReportedCount =
+        req.body?.sensor_template_count !== undefined &&
+        req.body?.sensor_template_count !== null &&
+        Number.isInteger(Number(req.body.sensor_template_count));
+      const reportedSensorCount = hasReportedCount ? Number(req.body.sensor_template_count) : null;
+
+      // Guard against partial UART reads reporting fewer slots than the sensor's own template counter
+      if (sensorVerified && reportedSensorCount !== null && reportedSensorCount > hwSlotSet.size) {
+        return {
+          httpStatus: 409,
+          body: {
+            success: false,
+            message: `Refusing slot sync: sensor reported ${reportedSensorCount} stored prints but only ${hwSlotSet.size} slot ID(s) were read.`
+          }
+        };
+      }
+
       const dbTemplates = await FingerprintTemplate.find({ device_id: device.device_id })
         .populate('student', '_id status')
         .lean();
+
+      const activeDbTemplatesCount = dbTemplates.filter(tpl => Boolean(tpl.student)).length;
+
+      // Catastrophic wipe guard: never delete all existing DB mappings on an unverified empty hardware_slots report
+      if (hwSlotSet.size === 0 && activeDbTemplatesCount > 0) {
+        const verifiedEmptySensor = sensorVerified && confirmEmpty && reportedSensorCount === 0;
+        if (!verifiedEmptySensor) {
+          return {
+            httpStatus: 409,
+            body: {
+              success: false,
+              message: `Refusing to wipe ${activeDbTemplatesCount} active fingerprint mapping(s) on an unverified empty hardware_slots report.`
+            }
+          };
+        }
+      }
 
       const ghostIds = [];
       const validDbSlots = new Set();
@@ -982,14 +1074,17 @@ router.post('/device/sync-slots', authenticateDevice, async (req, res, next) => 
       );
 
       return {
-        success: true,
-        orphan_slots: orphanSlots,
-        ghosts_removed: ghostIds.length,
-        valid_count: validDbSlots.size
+        httpStatus: 200,
+        body: {
+          success: true,
+          orphan_slots: orphanSlots,
+          ghosts_removed: ghostIds.length,
+          valid_count: validDbSlots.size
+        }
       };
     });
 
-    res.json(result);
+    res.status(result.httpStatus).json(result.body);
   } catch (error) {
     next(error);
   }
@@ -1007,14 +1102,20 @@ router.get('/devices', protect, authorize('SuperAdmin', 'Teacher'), async (req, 
     let devices = await BiometricDevice.find().sort({ createdAt: 1 }).lean();
 
     if (devices.length === 0) {
-      const defaultDevice = await BiometricDevice.create({
-        device_id: 'GATE-ESP32-01',
-        name: 'Main Gate Scanner',
-        sensing_enabled: true,
-        auto_mark_attendance: true,
-        cooldown_seconds: 120
-      });
-      devices = [defaultDevice.toObject()];
+      await BiometricDevice.findOneAndUpdate(
+        { device_id: 'GATE-ESP32-01' },
+        {
+          $setOnInsert: {
+            device_id: 'GATE-ESP32-01',
+            name: 'Main Gate Scanner',
+            sensing_enabled: true,
+            auto_mark_attendance: true,
+            cooldown_seconds: 120
+          }
+        },
+        { upsert: true, setDefaultsOnInsert: true }
+      );
+      devices = await BiometricDevice.find().sort({ createdAt: 1 }).lean();
     }
 
     const includeApiKey = req.user.role === 'SuperAdmin';
@@ -1178,12 +1279,17 @@ router.post('/devices/:deviceId/enroll', protect, authorize('SuperAdmin', 'Teach
         };
       }
 
-      if (isActiveCommand(device.pending_command) && ['ENROLL', 'SYNC_SLOTS'].includes(device.pending_command.action)) {
+      const hasQueuedEnrollOrSync = Array.isArray(device.command_queue) &&
+        device.command_queue.some(c => ['ENROLL', 'SYNC_SLOTS'].includes(c.action));
+      if (
+        (isActiveCommand(device.pending_command) && ['ENROLL', 'SYNC_SLOTS'].includes(device.pending_command.action)) ||
+        hasQueuedEnrollOrSync
+      ) {
         return {
           httpStatus: 409,
           body: {
             success: false,
-            message: `${device.pending_command.action === 'SYNC_SLOTS' ? 'Sensor sync' : `Enrollment for ${device.pending_command.student_name || 'another student'}`} is already in progress. Complete or cancel it first.`
+            message: `${device.pending_command?.action === 'SYNC_SLOTS' ? 'Sensor sync' : `Enrollment for ${device.pending_command?.student_name || 'another student'}`} is already active or queued. Complete or cancel it first.`
           }
         };
       }
@@ -1459,6 +1565,16 @@ router.post('/devices/:deviceId/tray-command', protect, authorize('SuperAdmin', 
         return { httpStatus: 404, body: { success: false, message: 'Biometric device not found' } };
       }
 
+      if (rawAction !== 'TRAY_STOP' && device.device_power_on === false) {
+        return {
+          httpStatus: 409,
+          body: {
+            success: false,
+            message: 'Device is powered OFF (Standby). Wake the scanner in app first.'
+          }
+        };
+      }
+
       if (rawAction !== 'TRAY_STOP' && isActiveCommand(device.pending_command) && ['ENROLL', 'SYNC_SLOTS'].includes(device.pending_command.action)) {
         return {
           httpStatus: 409,
@@ -1471,8 +1587,20 @@ router.post('/devices/:deviceId/tray-command', protect, authorize('SuperAdmin', 
 
       let command;
       if (rawAction === 'TRAY_STOP') {
-        // Emergency stop preempts any pending tray commands immediately
-        device.command_queue = (device.command_queue || []).filter(c => !String(c.action || '').startsWith('TRAY_'));
+        // Emergency stop preempts any pending tray commands immediately, while preserving DELETE / CLEAR_ALL maintenance items!
+        const preservedQueue = (device.command_queue || []).filter(c => !String(c.action || '').startsWith('TRAY_'));
+        if (
+          isActiveCommand(device.pending_command) &&
+          ['DELETE', 'CLEAR_ALL'].includes(device.pending_command.action)
+        ) {
+          preservedQueue.unshift({
+            ...device.pending_command.toObject(),
+            status: 'PENDING',
+            step: 'QUEUED',
+            updated_at: new Date()
+          });
+        }
+        device.command_queue = preservedQueue;
         device.pending_command = buildCommandPayload({
           action: 'TRAY_STOP',
           slot_id: null,
@@ -1542,7 +1670,22 @@ router.post('/devices/:deviceId/reboot', protect, authorize('SuperAdmin', 'Teach
         return { httpStatus: 404, body: { success: false, message: 'Biometric device not found' } };
       }
 
-      device.command_queue = [];
+      // Preserve DELETE / CLEAR_ALL maintenance commands across remote reboots so deleted prints are never orphaned!
+      const preservedMaintenance = (device.command_queue || []).filter(c =>
+        ['DELETE', 'CLEAR_ALL'].includes(c.action)
+      );
+      if (
+        isActiveCommand(device.pending_command) &&
+        ['DELETE', 'CLEAR_ALL'].includes(device.pending_command.action)
+      ) {
+        preservedMaintenance.unshift({
+          ...device.pending_command.toObject(),
+          status: 'PENDING',
+          step: 'QUEUED',
+          updated_at: new Date()
+        });
+      }
+      device.command_queue = preservedMaintenance;
       device.pending_command = buildCommandPayload({
         action: 'REBOOT',
         slot_id: null,
@@ -1566,7 +1709,7 @@ router.post('/devices/:deviceId/reboot', protect, authorize('SuperAdmin', 'Teach
           progress: 50,
           student_name: device.pending_command.student_name,
           message: device.pending_command.message,
-          queue_length: 0
+          queue_length: device.command_queue.length
         });
       }
 

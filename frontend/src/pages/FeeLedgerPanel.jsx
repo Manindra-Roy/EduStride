@@ -183,7 +183,7 @@ const FeeLedgerPanel = () => {
 
   useEffect(() => {
     fetchData();
-  }, [user]);
+  }, [user?.id, user?.role, user?.studentProfile]);
 
   // Dynamic class list extraction
   const classLevelsList = useMemo(() => {
@@ -198,10 +198,11 @@ const FeeLedgerPanel = () => {
 
   // Frontend search & class filter
   const filteredLedgers = useMemo(() => {
+    const q = (searchQuery || '').toLowerCase();
     return ledgers.filter(ledger => {
       const studentName = ledger.student_id?.name || '';
       const roll = ledger.student_id?.roll_number || '';
-      const matchesSearch = studentName.toLowerCase().includes(searchQuery.toLowerCase()) || String(roll).includes(searchQuery);
+      const matchesSearch = studentName.toLowerCase().includes(q) || String(roll).toLowerCase().includes(q);
       
       const matchesClass = selectedClassFilter === 'All' || 
         ledger.student_id?.class_level === selectedClassFilter;
@@ -842,7 +843,7 @@ const FeeLedgerPanel = () => {
       ))}
 
       {/* --- MOCK ONLINE PAYMENT OR CASH INSTRUCTIONS MODAL (For Student portal fee payments) --- */}
-      {showPayModal && (
+      {showPayModal && selectedLedger && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
           <div className="glass-panel w-full max-w-md max-h-[85dvh] flex flex-col rounded-2xl border border-dark-800 overflow-hidden shadow-2xl relative animate-scaleUp">
             <div className="p-4 sm:p-5 border-b border-dark-800 flex justify-between items-center shrink-0">

@@ -1,4 +1,4 @@
-import React, { createContext, useState, useEffect, useContext, useRef } from 'react';
+import React, { createContext, useState, useEffect, useContext, useRef, useCallback } from 'react';
 import axios from 'axios';
 
 const AuthContext = createContext(null);
@@ -15,12 +15,21 @@ export const AuthProvider = ({ children }) => {
   const [loading, setLoading] = useState(true);
   const skipNextLoadRef = useRef(false);
 
-  const logout = () => {
+  const logout = useCallback(() => {
     delete axios.defaults.headers.common['Authorization'];
     localStorage.removeItem('token');
+    localStorage.removeItem('edustride_chat_stealth');
     setToken(null);
     setUser(null);
-  };
+  }, []);
+
+  const refreshToken = useCallback((newToken) => {
+    if (!newToken || typeof newToken !== 'string') return;
+    axios.defaults.headers.common['Authorization'] = `Bearer ${newToken}`;
+    localStorage.setItem('token', newToken);
+    skipNextLoadRef.current = true;
+    setToken(newToken);
+  }, []);
 
   // Set up global response interceptor for 401 handling
   useEffect(() => {
@@ -137,7 +146,7 @@ export const AuthProvider = ({ children }) => {
   };
 
   return (
-    <AuthContext.Provider value={{ user, token, loading, login, register, logout, updateUserProfilePic, updateUserThemeColor }}>
+    <AuthContext.Provider value={{ user, token, loading, login, register, logout, refreshToken, updateUserProfilePic, updateUserThemeColor }}>
       {children}
     </AuthContext.Provider>
   );

@@ -356,19 +356,19 @@ router.delete('/:id', protect, authorize('SuperAdmin', 'Teacher'), async (req, r
       return res.status(403).json({ success: false, message: 'Not authorized to delete this batch' });
     }
 
-    // Delete uploaded cloud/local assets attached to extra_lessons
-    for (const lesson of batch.extra_lessons || []) {
-      if (isOwnedUploadAsset(lesson)) {
-        await deleteFromCloud(lesson.file_url);
-      }
-    }
+    const assetUrlsToDelete = (batch.extra_lessons || [])
+      .filter(lesson => isOwnedUploadAsset(lesson))
+      .map(lesson => lesson.file_url);
 
-    // Delete batch chat messages
+    // Commit DB deletions FIRST so a DB failure never leaves dead asset URLs
+    await SpecialBatch.findByIdAndDelete(req.params.id);
     await ChatMessage.deleteMany({
       class_level: { $in: [`BATCH_${batch._id}`, String(batch._id)] }
     });
 
-    await SpecialBatch.findByIdAndDelete(req.params.id);
+    for (const fileUrl of assetUrlsToDelete) {
+      await deleteFromCloud(fileUrl).catch(() => {});
+    }
 
     res.json({ success: true, message: 'Special batch removed successfully' });
   } catch (error) {
@@ -598,12 +598,14 @@ router.delete('/:id/extra-lessons/:lessonId', protect, authorize('SuperAdmin', '
       return res.status(404).json({ success: false, message: 'Study material not found' });
     }
 
-    if (isOwnedUploadAsset(lesson)) {
-      await deleteFromCloud(lesson.file_url);
-    }
+    const assetUrlToDelete = isOwnedUploadAsset(lesson) ? lesson.file_url : null;
 
     batch.extra_lessons.pull(req.params.lessonId);
     await batch.save();
+
+    if (assetUrlToDelete) {
+      await deleteFromCloud(assetUrlToDelete).catch(() => {});
+    }
 
     res.json({
       success: true,
@@ -657,14 +659,28 @@ router.post('/:id/attendance', protect, authorize('SuperAdmin', 'Teacher'), asyn
       (r.session_name || 'Session 1') === session
     );
 
+    // Deduplicate attendance records by student ID and skip null entries
+    const dedupedRecordsMap = new Map();
+    for (const rec of records) {
+      if (!rec || !rec.student) continue;
+      const sid = String(rec.student).trim();
+      if (!sid) continue;
+      dedupedRecordsMap.set(sid, {
+        student: sid,
+        status: rec.status || 'Absent',
+        remarks: rec.remarks !== undefined ? String(rec.remarks) : ''
+      });
+    }
+    const cleanRecords = Array.from(dedupedRecordsMap.values());
+
     if (existingIndex > -1) {
-      batch.attendance_records[existingIndex].records = records;
+      batch.attendance_records[existingIndex].records = cleanRecords;
       batch.attendance_records[existingIndex].session_name = session;
     } else {
       batch.attendance_records.unshift({
         date: parsedDate,
         session_name: session,
-        records
+        records: cleanRecords
       });
     }
 
@@ -706,11 +722,19 @@ router.post('/:id/test-scores', protect, authorize('SuperAdmin', 'Teacher'), asy
       passingNum = Math.min(40, totalNum);
     }
 
+    const dedupedScoresMap = new Map();
     for (const s of scores) {
+      if (!s || !s.student) continue;
+      const sid = String(s.student).trim();
+      if (!sid) continue;
       const obtained = Number(s.marks_obtained || 0);
       if (!Number.isFinite(obtained) || obtained < 0 || obtained > totalNum) {
         return res.status(400).json({ success: false, message: `Marks obtained must be between 0 and ${totalNum}` });
       }
+      dedupedScoresMap.set(sid, {
+        student: sid,
+        marks_obtained: obtained
+      });
     }
 
     const batch = await SpecialBatch.findById(req.params.id);
@@ -728,10 +752,7 @@ router.post('/:id/test-scores', protect, authorize('SuperAdmin', 'Teacher'), asy
       total_marks: totalNum,
       passing_marks: passingNum,
       date: date ? new Date(date) : new Date(),
-      scores: scores.map(s => ({
-        student: s.student,
-        marks_obtained: Number(s.marks_obtained || 0)
-      }))
+      scores: Array.from(dedupedScoresMap.values())
     });
 
     await batch.save();

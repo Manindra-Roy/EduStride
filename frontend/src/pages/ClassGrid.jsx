@@ -336,35 +336,41 @@ const ClassGrid = () => {
   }, [class_level, user]);
 
   useEffect(() => {
+    const controller = new AbortController();
+    const targetStudentId = selectedStudent?._id;
     const fetchDetailedAttendance = async () => {
-      if (!selectedStudent?._id) {
+      if (!targetStudentId) {
         setDetailedAttendance([]);
         return;
       }
       const isStudent = user?.role === 'Student';
-      const isSelf = isStudent && (user.studentProfile?._id || user.studentProfile) === selectedStudent._id;
+      const ownProfileId = user?.studentProfile?._id || user?.studentProfile;
+      const isSelf = isStudent && ownProfileId === targetStudentId;
       if (isStudent && !isSelf) {
         setDetailedAttendance([]);
         return;
       }
       try {
-        const res = await axios.get(`/api/students/${selectedStudent._id}/attendance`);
+        const res = await axios.get(`/api/students/${targetStudentId}/attendance`, { signal: controller.signal });
         if (res.data.success) {
           setDetailedAttendance(res.data.data);
         }
       } catch (err) {
+        if (err?.name === 'CanceledError' || err?.code === 'ERR_CANCELED') return;
         console.error('Failed to fetch student detailed attendance:', err);
       }
     };
     fetchDetailedAttendance();
-  }, [selectedStudent, user]);
+    return () => controller.abort();
+  }, [selectedStudent?._id, user?.role, user?.studentProfile]);
 
   // Frontend quick-filtering
   const filteredStudents = useMemo(() => {
+    const q = (searchQuery || '').toLowerCase();
     return students.filter(student => {
       const matchesSearch = 
-        student.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        student.roll_number.includes(searchQuery);
+        (student.name || '').toLowerCase().includes(q) ||
+        String(student.roll_number || '').toLowerCase().includes(q);
 
       const matchesFees = 
         defaulterFilter === 'All' || 

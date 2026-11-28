@@ -1,4 +1,5 @@
 import express from 'express';
+import mongoose from 'mongoose';
 import ClassLevel from '../models/ClassLevel.js';
 import Student from '../models/Student.js';
 import Attendance from '../models/Attendance.js';
@@ -159,18 +160,46 @@ router.put('/:name', protect, authorize('SuperAdmin'), async (req, res, next) =>
       throw new Error('New class name already exists');
     }
 
-    // Rename the class in ClassLevel
-    classExists.name = cleanNewName;
-    await classExists.save();
-
-    // Cascade update to Students, Attendance, Subject, StudyMaterial, ChatMessage
-    await Promise.all([
-      Student.updateMany({ class_level: oldName }, { class_level: cleanNewName }),
-      Attendance.updateMany({ class_level: oldName }, { class_level: cleanNewName }),
-      Subject.updateMany({ class_level: oldName }, { class_level: cleanNewName }),
-      StudyMaterial.updateMany({ class_level: oldName }, { class_level: cleanNewName }),
-      ChatMessage.updateMany({ class_level: oldName }, { class_level: cleanNewName })
+    // Pre-check target collisions in Attendance/Subject so rename never fails halfway with E11000
+    const [targetAttendanceCount, targetSubjectCount] = await Promise.all([
+      Attendance.countDocuments({ class_level: cleanNewName }),
+      Subject.countDocuments({ class_level: cleanNewName })
     ]);
+    if (targetAttendanceCount > 0 || targetSubjectCount > 0) {
+      res.status(409);
+      throw new Error(`Cannot rename to "${cleanNewName}" because orphaned attendance or subject records already exist for that name.`);
+    }
+
+    const escapedOld = oldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const oldClassChatRegex = new RegExp(`^${escapedOld}$`, 'i');
+
+    const applyRenameCascade = async (session = null) => {
+      const opts = session ? { session } : {};
+      await ClassLevel.updateOne({ _id: classExists._id }, { $set: { name: cleanNewName } }, opts);
+      await Promise.all([
+        Student.updateMany({ class_level: oldName }, { $set: { class_level: cleanNewName } }, opts),
+        Attendance.updateMany({ class_level: oldName }, { $set: { class_level: cleanNewName } }, opts),
+        Subject.updateMany({ class_level: oldName }, { $set: { class_level: cleanNewName } }, opts),
+        StudyMaterial.updateMany({ class_level: oldName }, { $set: { class_level: cleanNewName } }, opts),
+        ChatMessage.updateMany({ class_level: oldClassChatRegex }, { $set: { class_level: cleanNewName } }, opts)
+      ]);
+    };
+
+    let session = null;
+    try {
+      session = await mongoose.startSession();
+      await session.withTransaction(async () => {
+        await applyRenameCascade(session);
+      });
+    } catch (txErr) {
+      const isStandaloneUnsupported =
+        txErr?.code === 20 ||
+        /Transaction numbers are only allowed on a replica set/i.test(txErr?.message || '');
+      if (!isStandaloneUnsupported) throw txErr;
+      await applyRenameCascade(null);
+    } finally {
+      if (session) await session.endSession().catch(() => {});
+    }
 
     // Cascade update to Timetable slots
     const timetable = await Timetable.findOne();
@@ -232,8 +261,13 @@ router.delete('/:name', protect, authorize('SuperAdmin'), async (req, res, next)
 
     await ClassLevel.deleteOne({ name });
 
-    // Clean up orphaned subjects and timetable slots for the deleted class
-    await Subject.deleteMany({ class_level: name });
+    // Clean up orphaned subjects, attendance sheets, chat history, and timetable slots for the deleted empty class
+    const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    await Promise.all([
+      Subject.deleteMany({ class_level: name }),
+      Attendance.deleteMany({ class_level: name }),
+      ChatMessage.deleteMany({ class_level: new RegExp(`^${escapedName}$`, 'i') })
+    ]);
 
     const timetable = await Timetable.findOne();
     if (timetable && Array.isArray(timetable.data)) {

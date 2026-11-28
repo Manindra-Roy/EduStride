@@ -41,13 +41,13 @@ const Preloader = ({ loading, onFinished }) => {
 
   // Cycle Status Text smoothly while loading
   useEffect(() => {
-    if (!loading || progress === 100) return;
+    if (!loading) return;
     const statusInterval = setInterval(() => {
       setStatusIndex(prev => (prev + 1) % (LOADING_STATUSES.length - 1));
     }, 1200);
 
     return () => clearInterval(statusInterval);
-  }, [loading, progress]);
+  }, [loading]);
 
   // Ultra-smooth fadeOut when progress reaches 100%
   useEffect(() => {

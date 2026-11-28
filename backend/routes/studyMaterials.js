@@ -229,8 +229,11 @@ router.delete('/:id', protect, authorize('SuperAdmin', 'Teacher'), async (req, r
       throw new Error('Study material not found');
     }
 
-    await deleteFromCloud(material.file_url);
+    const fileUrl = material.file_url;
     await StudyMaterial.findByIdAndDelete(req.params.id);
+    if (fileUrl) {
+      await deleteFromCloud(fileUrl).catch(() => {});
+    }
 
     res.json({ success: true, message: 'Study material deleted successfully' });
   } catch (error) {

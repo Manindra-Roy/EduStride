@@ -30,7 +30,7 @@
 #include "config.h"
 
 #ifndef FIRMWARE_VERSION
-#define FIRMWARE_VERSION "3.1.0-ota"
+#define FIRMWARE_VERSION "3.1.1-ota"
 #endif
 #ifndef FP_TOUCH_PIN
 #define FP_TOUCH_PIN 4
@@ -112,9 +112,12 @@ bool wifiEventsRegistered = false;
 volatile bool wifiResetNeeded = false;
 volatile uint8_t lastWifiDisconnectReason = 0;
 
-// Cached Wi-Fi RSSI bars (updated every 5s so we never spam WiFi.RSSI() at 30 FPS!)
-int cachedWifiBars = 0;
+// Cached Wi-Fi RSSI bars (volatile: written by sys_evt on Core 0, read by OLED on Core 1)
+volatile int cachedWifiBars = 0;
 unsigned long lastRssiSampleMs = 0;
+uint8_t wifiReconnectFailures = 0;
+unsigned long lastSensorHealthMs = 0;
+uint8_t sensorHealthMisses = 0;
 
 // Runtime state synced with EduStride backend
 volatile bool devicePowerOn = true;
@@ -130,6 +133,13 @@ volatile bool commandInProgress = false;
 volatile bool servoMoving = false;
 volatile bool wifiBusy = false;
 volatile int cachedTemplateCount = 0;
+
+// Edge-triggered touch wakeup & anti-stuck-LED protection (GPIO 4)
+bool touchMustRelease = false;
+unsigned long touchStuckStartMs = 0;
+unsigned long touchCooldownUntilMs = 0;
+bool traySettledActive = false;
+unsigned long traySettledUntilMs = 0;
 
 // ============================================================================
 // MOTORIZED CABINET TRAY v3.0 STATE & LIVE TUNABLE CONFIG (NVS Persisted)
@@ -199,7 +209,10 @@ String serialCmdBuffer = "";
 int64_t trayMotionStartUs = 0;
 int64_t trayMotionDurationUs = 0;
 int trayMotionPulseUs = 1500;
+bool trayBraking = false;
 unsigned long trayBrakeUntilMs = 0;
+bool trayBrakeBeepError = false;
+bool trayBrakeBeepNotice = false;
 unsigned long trayFingerWaitStartMs = 0;
 bool trayPendingRetractAfterLift = false;
 unsigned long trayLastOledMs = 0;
@@ -247,7 +260,8 @@ String queuedCmdAction = "NONE";
 int queuedCmdSlot = 0;
 String queuedCmdStudent = "";
 
-// Monotonic scan sequence + random boot nonce for backend scan_id idempotency
+// Monotonic scan sequence + NVS boot counter + RF-seeded boot nonce for backend scan_id idempotency
+uint32_t bootCounter = 0;
 uint32_t bootNonce = 0;
 uint32_t nextScanSeq = 0;
 
@@ -963,14 +977,18 @@ int performHttpRequest(const String& method, const String& path, const String& j
   int httpCode = -2;
 
   // Up to 2 attempts: recovers transparently if a Render/Cloudflare Keep-Alive socket closed while idle
-  for (int netAttempt = 0; netAttempt < 2; netAttempt++) {
+  // Use single attempt for short override timeouts (e.g. 2s mid-enrollment cancel checks)
+  int maxNetAttempts = (timeoutOverrideMs > 0 && timeoutOverrideMs <= 3000UL) ? 1 : 2;
+  for (int netAttempt = 0; netAttempt < maxNetAttempts; netAttempt++) {
     HTTPClient http;
     http.setTimeout(effectiveTimeoutMs);
+    http.setConnectTimeout(min(effectiveTimeoutMs, 5000UL));
     http.setReuse(true);
 
     bool began = false;
     if (isHttps) {
       if (!tlsConfigured) {
+        sharedSecureClient.setHandshakeTimeout(8); // Cap mbedTLS handshake at 8s (default is 120s!)
 #if ALLOW_INSECURE_TLS
         sharedSecureClient.setInsecure();
 #elif defined(SERVER_ROOT_CA)
@@ -992,7 +1010,14 @@ int performHttpRequest(const String& method, const String& path, const String& j
       http.addHeader("x-device-key", DEVICE_API_KEY);
       httpCode = (method == "POST") ? http.POST(jsonBody) : http.GET();
       if (httpCode > 0) {
-        responseOut = http.getString();
+        int contentLen = http.getSize();
+        if (contentLen > 16384) {
+          Serial.printf("[HTTP] Response too large (%d bytes) — aborting to protect heap!\n", contentLen);
+          responseOut = "";
+          httpCode = -4;
+        } else {
+          responseOut = http.getString();
+        }
         http.end();
         break;
       } else {
@@ -1064,7 +1089,8 @@ uint32_t generateScanId(char* outBuf, size_t outSize) {
   } else {
     seq = ++nextScanSeq;
   }
-  snprintf(outBuf, outSize, "%.16s-%08lx-%lu", DEVICE_ID, (unsigned long)bootNonce, (unsigned long)seq);
+  snprintf(outBuf, outSize, "%.12s-b%lu-%04x-%lu",
+           DEVICE_ID, (unsigned long)bootCounter, (unsigned int)(bootNonce & 0xFFFFU), (unsigned long)seq);
   return seq;
 }
 
@@ -1113,14 +1139,27 @@ void flushOfflineScans() {
     reqDoc["slot_id"] = item.slotId;
     reqDoc["confidence"] = item.confidence;
     reqDoc["scan_id"] = item.scanId;
+    reqDoc["offline_replay"] = true;
     if (item.scannedAt > 1700000000) {
       reqDoc["scanned_at"] = (long)item.scannedAt;
     }
     String payload, resp;
     serializeJson(reqDoc, payload);
     int code = performHttpRequest("POST", "/api/biometric/device/scan", payload, resp);
-    // Only pop on terminal statuses — preserve scans across 5xx, 408, 429, or transport drops!
-    if (code == 200 || code == 201 || code == 400 || code == 403 || code == 404) {
+
+    // Only pop on truly terminal outcomes — NEVER discard valid scans on 403 PAUSED or transient errors!
+    bool shouldPop = (code == 200 || code == 201 || code == 400 || code == 404);
+    if (code == 403) {
+      JsonDocument errDoc;
+      if (!deserializeJson(errDoc, resp)) {
+        const char* st = errDoc["status"] | "";
+        if (strcmp(st, "INACTIVE_STUDENT") == 0) {
+          shouldPop = true;
+        }
+      }
+    }
+
+    if (shouldPop) {
       if (stateMutex && xSemaphoreTake(stateMutex, pdMS_TO_TICKS(150)) == pdTRUE) {
         // Verify head sequence matches so a concurrent full-queue enqueue never double-pops!
         if (offlineQueueCount > 0 && offlineQueue[offlineQueueHead].seq == item.seq) {
@@ -1176,9 +1215,11 @@ bool initR307Sensor() {
     cachedTemplateCount = finger.templateCount;
   }
 
-  // Clear any previously latched LED-OFF state from older firmware — NEVER call LEDcontrol(false)!
-  finger.LEDcontrol(true);
-  delay(30);
+  // Run one baseline getImage() so R307S auto-strobes and leaves the blue prism LED cleanly OFF at idle.
+  // Never call LEDcontrol(true) without capture (0x50 latches the blue LED solid ON until first scan!)
+  // and never call LEDcontrol(false) (0x51 can inhibit optical capture on some R307S batches).
+  finger.getImage();
+  delay(20);
 
   Serial.printf("[R307S] Sensor READY! Capacity=%d | Security=%d | Templates=%d\n",
                 finger.capacity, finger.security_level, cachedTemplateCount);
@@ -1186,9 +1227,7 @@ bool initR307Sensor() {
 }
 
 uint8_t searchStoredTemplates() {
-  if (cachedTemplateCount <= 160) {
-    return finger.fingerFastSearch();
-  }
+  // Always use full-capacity fingerSearch() — fingerFastSearch() only scans slots 0..162!
   return finger.fingerSearch();
 }
 
@@ -1225,7 +1264,7 @@ bool checkRemoteEnrollCancelled(const String& cmdId) {
   String path = "/api/biometric/device/status?firmware=" + String(FIRMWARE_VERSION)
               + "&templates=" + String((int)cachedTemplateCount)
               + "&ip=" + WiFi.localIP().toString();
-  int code = performHttpRequest("GET", path, "", response);
+  int code = performHttpRequest("GET", path, "", response, 2000UL);
   if (code != 200) return false;
 
   JsonDocument doc;
@@ -1326,7 +1365,8 @@ void executeRemoteEnroll(int slotId, const String& studentName, const String& cm
 
   while (fpSerial.available()) fpSerial.read();
   delay(30);
-  finger.LEDcontrol(true);
+  // Note: Do NOT call finger.LEDcontrol(true) — R307S getImage() auto-strobes the optical LED cleanly
+  // without latching it solid ON after enrollment finishes.
 
   String step1Header = "ENROLL #" + String(slotId) + " (1/2)";
   sendCommandAck("ENROLL", "IN_PROGRESS", slotId, "Press finger FLAT on center of glass & hold 1 sec (Step 1/2)...", cmdId, "SCAN_1", 25);
@@ -1482,6 +1522,9 @@ void executeRemoteEnroll(int slotId, const String& studentName, const String& cm
   if (finger.getTemplateCount() == FINGERPRINT_OK) {
     cachedTemplateCount = finger.templateCount;
   }
+  // Require clean finger lift after enrollment so a resting finger never fires an immediate false gate ENTRY!
+  touchMustRelease = true;
+  touchStuckStartMs = millis();
   drawCuteFace(FACE_EXCITED, "Enrolled #" + String(slotId) + "!");
   beepEnrollOk();
   sendCommandAck("ENROLL", "COMPLETED", slotId, "Verified & enrolled " + studentName + " in Slot #" + String(slotId) + "!", cmdId, "DONE", 100);
@@ -1489,13 +1532,60 @@ void executeRemoteEnroll(int slotId, const String& studentName, const String& cm
   commandInProgress = false;
 }
 
-// Read occupied slots (1..1000) via R307S ReadIndexTable (0x1F, pages 0..3), with full loadModel fallback
-int readOccupiedHardwareSlots(uint16_t* outSlots, int maxSlots) {
+static inline bool isFingerprintCommError(uint8_t code) {
+  return code == FINGERPRINT_PACKETRECIEVEERR ||
+         code == FINGERPRINT_BADPACKET ||
+         code == 0xFF; // FINGERPRINT_TIMEOUT
+}
+
+// Read occupied slots (1..1000) via R307S ReadIndexTable (0x1F, pages 0..3), with verified loadModel fallback.
+// Returns >= 0 occupied count on verified read, or -1 on ANY sensor/UART communication or count-mismatch error.
+int readOccupiedHardwareSlots(uint16_t* outSlots, int maxSlots, const String& cmdId, int& expectedCountOut, String& errReasonOut) {
+  expectedCountOut = -1;
+  errReasonOut = "";
   int count = 0;
   bool indexTableOk = true;
   bool slotZeroOccupied = false;
 
   while (fpSerial.available()) fpSerial.read();
+
+  // 1. Verify the R307S is actually alive and answering on UART before trusting any slot scan
+  bool sensorAlive = false;
+  for (int attempt = 0; attempt < 2; attempt++) {
+    if (attempt > 0) {
+      while (fpSerial.available()) fpSerial.read();
+      delay(50);
+    }
+    if (finger.verifyPassword()) {
+      sensorAlive = true;
+      break;
+    }
+  }
+  if (!sensorAlive) {
+    sensorReady = false;
+    errReasonOut = "R307S sensor not responding on UART — sync aborted safely.";
+    Serial.println("[SYNC] ABORT: " + errReasonOut);
+    return -1;
+  }
+
+  // 2. Read the sensor's internal template counter to cross-check our slot table against UART glitches
+  int expectedCount = -1;
+  for (int attempt = 0; attempt < 2; attempt++) {
+    if (attempt > 0) {
+      while (fpSerial.available()) fpSerial.read();
+      delay(40);
+    }
+    if (finger.getTemplateCount() == FINGERPRINT_OK) {
+      expectedCount = (int)finger.templateCount;
+      break;
+    }
+  }
+  if (expectedCount < 0) {
+    errReasonOut = "Failed to read R307S template count — sync aborted safely.";
+    Serial.println("[SYNC] ABORT: " + errReasonOut);
+    return -1;
+  }
+  expectedCountOut = expectedCount;
 
   for (uint8_t page = 0; page < 4; page++) {
     bool pageOk = false;
@@ -1546,23 +1636,57 @@ int readOccupiedHardwareSlots(uint16_t* outSlots, int maxSlots) {
   if (indexTableOk) {
     if (slotZeroOccupied) {
       Serial.println("[SYNC] Found orphan Slot #0 occupied — erasing to prevent templateCount drift!");
-      finger.deleteModel(0);
+      if (finger.deleteModel(0) == FINGERPRINT_OK && finger.getTemplateCount() == FINGERPRINT_OK) {
+        expectedCount = (int)finger.templateCount;
+        expectedCountOut = expectedCount;
+      } else if (expectedCount > 0) {
+        expectedCount--;
+        expectedCountOut = expectedCount;
+      }
+    }
+    if (expectedCount > count) {
+      errReasonOut = "R307S count mismatch (sensor=" + String(expectedCount) + ", index=" + String(count) + ") — sync aborted safely.";
+      Serial.println("[SYNC] ABORT: " + errReasonOut);
+      return -1;
     }
     return count;
   }
 
-  // Fallback for rare clones without 0x1F: probe FULL 1..min(capacity, 1000) so slots > 300 are NEVER wiped!
-  Serial.println("[SYNC] ReadIndexTable unavailable — running full loadModel scan (1..1000)...");
-  if (finger.loadModel(0) == FINGERPRINT_OK) {
+  // Fallback for rare clones without 0x1F: probe FULL 1..min(capacity, 1000) with strict UART error detection!
+  Serial.println("[SYNC] ReadIndexTable unavailable — running verified full loadModel scan (1..1000)...");
+  uint8_t s0 = finger.loadModel(0);
+  if (isFingerprintCommError(s0)) {
+    errReasonOut = "R307S UART error probing Slot #0 — sync aborted safely.";
+    Serial.println("[SYNC] ABORT: " + errReasonOut);
+    return -1;
+  }
+  if (s0 == FINGERPRINT_OK) {
     Serial.println("[SYNC] Found orphan Slot #0 occupied (fallback) — erasing!");
-    finger.deleteModel(0);
+    if (finger.deleteModel(0) == FINGERPRINT_OK && finger.getTemplateCount() == FINGERPRINT_OK) {
+      expectedCount = (int)finger.templateCount;
+      expectedCountOut = expectedCount;
+    } else if (expectedCount > 0) {
+      expectedCount--;
+      expectedCountOut = expectedCount;
+    }
   }
 
   count = 0;
   int limit = min((int)finger.capacity, 1000);
   if (limit <= 0) limit = 1000;
   for (int s = 1; s <= limit && count < maxSlots; s++) {
-    if (finger.loadModel(s) == FINGERPRINT_OK) {
+    uint8_t p = finger.loadModel(s);
+    if (isFingerprintCommError(p)) {
+      while (fpSerial.available()) fpSerial.read();
+      delay(30);
+      p = finger.loadModel(s);
+      if (isFingerprintCommError(p)) {
+        errReasonOut = "R307S UART error at Slot #" + String(s) + " (code 0x" + String(p, HEX) + ") — sync aborted safely.";
+        Serial.println("[SYNC] ABORT: " + errReasonOut);
+        return -1;
+      }
+    }
+    if (p == FINGERPRINT_OK) {
       outSlots[count++] = (uint16_t)s;
     }
     if ((s % 20) == 0) {
@@ -1573,6 +1697,17 @@ int readOccupiedHardwareSlots(uint16_t* outSlots, int maxSlots) {
       int pct = 25 + (s * 28) / limit;
       drawEnrollScreen("SENSOR SYNC", "Full Flash Scan", "Slot " + String(s) + "/" + String(limit), "Found: " + String(count), pct, ENROLL_ICON_SCAN);
     }
+    // Refresh backend last_heartbeat during slow fallback scans so app doesn't mark device OFFLINE (>30s)
+    if ((s % 250) == 0 && s < limit) {
+      int pct = 25 + (s * 28) / limit;
+      sendCommandAck("SYNC_SLOTS", "IN_PROGRESS", 0, "Scanning flash slot " + String(s) + "/" + String(limit) + "...", cmdId, "READING_SENSOR", pct);
+    }
+  }
+
+  if (expectedCount > count) {
+    errReasonOut = "R307S count mismatch (sensor=" + String(expectedCount) + ", scanned=" + String(count) + ") — sync aborted safely.";
+    Serial.println("[SYNC] ABORT: " + errReasonOut);
+    return -1;
   }
   return count;
 }
@@ -1584,17 +1719,31 @@ void executeRemoteSyncSlots(const String& cmdId) {
   sendCommandAck("SYNC_SLOTS", "IN_PROGRESS", 0, "Reading R307S hardware index table...", cmdId, "READING_SENSOR", 30);
 
   static uint16_t hwSlots[1000];
-  int hwCount = readOccupiedHardwareSlots(hwSlots, 1000);
-  Serial.printf("[SYNC] Found %d occupied slots on R307S hardware\n", hwCount);
+  int expectedCount = -1;
+  String readErr = "";
+  int hwCount = readOccupiedHardwareSlots(hwSlots, 1000, cmdId, expectedCount, readErr);
+  if (hwCount < 0) {
+    drawEnrollScreen("SYNC ABORTED", "Sensor Error", "DB Protected!", "Check R307S", 0, ENROLL_ICON_WARN);
+    beepError();
+    sendCommandAck("SYNC_SLOTS", "FAILED", 0, readErr.length() ? readErr : "R307S read failed during slot sync.", cmdId, "FAILED", 0);
+    setMessageHold(3200);
+    commandInProgress = false;
+    return;
+  }
+  Serial.printf("[SYNC] Verified %d occupied slots on R307S hardware (sensor count=%d)\n", hwCount, expectedCount);
 
   drawEnrollScreen("SENSOR SYNC", "Comparing DB", "Found " + String(hwCount), "sensor prints", 55, ENROLL_ICON_SCAN);
 
   // Pre-allocate JSON payload to avoid heap fragmentation across up to 1,000 slots
   String payload;
-  payload.reserve(64 + hwCount * 5);
+  payload.reserve(140 + hwCount * 5);
   payload += "{\"command_id\":\"";
   payload += cmdId;
-  payload += "\",\"hardware_slots\":[";
+  payload += "\",\"sensor_verified\":true,\"sensor_template_count\":";
+  payload += String(expectedCount);
+  payload += ",\"confirm_empty\":";
+  payload += (hwCount == 0 && expectedCount == 0) ? "true" : "false";
+  payload += ",\"hardware_slots\":[";
   for (int i = 0; i < hwCount; i++) {
     if (i > 0) payload += ",";
     payload += String(hwSlots[i]);
@@ -1603,10 +1752,11 @@ void executeRemoteSyncSlots(const String& cmdId) {
 
   String respStr;
   int httpCode = performHttpRequest("POST", "/api/biometric/device/sync-slots", payload, respStr);
+  payload = ""; // Release JSON payload buffer before parsing server response
   if (httpCode != 200) {
     drawEnrollScreen("SYNC FAILED", "Server Error", "HTTP " + String(httpCode), "Try again", 0, ENROLL_ICON_WARN);
     beepError();
-    sendCommandAck("SYNC_SLOTS", "FAILED", 0, "Could not reach server to sync slots (HTTP " + String(httpCode) + ").", cmdId, "FAILED", 0);
+    sendCommandAck("SYNC_SLOTS", "FAILED", 0, "Could not sync slots with server (HTTP " + String(httpCode) + ").", cmdId, "FAILED", 0);
     setMessageHold(2800);
     commandInProgress = false;
     return;
@@ -1821,8 +1971,8 @@ void heartbeatTask(void* param) {
   for (;;) {
     if (!otaInProgress && !scanInProgress && !commandInProgress && !servoMoving && WiFi.status() == WL_CONNECTED) {
       if (!ntpSynced || ntpRequestPending) syncNtpClock(ntpRequestPending);
-      if (devicePowerOn) flushOfflineScans();
       pollServerStatus();
+      if (devicePowerOn) flushOfflineScans();
     }
     vTaskDelay(devicePowerOn ? activeDelayTicks : standbyDelayTicks);
   }
@@ -1857,6 +2007,8 @@ void scanAndSubmitFingerprint() {
   if (wifiBusy) return;
 
   scanInProgress = true;
+  touchMustRelease = true;
+  touchStuckStartMs = millis();
   drawCuteFace(FACE_SCANNING, "Reading Finger...");
 
   // Fast-path capture: try reading immediately on touch, only settle 75ms on retries
@@ -1883,6 +2035,9 @@ void scanAndSubmitFingerprint() {
   }
 
   if (!capturedAny && matchedSlot < 0) {
+    touchMustRelease = true;
+    touchStuckStartMs = millis();
+    touchCooldownUntilMs = millis() + 500UL;
     scanInProgress = false;
     showIdleScreen();
     return;
@@ -1893,6 +2048,8 @@ void scanAndSubmitFingerprint() {
     beepError();
     setMessageHold(1800);
     waitForFingerLiftAfterScan(2500);
+    touchMustRelease = true;
+    touchStuckStartMs = millis();
     scanInProgress = false;
     return;
   }
@@ -1913,6 +2070,8 @@ void scanAndSubmitFingerprint() {
     beepEntry();
     setMessageHold(2400);
     waitForFingerLiftAfterScan(3000);
+    touchMustRelease = true;
+    touchStuckStartMs = millis();
     scanInProgress = false;
     return;
   }
@@ -1924,6 +2083,8 @@ void scanAndSubmitFingerprint() {
     beepNotice();
     setMessageHold(2200);
     waitForFingerLiftAfterScan(3000);
+    touchMustRelease = true;
+    touchStuckStartMs = millis();
     scanInProgress = false;
     return;
   }
@@ -1948,16 +2109,22 @@ void scanAndSubmitFingerprint() {
     beepNotice();
     setMessageHold(2400);
     waitForFingerLiftAfterScan(3000);
+    touchMustRelease = true;
+    touchStuckStartMs = millis();
     scanInProgress = false;
     return;
   }
 
   JsonDocument respDoc;
   if (deserializeJson(respDoc, respStr)) {
-    drawCuteFace(FACE_ERROR, "Server Error " + String(httpCode));
-    beepError();
+    // Non-JSON response (e.g. captive portal / truncated proxy HTML): preserve scan offline safely
+    enqueueOfflineScan(matchedSlot, confidence, scanSeq, scanId, scanEpoch);
+    drawCuteFace(FACE_CHEEKY, "Queued Sync #" + String(matchedSlot));
+    beepNotice();
     setMessageHold(2200);
     waitForFingerLiftAfterScan(3000);
+    touchMustRelease = true;
+    touchStuckStartMs = millis();
     scanInProgress = false;
     return;
   }
@@ -1991,6 +2158,8 @@ void scanAndSubmitFingerprint() {
   }
 
   waitForFingerLiftAfterScan(3000);
+  touchMustRelease = true;
+  touchStuckStartMs = millis();
   scanInProgress = false;
 }
 
@@ -2058,7 +2227,7 @@ bool isTrayMoving() {
     st == TRAY_ST_HOMING ||
     st == TRAY_ST_NUDGING_OPEN ||
     st == TRAY_ST_NUDGING_CLOSE ||
-    trayBrakeUntilMs != 0 ||
+    trayBraking ||
     trayPendingRetractAfterLift
   );
 }
@@ -2233,7 +2402,10 @@ void servoEmergencyStop(const char* reason = "") {
 #if SERVO_ENABLED
   bool wasMoving = isTrayMoving();
   trayPendingRetractAfterLift = false;
+  trayBraking = false;
   trayBrakeUntilMs = 0;
+  trayBrakeBeepError = false;
+  trayBrakeBeepNotice = false;
   trayPendingAckReady = false;
   trayPendingAckMsg = "";
   trayActiveCmdId = "";
@@ -2330,7 +2502,10 @@ void beginTrayDrive(TrayState motionState, int pulseUs, unsigned long durationMs
     delay(15);
   }
   servoMoving = true;
+  trayBraking = false;
   trayBrakeUntilMs = 0;
+  trayBrakeBeepError = false;
+  trayBrakeBeepNotice = false;
   trayState = motionState;
   trayMotionPulseUs = pulseUs;
   trayMotionDurationUs = (int64_t)durationMs * 1000LL;
@@ -2364,6 +2539,16 @@ bool startTrayExtend(const char* subtitle = "Scanner Activated", bool forceMove 
   setTrayFaultReason("");
 
   if (trayCfg.mode == TRAY_MODE_LIMIT_360) {
+    if (swClosedPressed && swOpenPressed) {
+      String errMsg = "Both limit switches active — check wiring!";
+      setTrayFaultReason(errMsg.c_str());
+      trayState = TRAY_ST_FAULT;
+      showOledStatus("TRAY FAULT!", "Both switches ON", "Check GPIO 26/27", "wiring/polarity");
+      beepError();
+      setMessageHold(3200);
+      finishTrayCmdAck(false, errMsg);
+      return false;
+    }
     if (swOpenPressed) {
       persistTrayOpenState(true);
       Serial.println("[SERVO] Already at OPEN mouse switch.");
@@ -2379,7 +2564,7 @@ bool startTrayExtend(const char* subtitle = "Scanner Activated", bool forceMove 
   }
   // TIMED_360
   if (!forceMove && trayState == TRAY_ST_OPEN) return false;
-  if (swOpenPressed) {
+  if (swOpenPressed && !swClosedPressed) {
     persistTrayOpenState(true);
     return false;
   }
@@ -2388,9 +2573,9 @@ bool startTrayExtend(const char* subtitle = "Scanner Activated", bool forceMove 
 #endif
 }
 
-bool startTrayRetract(const char* subtitle = "Scanner Paused", bool forceMove = false, bool beepOnDone = false, bool isHoming = false) {
+bool startTrayRetract(const char* subtitle = "Scanner Paused", bool forceMove = false, bool beepOnDone = false, bool isHoming = false, bool skipPinchCheck = false) {
 #if !SERVO_ENABLED
-  (void)subtitle; (void)forceMove; (void)beepOnDone; (void)isHoming;
+  (void)subtitle; (void)forceMove; (void)beepOnDone; (void)isHoming; (void)skipPinchCheck;
   trayState = TRAY_ST_CLOSED;
   return false;
 #else
@@ -2399,7 +2584,7 @@ bool startTrayRetract(const char* subtitle = "Scanner Paused", bool forceMove = 
 
   // Anti-pinch check: if a student's finger is on the R307S glass, wait briefly before closing!
 #if FP_USE_TOUCH_PIN
-  if (!isHoming && sensorReady && touchPinTriggered() && !trayPendingRetractAfterLift) {
+  if (!isHoming && !skipPinchCheck && sensorReady && touchPinTriggered() && !trayPendingRetractAfterLift) {
     trayPendingRetractAfterLift = true;
     trayFingerWaitStartMs = millis();
     trayActiveSubtitle = (subtitle && subtitle[0] != '\0') ? String(subtitle) : String("Closing cabinet");
@@ -2411,28 +2596,41 @@ bool startTrayRetract(const char* subtitle = "Scanner Paused", bool forceMove = 
 #endif
   trayPendingRetractAfterLift = false;
 
-  TrayState st = isHoming ? TRAY_ST_HOMING : TRAY_ST_RETRACTING;
-  if (trayCfg.mode == TRAY_MODE_LIMIT_360 || isHoming) {
+  // ANGLE_180: smooth sweep to closedAngle for BOTH normal retract and TRAY_HOME (never seek limit switches!)
+  if (trayCfg.mode == TRAY_MODE_ANGLE_180) {
+    if (!forceMove && !isHoming && trayState == TRAY_ST_CLOSED) return false;
+    beginTrayDrive(isHoming ? TRAY_ST_HOMING : TRAY_ST_RETRACTING, angleToPulseUs(trayCfg.closedAngle), 600, subtitle, beepOnDone);
+    return true;
+  }
+
+  // LIMIT_360: seek CLOSED mouse switch up to maxRunMs
+  if (trayCfg.mode == TRAY_MODE_LIMIT_360) {
+    if (swClosedPressed && swOpenPressed) {
+      String errMsg = "Both limit switches active — check wiring!";
+      setTrayFaultReason(errMsg.c_str());
+      trayState = TRAY_ST_FAULT;
+      showOledStatus("TRAY FAULT!", "Both switches ON", "Check GPIO 26/27", "wiring/polarity");
+      beepError();
+      setMessageHold(3200);
+      finishTrayCmdAck(false, errMsg);
+      return false;
+    }
     if (swClosedPressed) {
       persistTrayOpenState(false);
       Serial.println("[SERVO] Already at CLOSED mouse switch.");
       return false;
     }
-    beginTrayDrive(st, get360PulseForDirection(false), (unsigned long)trayCfg.maxRunMs, subtitle, beepOnDone);
+    beginTrayDrive(isHoming ? TRAY_ST_HOMING : TRAY_ST_RETRACTING, get360PulseForDirection(false), (unsigned long)trayCfg.maxRunMs, subtitle, beepOnDone);
     return true;
   }
-  if (trayCfg.mode == TRAY_MODE_ANGLE_180) {
-    if (!forceMove && trayState == TRAY_ST_CLOSED) return false;
-    beginTrayDrive(TRAY_ST_RETRACTING, angleToPulseUs(trayCfg.closedAngle), 600, subtitle, beepOnDone);
-    return true;
-  }
-  // TIMED_360
-  if (!forceMove && trayState == TRAY_ST_CLOSED) return false;
-  if (swClosedPressed) {
+
+  // TIMED_360: always use closeMs (even on TRAY_HOME!) so plastic gears never grind for full maxRunMs
+  if (!forceMove && !isHoming && trayState == TRAY_ST_CLOSED) return false;
+  if (swClosedPressed && !swOpenPressed) {
     persistTrayOpenState(false);
     return false;
   }
-  beginTrayDrive(TRAY_ST_RETRACTING, get360PulseForDirection(false), (unsigned long)trayCfg.closeMs, subtitle, beepOnDone);
+  beginTrayDrive(isHoming ? TRAY_ST_HOMING : TRAY_ST_RETRACTING, get360PulseForDirection(false), (unsigned long)trayCfg.closeMs, subtitle, beepOnDone);
   return true;
 #endif
 }
@@ -2474,6 +2672,9 @@ void completeTrayMotion(TrayState finalState, bool ok, const String& ackMsg) {
     // Give 180° horn 150ms to reach final angle cleanly before idling PWM
     trayBrakeUntilMs = millis() + 150UL;
   }
+  trayBraking = true;
+  trayBrakeBeepError = !ok;
+  trayBrakeBeepNotice = ok && trayMotionBeepOnFinish;
 
   if (finalState == TRAY_ST_OPEN) {
     persistTrayOpenState(true);
@@ -2488,15 +2689,13 @@ void completeTrayMotion(TrayState finalState, bool ok, const String& ackMsg) {
   if (!ok) {
     setTrayFaultReason(ackMsg.c_str());
     showOledStatus("TRAY FAULT!", ackMsg.substring(0, 20), "Check switch/jam", "Tap Home in App");
-    beepError();
     setMessageHold(3200);
   } else {
-    if (trayMotionBeepOnFinish) beepNotice();
     clearMessageHold();
     showIdleScreen();
   }
 
-  // Defer HTTP ACK until after brake completes and PWM is 100% idle LOW
+  // Defer HTTP ACK & finish beep until after brake completes and PWM is 100% idle LOW
   trayPendingAckReady = true;
   trayPendingAckOk = ok;
   trayPendingAckMsg = ackMsg;
@@ -2508,12 +2707,21 @@ void tickServoTray() {
 #else
   unsigned long now = millis();
 
-  // 1. Handle non-blocking post-motion brake / settle release, then fire deferred command ACK cleanly
-  if (trayBrakeUntilMs != 0) {
+  // 1. Handle non-blocking post-motion brake / settle release, then fire deferred beep & command ACK cleanly
+  if (trayBraking) {
     if (deadlineReached(now, trayBrakeUntilMs)) {
+      trayBraking = false;
       trayBrakeUntilMs = 0;
       servoIdleLow();
       servoMoving = false;
+      traySettledActive = true;
+      traySettledUntilMs = millis() + 450UL; // Let R307S capacitive touch pad settle after servo stops
+      bool doErrBeep = trayBrakeBeepError;
+      bool doNoticeBeep = trayBrakeBeepNotice;
+      trayBrakeBeepError = false;
+      trayBrakeBeepNotice = false;
+      if (doErrBeep) beepError();
+      else if (doNoticeBeep) beepNotice();
       if (trayPendingAckReady) {
         trayPendingAckReady = false;
         String msg = trayPendingAckMsg;
@@ -2525,19 +2733,45 @@ void tickServoTray() {
     return;
   }
 
-  // 2. Handle non-blocking anti-pinch finger-lift wait before retracting
+  // 2. Handle non-blocking anti-pinch finger-lift wait before retracting (never loops infinitely!)
   if (trayPendingRetractAfterLift) {
 #if FP_USE_TOUCH_PIN
     bool fingerStillOn = (sensorReady && touchPinTriggered());
 #else
     bool fingerStillOn = false;
 #endif
-    if (!fingerStillOn || (now - trayFingerWaitStartMs >= 2500UL)) {
+    if (!fingerStillOn) {
       trayPendingRetractAfterLift = false;
-      if (!startTrayRetract(trayActiveSubtitle.c_str(), true, trayMotionBeepOnFinish, false)) {
-        finishTrayCmdAck(true, "Tray already at CLOSED position.");
-        clearMessageHold();
-        showIdleScreen();
+      if (!startTrayRetract(trayActiveSubtitle.c_str(), true, trayMotionBeepOnFinish, false, true)) {
+        if (trayState != TRAY_ST_FAULT) {
+          finishTrayCmdAck(true, "Tray already at CLOSED position.");
+          clearMessageHold();
+          showIdleScreen();
+        }
+      }
+    } else if (now - trayFingerWaitStartMs >= 2500UL) {
+      trayPendingRetractAfterLift = false;
+      // Check optically if the touch pin merely drifted (moisture/humidity) vs. a real finger on the prism
+      if (sensorReady && finger.getImage() == FINGERPRINT_NOFINGER) {
+#if FP_USE_TOUCH_PIN
+        touchIdleLevel = digitalRead(FP_TOUCH_PIN);
+        Serial.printf("[R307S] Auto-recalibrated drifted touch pin before retract (idle=%s)\n", touchIdleLevel == HIGH ? "HIGH" : "LOW");
+#endif
+        if (!startTrayRetract(trayActiveSubtitle.c_str(), true, trayMotionBeepOnFinish, false, true)) {
+          if (trayState != TRAY_ST_FAULT) {
+            finishTrayCmdAck(true, "Tray already at CLOSED position.");
+            clearMessageHold();
+            showIdleScreen();
+          }
+        }
+      } else {
+        // Real finger is still resting on the glass after 2.5s — abort retract safely to prevent pinching!
+        String msg = "Anti-pinch: finger still on sensor after 2.5s — retract cancelled safely.";
+        Serial.println("[SERVO] " + msg);
+        showOledStatus("RETRACT PAUSED", "Finger detected!", "Remove finger &", "retry close");
+        beepError();
+        setMessageHold(2800);
+        finishTrayCmdAck(false, msg);
       }
     }
     return;
@@ -2593,7 +2827,7 @@ void tickServoTray() {
       completeTrayMotion(restored, true, String("Nudge ") + (st == TRAY_ST_NUDGING_OPEN ? "OUT" : "IN") + " complete (" + String((long)(trayMotionDurationUs / 1000LL)) + "ms).");
       return;
     }
-    if (trayCfg.mode == TRAY_MODE_LIMIT_360 || st == TRAY_ST_HOMING) {
+    if (trayCfg.mode == TRAY_MODE_LIMIT_360) {
       // Safety cutoff: mouse switch did NOT click within max_run_ms!
       String side = (st == TRAY_ST_EXTENDING) ? "OPEN" : "CLOSED";
       String errMsg = side + " switch not hit in " + String(trayCfg.maxRunMs) + "ms";
@@ -2719,6 +2953,8 @@ void handleSerialCommands() {
 // ============================================================================
 // WI-FI & WIRELESS OTA (ArduinoOTA — NEVER touches R307S LED!)
 // ============================================================================
+int otaLastPct = -1;
+
 void initOtaIfReady() {
   if (otaInitialized || WiFi.status() != WL_CONNECTED) return;
 
@@ -2728,17 +2964,24 @@ void initOtaIfReady() {
 
   ArduinoOTA.onStart([]() {
     otaInProgress = true;
+    otaLastPct = -1;
     servoEmergencyStop();
     buzzerOff();
+    // Wait for any in-flight Core 0 mbedTLS/HTTP request to finish and close sockets before flashing SPI flash
+    if (netMutex && xSemaphoreTake(netMutex, pdMS_TO_TICKS(4000)) == pdTRUE) {
+      sharedSecureClient.stop();
+      tlsConfigured = false;
+      sharedPlainClient.stop();
+      xSemaphoreGive(netMutex);
+    }
     if (oledReady) display.ssd1306_command(SSD1306_DISPLAYON);
     showOledStatus("WI-FI OTA UPDATE", "Receiving firmware", "Do NOT unplug power!", "Progress: 0%");
   });
 
   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-    static int lastPct = -1;
     int pct = total > 0 ? (int)((progress * 100U) / total) : 0;
-    if (pct != lastPct && (pct % 5 == 0 || pct == 100)) {
-      lastPct = pct;
+    if (pct != otaLastPct && (pct % 5 == 0 || pct == 100)) {
+      otaLastPct = pct;
       showOledStatus("WI-FI OTA UPDATE", "Flashing firmware...", "Do NOT unplug power!", "Progress: " + String(pct) + "%");
     }
   });
@@ -2782,6 +3025,7 @@ void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
 
 void ensureWifiConnected(bool isBoot = false) {
   if (WiFi.status() == WL_CONNECTED) {
+    wifiReconnectFailures = 0;
     initOtaIfReady();
     return;
   }
@@ -2793,8 +3037,16 @@ void ensureWifiConnected(bool isBoot = false) {
 
   // During normal loop(), NEVER block Core 1 or beep — keep offline scanning 100% responsive!
   if (!isBoot) {
-    Serial.println("[WIFI] Offline — issuing non-blocking WiFi.reconnect()...");
-    WiFi.reconnect();
+    wifiReconnectFailures++;
+    if (wifiReconnectFailures >= 3) {
+      wifiReconnectFailures = 0;
+      Serial.println("[WIFI] Reconnect stalled — performing full non-blocking WiFi.begin() reset...");
+      WiFi.disconnect(false, false);
+      WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    } else {
+      Serial.println("[WIFI] Offline — issuing non-blocking WiFi.reconnect()...");
+      WiFi.reconnect();
+    }
     return;
   }
 
@@ -2878,6 +3130,10 @@ void enterDeviceStandbyNow() {
   deviceInStandby = true;
   buzzerOff();
   clearMessageHold();
+  if (sensorReady && !scanInProgress && !commandInProgress) {
+    // Ensure R307S optical prism LED finishes in its auto-OFF idle state
+    finger.getImage();
+  }
   if (oledReady) {
     display.clearDisplay();
     display.display();
@@ -2891,6 +3147,8 @@ void wakeDeviceFromStandby() {
   standbyWaitingRetract = false;
   deviceInStandby = false;
   WiFi.setSleep(false);
+  nextBlinkMs = millis() + 2000UL;
+  nextBehaviorMs = millis() + 3000UL;
   if (oledReady) {
     display.ssd1306_command(SSD1306_DISPLAYON);
   }
@@ -2912,6 +3170,15 @@ void setup() {
   delay(200);
   Serial.printf("\n=== EduStride Gate Scanner %s ===\n", FIRMWARE_VERSION);
 
+  // Persist monotonic boot counter in NVS so scan_id NEVER collides across power cycles
+  {
+    Preferences sysPrefs;
+    if (sysPrefs.begin("edustride_sys", false)) {
+      bootCounter = sysPrefs.getUInt("boot_cnt", 0) + 1;
+      sysPrefs.putUInt("boot_cnt", bootCounter);
+      sysPrefs.end();
+    }
+  }
   bootNonce = esp_random();
 
   // Pre-set inactive buzzer level before enabling output to avoid boot chirp on active-LOW modules
@@ -2923,6 +3190,8 @@ void setup() {
   initServoTrayHardware();
 
   Wire.begin(OLED_SDA_PIN, OLED_SCL_PIN);
+  Wire.setClock(400000);
+  Wire.setTimeOut(50);
   oledReady = display.begin(SSD1306_SWITCHCAPVCC, OLED_I2C_ADDR);
   if (oledReady) {
     display.ssd1306_command(SSD1306_SETCONTRAST);
@@ -2935,9 +3204,6 @@ void setup() {
   netMutex = xSemaphoreCreateMutex();
   stateMutex = xSemaphoreCreateMutex();
 
-#if FP_USE_TOUCH_PIN
-  calibrateTouchPin();
-#endif
   // Configure UART2 with explicit custom pins and verify sensor directly (never call finger.begin() afterward!)
   fpSerial.begin(FP_BAUD_RATE, SERIAL_8N1, FP_RX_PIN, FP_TX_PIN);
   delay(300);
@@ -2948,8 +3214,14 @@ void setup() {
     beepError();
     delay(2500);
   }
+#if FP_USE_TOUCH_PIN
+  // Calibrate after R307S power-up & init (~600ms+ settled) so capacitive baseline is accurate
+  calibrateTouchPin();
+#endif
 
   ensureWifiConnected(true);
+  // Re-seed bootNonce now that Wi-Fi RF hardware RNG entropy is active
+  bootNonce ^= esp_random();
   pollServerStatus();
   applyIncomingTrayConfigIfNeeded();
   prevSensingObserved = sensingEnabled;
@@ -2990,6 +3262,19 @@ void loop() {
   if (!sensorReady && now - lastSensorRetryMs >= 5000UL) {
     lastSensorRetryMs = now;
     if (initR307Sensor() && !isTrayMoving()) {
+      sensorHealthMisses = 0;
+      lastSensorHealthMs = now;
+      showIdleScreen();
+    }
+  } else if (sensorReady && !deviceInStandby && !isTrayMoving() && !scanInProgress && !commandInProgress && now - lastSensorHealthMs >= 60000UL) {
+    // Periodic silent UART liveness probe (never flashes optical LED) to detect runtime sensor disconnect
+    lastSensorHealthMs = now;
+    if (finger.verifyPassword()) {
+      sensorHealthMisses = 0;
+    } else if (++sensorHealthMisses >= 2) {
+      sensorReady = false;
+      sensorHealthMisses = 0;
+      Serial.println("[R307S] Runtime health check failed — marking sensor offline for auto-recovery!");
       showIdleScreen();
     }
   }
@@ -3067,6 +3352,7 @@ void loop() {
       hasQueuedCommand = false;
       queuedCmdId = "";
       queuedCmdAction = "NONE";
+      queuedCmdStudent = "";
     }
     xSemaphoreGive(stateMutex);
   }
@@ -3090,15 +3376,17 @@ void loop() {
         setMessageHold(1800);
       }
     } else if (deviceInStandby || !devicePowerOn) {
-      sendCommandAck(runAction, "FAILED", runSlot, "Device is Powered OFF (Standby). Wake device in app first.", runCmdId, "FAILED", 0);
+      sendCommandAck(runAction, "FAILED", runSlot, "Device is Powered OFF (Standby). Wake device in app first.", runCmdId, "STANDBY", 0);
     } else if (runAction == "TRAY_OPEN") {
       commandInProgress = true;
       trayActiveCmdId = runCmdId;
       trayActiveCmdAction = "TRAY_OPEN";
       trayActiveCmdSlot = 0;
       if (!startTrayExtend("App Test Open", true, true)) {
-        finishTrayCmdAck(true, "Tray already at OPEN position.");
-        showIdleScreen();
+        if (trayState != TRAY_ST_FAULT) {
+          finishTrayCmdAck(true, "Tray already at OPEN position.");
+          showIdleScreen();
+        }
       }
     } else if (runAction == "TRAY_CLOSE") {
       commandInProgress = true;
@@ -3106,8 +3394,10 @@ void loop() {
       trayActiveCmdAction = "TRAY_CLOSE";
       trayActiveCmdSlot = 0;
       if (!startTrayRetract("App Test Close", true, true, false)) {
-        finishTrayCmdAck(true, "Tray already at CLOSED position.");
-        showIdleScreen();
+        if (trayState != TRAY_ST_FAULT) {
+          finishTrayCmdAck(true, "Tray already at CLOSED position.");
+          showIdleScreen();
+        }
       }
     } else if (runAction == "TRAY_HOME") {
       commandInProgress = true;
@@ -3115,8 +3405,10 @@ void loop() {
       trayActiveCmdAction = "TRAY_HOME";
       trayActiveCmdSlot = 0;
       if (!startTrayRetract("Homing Tray...", true, true, true)) {
-        finishTrayCmdAck(true, "Tray already homed at CLOSED switch.");
-        showIdleScreen();
+        if (trayState != TRAY_ST_FAULT) {
+          finishTrayCmdAck(true, "Tray already homed at CLOSED switch.");
+          showIdleScreen();
+        }
       }
     } else if (runAction == "TRAY_NUDGE_OPEN" || runAction == "TRAY_NUDGE_CLOSE") {
       commandInProgress = true;
@@ -3147,6 +3439,11 @@ void loop() {
       if (trayState != TRAY_ST_OPEN && trayCfg.enabled) {
         startTrayExtend("Remote Enrollment", false, false);
         waitTrayMotionComplete((unsigned long)trayCfg.maxRunMs + 1000UL);
+        if (trayState == TRAY_ST_FAULT) {
+          sendCommandAck("ENROLL", "FAILED", runSlot, String("Cannot enroll: tray fault (") + trayFaultMsg + ")", runCmdId, "FAILED", 0);
+          beepError();
+          return;
+        }
       }
       executeRemoteEnroll(runSlot, runStudent, runCmdId);
       if (autoRetractAfterEnroll && !sensingEnabled && trayCfg.enabled) {
@@ -3189,6 +3486,9 @@ void loop() {
     return;
   }
 
+  // Refresh `now` after any long blocking command execution above
+  now = millis();
+
   if (!isTrayMoving()) {
     if (messageHolding && deadlineReached(now, messageHoldUntilMs)) {
       clearMessageHold();
@@ -3200,8 +3500,29 @@ void loop() {
   bool trayAllowsScan = (!SERVO_ENABLED) || (!trayCfg.enabled) || (trayState == TRAY_ST_OPEN);
 
 #if FP_USE_TOUCH_PIN
-  // Pure 6-Wire Touch Trigger: LED stays 100% DARK & cool while idle, flashes ONLY when finger touches!
-  if (devicePowerOn && sensingEnabled && trayAllowsScan && !isTrayMoving() && sensorReady && !messageHolding && now - lastFpPollMs >= 20) {
+  // Pure 6-Wire Edge-Triggered Touch Wake: LED stays 100% DARK & cool while idle, flashes ONLY on new finger touch!
+  if (touchMustRelease) {
+    if (!touchPinTriggered()) {
+      touchMustRelease = false;
+      touchStuckStartMs = 0;
+    } else if (sensorReady && !isTrayMoving() && !scanInProgress && !commandInProgress && (now - touchStuckStartMs >= 6000UL)) {
+      // Auto-heal if capacitive touch baseline drifted or booted with finger near glass
+      if (finger.getImage() == FINGERPRINT_NOFINGER) {
+        touchIdleLevel = digitalRead(FP_TOUCH_PIN);
+        touchMustRelease = false;
+        touchStuckStartMs = 0;
+        Serial.printf("[R307S] Auto-recalibrated stuck touch pin (new idle=%s)\n", touchIdleLevel == HIGH ? "HIGH" : "LOW");
+      } else {
+        touchStuckStartMs = now; // Real finger still resting on prism
+      }
+    }
+  } else if (devicePowerOn && sensingEnabled && trayAllowsScan && !isTrayMoving() && sensorReady && !messageHolding
+             && (touchCooldownUntilMs == 0 || deadlineReached(now, touchCooldownUntilMs))
+             && (!traySettledActive || deadlineReached(now, traySettledUntilMs))
+             && now - lastFpPollMs >= 20) {
+    touchCooldownUntilMs = 0;
+    traySettledActive = false;
+    traySettledUntilMs = 0;
     lastFpPollMs = now;
     if (touchPinTriggered()) {
       delay(15); // 15ms hardware debounce

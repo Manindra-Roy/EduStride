@@ -46,4 +46,6 @@ const chatMessageSchema = new mongoose.Schema({
   timestamps: true
 });
 
+chatMessageSchema.index({ class_level: 1, created_at: -1 });
+
 export default mongoose.model('ChatMessage', chatMessageSchema);

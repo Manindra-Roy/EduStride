@@ -34,4 +34,6 @@ const studyMaterialSchema = new mongoose.Schema({
   timestamps: true
 });
 
+studyMaterialSchema.index({ class_level: 1, subject: 1, uploaded_at: -1 });
+
 export default mongoose.model('StudyMaterial', studyMaterialSchema);

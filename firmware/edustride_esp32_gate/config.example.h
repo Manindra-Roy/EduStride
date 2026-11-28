@@ -72,7 +72,7 @@
 // ============================================================================
 // 5. TIMING, TLS & FIRMWARE METADATA
 // ============================================================================
-#define FIRMWARE_VERSION         "3.1.0-ota"
+#define FIRMWARE_VERSION         "3.1.1-ota"
 #define HEARTBEAT_INTERVAL_MS    5500   // Calm 5.5s interval keeps 3.3V rail quiet for R307S
 #define HTTP_TIMEOUT_MS          12000  // Handles cloud cold-starts cleanly
 #define ENROLL_STEP_TIMEOUT_MS   25000

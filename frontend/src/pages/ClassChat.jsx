@@ -198,6 +198,7 @@ const ClassChat = ({ setAppSidebarOpen }) => {
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
   const recordingTimerRef = useRef(null);
+  const startingRecordingRef = useRef(false);
 
   // File Upload states
   const [selectedAttachment, setSelectedAttachment] = useState(null); // { name, type, size, base64 }
@@ -249,6 +250,11 @@ const ClassChat = ({ setAppSidebarOpen }) => {
   const [showSidebarMenu, setShowSidebarMenu] = useState(false);
   const [showHeaderMenu, setShowHeaderMenu] = useState(false);
   const [isStealthMode, setIsStealthMode] = useState(() => localStorage.getItem('edustride_chat_stealth') === 'true');
+  const isStealthModeRef = useRef(isStealthMode);
+  useEffect(() => {
+    isStealthModeRef.current = isStealthMode;
+  }, [isStealthMode]);
+  const typingExpiryTimersRef = useRef(new Map());
 
   const toggleStealthMode = () => {
     const nextVal = !isStealthMode;
@@ -403,10 +409,19 @@ const ClassChat = ({ setAppSidebarOpen }) => {
   const handleDownloadAttachment = (uri, filename = 'attachment') => {
     if (!isSafeAttachmentUri(uri)) return;
     if (/^data:/i.test(uri)) {
+      const mimeMatch = uri.match(/^data:([^;]+)/i);
+      const mime = mimeMatch ? mimeMatch[1] : 'application/octet-stream';
+      // Android WebView does not support blob: downloads — route directly to the trusted native saver
+      if (window.AndroidNotificationBridge && typeof window.AndroidNotificationBridge.saveBase64Attachment === 'function') {
+        try {
+          window.AndroidNotificationBridge.saveBase64Attachment(uri, filename, mime);
+          return;
+        } catch (err) {
+          console.error('Native attachment save failed, falling back to browser download:', err);
+        }
+      }
       try {
         const [header, dataPart] = uri.split(',');
-        const mimeMatch = header.match(/^data:([^;]+)/i);
-        const mime = mimeMatch ? mimeMatch[1] : 'application/octet-stream';
         const isBase64 = /;base64$/i.test(header);
         let blob;
         if (isBase64) {
@@ -524,12 +539,15 @@ const ClassChat = ({ setAppSidebarOpen }) => {
         if (targetRoomState) {
           setCurrentRoom(targetRoomState);
           setShowSidebarOnMobile(false);
-        } else {
+        } else if (activeCall?.room && combined.includes(activeCall.room)) {
+          setCurrentRoom(activeCall.room);
+          setShowSidebarOnMobile(false);
+        } else if (!currentRoom || !combined.includes(currentRoom)) {
           const studentClass = user.role === 'Student' ? user.studentProfile?.class_level : null;
           if (studentClass && combined.includes(studentClass)) {
             setCurrentRoom(studentClass);
             setShowSidebarOnMobile(false);
-          } else if (combined.length > 0 && !currentRoom) {
+          } else if (combined.length > 0) {
             setCurrentRoom(combined[0]);
           }
         }
@@ -574,13 +592,20 @@ const ClassChat = ({ setAppSidebarOpen }) => {
     if (!currentRoom || !socketRef.current) return;
     const sock = socketRef.current;
     let isActive = true;
+    const normalizeRoomKey = (raw) => {
+      const s = String(raw || '').trim();
+      if (!s) return '';
+      if (/^batch_[0-9a-fA-F]{24}$/i.test(s)) return `BATCH_${s.slice(6)}`;
+      return s.toUpperCase();
+    };
+    const activeRoomKey = normalizeRoomKey(currentRoom);
 
     const emitJoinPresence = () => {
       sock.emit('join_room_chat', {
         class_level: currentRoom,
         sender_name: myDisplayName,
         sender_role: user.role,
-        is_hidden: (user.role === 'SuperAdmin' || user.role === 'Teacher') && isStealthMode
+        is_hidden: (user.role === 'SuperAdmin' || user.role === 'Teacher') && isStealthModeRef.current
       });
     };
 
@@ -591,8 +616,12 @@ const ClassChat = ({ setAppSidebarOpen }) => {
 
     // Global message listener (handles active stream and unread badges)
     const handleNewMessageGlobal = (msg) => {
-      if (msg.class_level === currentRoom) {
-        setMessages((prev) => (prev.some((m) => m._id === msg._id) ? prev : [...prev, msg]));
+      if (normalizeRoomKey(msg.class_level) === activeRoomKey) {
+        setMessages((prev) => {
+          if (prev.some((m) => m._id === msg._id)) return prev;
+          const next = [...prev, msg];
+          return next.length > 200 ? next.slice(-200) : next;
+        });
       } else {
         setUnreadCounts((prev) => ({
           ...prev,
@@ -615,18 +644,40 @@ const ClassChat = ({ setAppSidebarOpen }) => {
     };
 
     const handleTypingStatus = (data) => {
-      const { sender_id, sender_name, is_typing } = data || {};
+      const { class_level, sender_id, sender_name, is_typing } = data || {};
+      if (class_level && normalizeRoomKey(class_level) !== activeRoomKey) return;
       if (sender_id && myUserId && String(sender_id) === String(myUserId)) return;
       if (!sender_id && sender_name === myDisplayName) return;
       if (!sender_name) return;
+
+      const existingTimer = typingExpiryTimersRef.current.get(sender_name);
+      if (existingTimer) {
+        clearTimeout(existingTimer);
+        typingExpiryTimersRef.current.delete(sender_name);
+      }
+
+      if (is_typing) {
+        const t = setTimeout(() => {
+          typingExpiryTimersRef.current.delete(sender_name);
+          setTypingUsers((prev) => ({ ...prev, [sender_name]: false }));
+        }, 5000);
+        typingExpiryTimersRef.current.set(sender_name, t);
+      }
+
       setTypingUsers((prev) => ({
         ...prev,
-        [sender_name]: is_typing
+        [sender_name]: Boolean(is_typing)
       }));
     };
 
-    const handleRoomMembers = (members) => {
-      setRoomMembers(members);
+    const handleRoomMembers = (payload) => {
+      if (Array.isArray(payload)) {
+        setRoomMembers(payload);
+        return;
+      }
+      if (!payload || !Array.isArray(payload.members)) return;
+      if (payload.class_level && normalizeRoomKey(payload.class_level) !== activeRoomKey) return;
+      setRoomMembers(payload.members);
     };
 
     const handleSocketReconnect = () => {
@@ -651,6 +702,8 @@ const ClassChat = ({ setAppSidebarOpen }) => {
 
     return () => {
       isActive = false;
+      for (const t of typingExpiryTimersRef.current.values()) clearTimeout(t);
+      typingExpiryTimersRef.current.clear();
       sock.emit('leave_room_chat');
       sock.off('connect', handleSocketReconnect);
       sock.off('new_message', handleNewMessageGlobal);
@@ -844,8 +897,10 @@ const ClassChat = ({ setAppSidebarOpen }) => {
     setDeleteConfirmMsgId(messageId);
   };
 
-  // Voice Recording Functions
+  // Voice Recording Functions (re-entrancy safe, Safari/iOS MIME aware, 120s / 4.5MB capped)
   const startRecording = async () => {
+    if (startingRecordingRef.current || isRecording) return;
+    startingRecordingRef.current = true;
     try {
       const targetRoomAtStart = currentRoom;
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -853,6 +908,8 @@ const ClassChat = ({ setAppSidebarOpen }) => {
       audioChunksRef.current = [];
       const mediaRecorder = new MediaRecorder(stream);
       mediaRecorderRef.current = mediaRecorder;
+      const detectedMime = mediaRecorder.mimeType || 'audio/webm';
+      const fileExt = detectedMime.includes('mp4') ? 'm4a' : (detectedMime.includes('ogg') ? 'ogg' : 'webm');
       
       mediaRecorder.ondataavailable = (event) => {
         if (event.data.size > 0) {
@@ -861,7 +918,15 @@ const ClassChat = ({ setAppSidebarOpen }) => {
       };
 
       mediaRecorder.onstop = async () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        const audioBlob = new Blob(audioChunksRef.current, { type: detectedMime });
+        stream.getTracks().forEach(track => track.stop());
+        if (recordingStreamRef.current === stream) {
+          recordingStreamRef.current = null;
+        }
+        if (audioBlob.size > 4.5 * 1024 * 1024) {
+          alert('Voice note exceeded the 4.5 MB size limit. Please keep recordings under 2 minutes.');
+          return;
+        }
         const reader = new FileReader();
         reader.readAsDataURL(audioBlob);
         reader.onloadend = () => {
@@ -869,7 +934,7 @@ const ClassChat = ({ setAppSidebarOpen }) => {
           const msgPayload = JSON.stringify({
             isAttachment: true,
             type: 'audio',
-            name: `VoiceNote-${Date.now()}.webm`,
+            name: `VoiceNote-${Date.now()}.${fileExt}`,
             content: base64Audio
           });
           
@@ -884,41 +949,50 @@ const ClassChat = ({ setAppSidebarOpen }) => {
             socketRef.current.emit('send_message', messageData);
           }
         };
-        
-        stream.getTracks().forEach(track => track.stop());
-        if (recordingStreamRef.current === stream) {
-          recordingStreamRef.current = null;
-        }
       };
 
       mediaRecorder.start();
       setIsRecording(true);
       setRecordingDuration(0);
+      if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
       recordingTimerRef.current = setInterval(() => {
-        setRecordingDuration(prev => prev + 1);
+        setRecordingDuration(prev => {
+          if (prev >= 119) {
+            stopRecording(true);
+            return 120;
+          }
+          return prev + 1;
+        });
       }, 1000);
     } catch (err) {
       console.error('Microphone access denied:', err);
       alert('Microphone access is required to record voice notes.');
+    } finally {
+      startingRecordingRef.current = false;
     }
   };
 
   const stopRecording = (shouldSend = true) => {
-    if (mediaRecorderRef.current && isRecording) {
+    if (recordingTimerRef.current) {
       clearInterval(recordingTimerRef.current);
+      recordingTimerRef.current = null;
+    }
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       setIsRecording(false);
-      
       if (shouldSend) {
         mediaRecorderRef.current.stop();
       } else {
-        // Cancel recording, discard tracks
+        // Cancel recording, discard tracks & clear stream ref cleanly
         mediaRecorderRef.current.onstop = null;
         mediaRecorderRef.current.stop();
         const stream = mediaRecorderRef.current.stream;
         if (stream) {
           stream.getTracks().forEach(track => track.stop());
         }
+        recordingStreamRef.current = null;
       }
+    } else {
+      setIsRecording(false);
     }
   };
 
@@ -1134,8 +1208,8 @@ const ClassChat = ({ setAppSidebarOpen }) => {
                     onClick={() => {
                       if (socket.connected) {
                         socket.disconnect();
-                        socket.connect();
                       }
+                      socket.connect();
                       setShowSidebarMenu(false);
                     }}
                     className="flex items-center gap-2 px-3 py-2 rounded-xl hover:bg-dark-800 text-slate-200 hover:text-white transition cursor-pointer"

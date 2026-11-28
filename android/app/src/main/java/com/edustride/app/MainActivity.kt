@@ -25,10 +25,12 @@ import android.provider.MediaStore
 import android.util.Base64
 import android.util.Log
 import android.view.View
+import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.MimeTypeMap
 import android.webkit.PermissionRequest
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.URLUtil
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
@@ -186,11 +188,13 @@ class MainActivity : AppCompatActivity() {
     private fun setupBackNavigation() {
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (binding.webView.canGoBack()) {
+                if (binding.offlineLayout.visibility != View.VISIBLE && binding.webView.canGoBack()) {
                     binding.webView.goBack()
                 } else {
                     isEnabled = false
                     onBackPressedDispatcher.onBackPressed()
+                    // Re-enable immediately so Android 12+ task resume keeps WebView Back navigation working!
+                    isEnabled = true
                 }
             }
         })
@@ -218,6 +222,24 @@ class MainActivity : AppCompatActivity() {
 
         // Set WebViewClient to enforce trusted origins and handle loading states
         binding.webView.webViewClient = object : WebViewClient() {
+            override fun onRenderProcessGone(
+                view: WebView?,
+                detail: RenderProcessGoneDetail?
+            ): Boolean {
+                Log.e(TAG, "WebView renderer process gone (didCrash=${detail?.didCrash()}); reloading cleanly.")
+                runOnUiThread {
+                    if (!isFinishing && !isDestroyed) {
+                        Toast.makeText(
+                            this@MainActivity,
+                            "Session refreshed after low memory.",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                        recreate()
+                    }
+                }
+                return true
+            }
+
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                 val uri = request?.url ?: return false
                 if (uri.toString().equals("about:blank", ignoreCase = true)) {
@@ -311,14 +333,36 @@ class MainActivity : AppCompatActivity() {
                 fileCallback?.onReceiveValue(null)
                 fileCallback = filePathCallback
 
-                val intent = fileChooserParams?.createIntent()
-                if (intent == null) {
-                    fileCallback?.onReceiveValue(null)
-                    fileCallback = null
-                    return false
+                val mimeTypes = linkedSetOf<String>()
+                fileChooserParams?.acceptTypes?.forEach { rawEntry ->
+                    rawEntry.split(",").forEach { token ->
+                        val cleaned = token.trim().lowercase()
+                        if (cleaned.isEmpty()) return@forEach
+                        if (cleaned.contains("/")) {
+                            mimeTypes.add(cleaned)
+                        } else if (cleaned.startsWith(".")) {
+                            val ext = cleaned.removePrefix(".")
+                            val mapped = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
+                            if (!mapped.isNullOrBlank()) {
+                                mimeTypes.add(mapped)
+                            }
+                        }
+                    }
                 }
+
+                val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = if (mimeTypes.size == 1) mimeTypes.first() else "*/*"
+                    if (mimeTypes.size > 1) {
+                        putExtra(Intent.EXTRA_MIME_TYPES, mimeTypes.toTypedArray())
+                    }
+                    if (fileChooserParams?.mode == FileChooserParams.MODE_OPEN_MULTIPLE) {
+                        putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+                    }
+                }
+
                 try {
-                    filePickerLauncher.launch(intent)
+                    filePickerLauncher.launch(Intent.createChooser(intent, "Select file"))
                 } catch (e: Exception) {
                     fileCallback?.onReceiveValue(null)
                     fileCallback = null
@@ -562,6 +606,20 @@ class MainActivity : AppCompatActivity() {
         return schemeAllowed && !uri.host.isNullOrBlank()
     }
 
+    private fun isTrustedSocketUrl(url: String): Boolean {
+        if (!isValidConfiguredUrl(url)) return false
+        if (BuildConfig.DEBUG) return true
+        val host = try {
+            Uri.parse(url).host?.lowercase()?.trim()
+        } catch (_: Exception) {
+            null
+        } ?: return false
+        return host == "edustride.in" ||
+            host.endsWith(".edustride.in") ||
+            host.endsWith(".onrender.com") ||
+            isAllowedEduStrideHost(host)
+    }
+
     private fun openExternalUri(uri: Uri) {
         try {
             val viewIntent = Intent(Intent.ACTION_VIEW, uri).apply {
@@ -591,7 +649,16 @@ class MainActivity : AppCompatActivity() {
         binding.btnRetry.setOnClickListener {
             if (isNetworkAvailable()) {
                 binding.offlineLayout.visibility = View.GONE
-                loadApp()
+                val loadedUri = binding.webView.url?.let {
+                    try { Uri.parse(it) } catch (_: Exception) { null }
+                }
+                if (isTrustedWebUrl(loadedUri)) {
+                    binding.webView.reload()
+                } else {
+                    loadApp()
+                }
+            } else {
+                Toast.makeText(this, "Still offline — please check your internet connection.", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -702,15 +769,22 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         mainHandler.removeCallbacks(splashTimeoutRunnable)
-        pendingWebPermissionRequest?.deny()
+        try {
+            pendingWebPermissionRequest?.deny()
+        } catch (_: Exception) {
+            // Request may have already been canceled or resolved by WebView
+        }
         pendingWebPermissionRequest = null
+        fileCallback?.onReceiveValue(null)
+        fileCallback = null
         pendingStorageAction = null
-        downloadExecutor.shutdownNow()
+        downloadExecutor.shutdown()
         try {
             binding.webView.removeJavascriptInterface("AndroidNotificationBridge")
             binding.webView.stopLoading()
             binding.webView.webChromeClient = null
             binding.webView.webViewClient = WebViewClient()
+            (binding.webView.parent as? ViewGroup)?.removeView(binding.webView)
             binding.webView.destroy()
         } catch (e: Exception) {
             Log.e(TAG, "Error cleaning up WebView", e)
@@ -811,6 +885,23 @@ class MainActivity : AppCompatActivity() {
         }
 
         @JavascriptInterface
+        fun saveBase64Attachment(dataUri: String?, filename: String?, mimeType: String?) {
+            val safeUri = dataUri.orEmpty().trim()
+            if (!safeUri.startsWith("data:", ignoreCase = true)) return
+            val safeName = filename.orEmpty()
+                .replace(Regex("[\\\\/:*?\"<>|\\r\\n]"), "_")
+                .trim()
+                .ifEmpty { "attachment" }
+            val contentDisposition = "attachment; filename=\"$safeName\""
+
+            runIfTrustedBridgeOrigin {
+                runWithLegacyStoragePermission {
+                    saveDataUriDownload(safeUri, contentDisposition, mimeType)
+                }
+            }
+        }
+
+        @JavascriptInterface
         fun registerUserWithToken(
             email: String?,
             classLevel: String?,
@@ -822,7 +913,7 @@ class MainActivity : AppCompatActivity() {
             val safeClass = classLevel.orEmpty().trim()
             val safeName = name.orEmpty().trim()
             val rawSocketUrl = socketUrl.orEmpty().trim()
-            val safeSocketUrl = if (isValidConfiguredUrl(rawSocketUrl)) rawSocketUrl else ""
+            val safeSocketUrl = if (isTrustedSocketUrl(rawSocketUrl)) rawSocketUrl else ""
             val safeToken = authToken.orEmpty().trim()
 
             runIfTrustedBridgeOrigin {

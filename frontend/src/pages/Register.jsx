@@ -92,9 +92,7 @@ const Register = () => {
       const res = await axios.get('/api/classes');
       if (res.data.success && Array.isArray(res.data.data)) {
         setClasses(res.data.data);
-        if (res.data.data.length > 0) {
-          setClassLevel(prev => prev || res.data.data[0]);
-        }
+        setClassLevel(prev => (prev && res.data.data.includes(prev) ? prev : (res.data.data[0] || '')));
       }
     } catch (err) {
       console.error('Failed to load classes:', err);
@@ -170,7 +168,10 @@ const Register = () => {
     }
   };
 
+  const [reorderingClasses, setReorderingClasses] = useState(false);
+
   const handleMoveClass = async (index, direction) => {
+    if (reorderingClasses) return;
     if (direction === 'up' && index === 0) return;
     if (direction === 'down' && index === classes.length - 1) return;
 
@@ -184,6 +185,7 @@ const Register = () => {
 
     // Optimistically update local state
     setClasses(newClasses);
+    setReorderingClasses(true);
 
     try {
       const res = await axios.put('/api/classes/order', { order: newClasses });
@@ -197,6 +199,8 @@ const Register = () => {
     } catch (err) {
       fetchClasses();
       setError(err.response?.data?.message || 'Failed to update class order.');
+    } finally {
+      setReorderingClasses(false);
     }
   };
 
@@ -463,12 +467,13 @@ const Register = () => {
   };
 
   const filteredTeachers = teachers.filter(t =>
-    t.email.toLowerCase().includes(searchTeacherQuery.toLowerCase())
+    (t?.email || '').toLowerCase().includes((searchTeacherQuery || '').toLowerCase())
   );
 
   const filteredStudents = students.filter(student => {
-    const matchesSearch = student.email.toLowerCase().includes(searchStudentQuery.toLowerCase()) ||
-      (student.studentProfile?.name && student.studentProfile.name.toLowerCase().includes(searchStudentQuery.toLowerCase()));
+    const q = (searchStudentQuery || '').toLowerCase();
+    const matchesSearch = (student?.email || '').toLowerCase().includes(q) ||
+      Boolean(student?.studentProfile?.name && student.studentProfile.name.toLowerCase().includes(q));
 
     if (!matchesSearch) return false;
     if (selectedClassFilter === 'All') return true;

@@ -185,4 +185,7 @@ const specialBatchSchema = new mongoose.Schema({
   }
 });
 
+specialBatchSchema.index({ students: 1, status: 1, created_at: -1 });
+specialBatchSchema.index({ instructor: 1, status: 1 });
+
 export default mongoose.model('SpecialBatch', specialBatchSchema);

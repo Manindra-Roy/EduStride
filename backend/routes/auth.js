@@ -10,6 +10,7 @@ import Student from '../models/Student.js';
 import SpecialBatch from '../models/SpecialBatch.js';
 import { protect, authorize } from '../middleware/auth.js';
 import { uploadToCloud, deleteFromCloud } from '../services/cloudStorage.js';
+import { disconnectUserSockets } from '../config/socket.js';
 
 const router = express.Router();
 
@@ -405,11 +406,12 @@ router.put('/change-password', protect, async (req, res, next) => {
       throw new Error('Current password is incorrect');
     }
 
-    // Hash new password and invalidate all older sessions
+    // Hash new password and invalidate all older sessions (including active WebSockets)
     const salt = await bcrypt.genSalt(10);
     user.password = await bcrypt.hash(newPassword, salt);
     user.tokenVersion = (user.tokenVersion || 0) + 1;
     await user.save();
+    disconnectUserSockets(user._id);
 
     res.json({
       success: true,
@@ -461,10 +463,12 @@ router.delete('/teachers/:id', protect, authorize('SuperAdmin'), async (req, res
       throw new Error(`Cannot delete teacher because they are assigned as instructor for ${activeBatchCount} active special batch(es). Please reassign or archive those batches first.`);
     }
 
-    if (teacher.profile_pic) {
-      await deleteFromCloud(teacher.profile_pic);
-    }
+    const oldPic = teacher.profile_pic;
     await User.findByIdAndDelete(req.params.id);
+    disconnectUserSockets(req.params.id);
+    if (oldPic) {
+      await deleteFromCloud(oldPic).catch(() => {});
+    }
     res.json({
       success: true,
       message: 'Teacher deleted successfully'
@@ -505,10 +509,12 @@ router.delete('/students/:id', protect, authorize('SuperAdmin', 'Teacher'), asyn
       res.status(400);
       throw new Error('User is not a student');
     }
-    if (studentUser.profile_pic) {
-      await deleteFromCloud(studentUser.profile_pic);
-    }
+    const oldPic = studentUser.profile_pic;
     await User.findByIdAndDelete(req.params.id);
+    disconnectUserSockets(req.params.id);
+    if (oldPic) {
+      await deleteFromCloud(oldPic).catch(() => {});
+    }
     res.json({
       success: true,
       message: 'Student account deleted successfully'
@@ -549,7 +555,9 @@ router.put('/students/:id/email', protect, authorize('SuperAdmin', 'Teacher'), a
     }
 
     studentUser.email = cleanEmail;
+    studentUser.tokenVersion = (studentUser.tokenVersion || 0) + 1;
     await studentUser.save();
+    disconnectUserSockets(studentUser._id);
 
     res.json({
       success: true,
@@ -592,11 +600,12 @@ const handleAdminResetPassword = async (req, res, next) => {
       }
     }
 
-    // Hash the new password and immediately invalidate existing tokens
+    // Hash the new password and immediately invalidate existing tokens & live sockets
     const salt = await bcrypt.genSalt(10);
     targetUser.password = await bcrypt.hash(newPassword.trim(), salt);
     targetUser.tokenVersion = (targetUser.tokenVersion || 0) + 1;
     await targetUser.save();
+    disconnectUserSockets(targetUser._id);
 
     res.json({
       success: true,

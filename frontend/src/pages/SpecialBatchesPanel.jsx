@@ -66,6 +66,8 @@ const SpecialBatchesPanel = () => {
 
   const workbenchRef = useRef(null);
   const timersRef = useRef(new Set());
+  const batchFetchSeqRef = useRef(0);
+  const batchAbortRef = useRef(null);
 
   const scheduleTimeout = (fn, delay) => {
     const id = setTimeout(() => {
@@ -78,6 +80,7 @@ const SpecialBatchesPanel = () => {
 
   useEffect(() => {
     return () => {
+      if (batchAbortRef.current) batchAbortRef.current.abort();
       timersRef.current.forEach((id) => clearTimeout(id));
       timersRef.current.clear();
     };
@@ -189,12 +192,18 @@ const SpecialBatchesPanel = () => {
     }
   };
 
-  // Fetch single batch full details with dynamic merit rankings
+  // Fetch single batch full details with dynamic merit rankings (AbortController + seq guard prevents cross-batch overwrite)
   const fetchBatchDetails = async (id) => {
     if (!id) return;
+    if (batchAbortRef.current) batchAbortRef.current.abort();
+    const controller = new AbortController();
+    batchAbortRef.current = controller;
+    const reqSeq = ++batchFetchSeqRef.current;
+
     try {
       setLoadingBatchDetails(true);
-      const res = await axios.get(`/api/special-batches/${id}`);
+      const res = await axios.get(`/api/special-batches/${id}`, { signal: controller.signal });
+      if (reqSeq !== batchFetchSeqRef.current) return;
       if (res.data.success) {
         setSelectedBatchDetails(res.data.data);
         
@@ -209,9 +218,12 @@ const SpecialBatchesPanel = () => {
         initAttendanceMap(res.data.data, attendanceDate, attendanceSession);
       }
     } catch (err) {
+      if (err?.name === 'CanceledError' || err?.code === 'ERR_CANCELED') return;
       console.error('Failed to fetch batch details:', err);
     } finally {
-      setLoadingBatchDetails(false);
+      if (reqSeq === batchFetchSeqRef.current) {
+        setLoadingBatchDetails(false);
+      }
     }
   };
 
@@ -242,7 +254,7 @@ const SpecialBatchesPanel = () => {
     fetchBatches();
     fetchStudents();
     fetchClasses();
-  }, [user]);
+  }, [user?.id, user?.role]);
 
   useEffect(() => {
     if (selectedBatchId) {
@@ -714,7 +726,7 @@ const SpecialBatchesPanel = () => {
 
   // Trigger Email Progress Report for Batch
   const handleTriggerBatchProgressReport = async () => {
-    if (!selectedBatchDetails) return;
+    if (!selectedBatchDetails || submitting) return;
     if (!window.confirm(`Send automated progress report emails to parents of all enrolled students in ${selectedBatchDetails.name}?`)) return;
     try {
       setSubmitting(true);
@@ -1039,11 +1051,12 @@ const SpecialBatchesPanel = () => {
                     {canManage && (
                       <button
                         onClick={handleTriggerBatchProgressReport}
-                        className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-dark-900 hover:bg-dark-800 text-slate-200 hover:text-white border border-dark-750 font-medium text-xs transition cursor-pointer"
+                        disabled={submitting}
+                        className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-dark-900 hover:bg-dark-800 disabled:opacity-50 disabled:cursor-not-allowed text-slate-200 hover:text-white border border-dark-750 font-medium text-xs transition cursor-pointer"
                         title="Send Batch Progress Report Emails to Parents"
                       >
                         <Mail size={14} className="text-amber-400" />
-                        <span>Email Reports</span>
+                        <span>{submitting ? 'Sending...' : 'Email Reports'}</span>
                       </button>
                     )}
                   </div>

@@ -90,19 +90,17 @@ router.get('/status', protect, authorize('SuperAdmin'), async (req, res, next) =
 router.post('/trigger-fee-nag', protect, authorize('SuperAdmin'), async (req, res, next) => {
   try {
     const ist = getISTParts();
-    const currentYear = Number(ist.dateStr.slice(0, 4));
     const currentMonthName = MONTH_NAMES[Number(ist.dateStr.slice(5, 7)) - 1];
 
-    // Find all unpaid or partial ledgers for the current academic year
+    // Query active rolling ledgers without brittle `year: currentYear` so Jan–Mar reminders always match
     const unpaidLedgers = await FeeLedger.find({
-      year: currentYear,
       months: {
         $elemMatch: {
           month_name: currentMonthName,
           status: { $in: ['Unpaid', 'Partial/Pending'] }
         }
       }
-    }).populate('student_id');
+    }).populate('student_id').lean();
 
     const eligibleStudents = unpaidLedgers
       .map(l => l.student_id)
@@ -121,13 +119,20 @@ router.post('/trigger-fee-nag', protect, authorize('SuperAdmin'), async (req, re
       }
 
       const monthRecord = ledger.months.find(m => m.month_name === currentMonthName);
-      const statusLabel = monthRecord?.status === 'Partial/Pending' ? 'PARTIALLY PAID / PENDING' : 'UNPAID';
+      const isPartial = monthRecord?.status === 'Partial/Pending';
+      const statusLabel = isPartial ? 'PARTIALLY PAID / PENDING' : 'UNPAID';
+      const monthlyFee = Number(student.monthly_fee) || 0;
+      const paidSoFar = Number(monthRecord?.amount_paid) || 0;
+      const balanceDue = Math.max(0, monthlyFee - paidSoFar);
+      const amountClause = isPartial && paidSoFar > 0
+        ? `remaining tuition balance of ₹${balanceDue} (₹${paidSoFar} paid of ₹${monthlyFee})`
+        : `tuition fee of ₹${monthlyFee}`;
 
       const mailOptions = {
         from: '"EduStride Admin" <admin@edustride.com>',
         to: parentEmail,
         subject: `Urgent: Tuition Fee Outstanding for ${student.name} - ${currentMonthName}`,
-        text: `Dear ${student.parent_name},\n\nThis is a friendly reminder that the tuition fee of ₹${student.monthly_fee || 0} for ${student.name} (Class ${student.class_level}, Roll No ${student.roll_number}) for the month of ${currentMonthName} is currently ${statusLabel}. Please clear the outstanding balance via the student portal at edustride.in at your earliest convenience.\n\nBest regards,\nEduStride Administration`
+        text: `Dear ${student.parent_name},\n\nThis is a friendly reminder that the ${amountClause} for ${student.name} (Class ${student.class_level}, Roll No ${student.roll_number}) for the month of ${currentMonthName} is currently ${statusLabel}. Please clear the outstanding balance via the student portal at edustride.in at your earliest convenience.\n\nBest regards,\nEduStride Administration`
       };
 
       try {
@@ -263,11 +268,12 @@ router.post('/trigger-progress-report', protect, authorize('SuperAdmin'), async 
           const percentage = Number(score.total_marks) > 0
             ? Math.round((score.marks_obtained / score.total_marks) * 100)
             : 0;
+          const formattedDate = new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata' }).format(new Date(score.date));
           return `
             <tr style="border-bottom: 1px solid #edf2f7;">
               <td style="padding: 10px 5px; font-weight: bold; font-family: sans-serif;">${escapeHtml(score.test_name)}</td>
               <td style="padding: 10px 5px; color: #4a5568; font-family: sans-serif;">${escapeHtml(score.subject)}</td>
-              <td style="padding: 10px 5px; font-size: 11px; color: #a0aec0; font-family: sans-serif;">${escapeHtml(new Date(score.date).toLocaleDateString())}</td>
+              <td style="padding: 10px 5px; font-size: 11px; color: #a0aec0; font-family: sans-serif;">${escapeHtml(formattedDate)}</td>
               <td style="padding: 10px 5px; text-align: right; font-weight: bold; font-family: sans-serif;">${score.marks_obtained} / ${score.total_marks}</td>
               <td style="padding: 10px 5px; text-align: right; color: #4f46e5; font-weight: bold; font-family: sans-serif;">${percentage}%</td>
             </tr>

@@ -167,11 +167,9 @@ if ($hasKeystore) {
     Write-Host "Release keystore detected. Building signed release APK (assembleRelease)..." -ForegroundColor Green
 } else {
     if ($Release) {
-        Write-Warning "Release build requested, but signing keystore is not configured or file was not found."
-    } else {
-        Write-Warning "No release keystore configured. Falling back to debug build (assembleDebug)."
+        throw "Release build (-Release) requested, but signing keystore is missing or incomplete. Configure android/keystore.properties or set EDUSTRIDE_KEYSTORE_PATH, EDUSTRIDE_KEYSTORE_PASSWORD, EDUSTRIDE_KEY_ALIAS, and EDUSTRIDE_KEY_PASSWORD. Aborting to prevent publishing a debug-signed APK!"
     }
-    Write-Warning "Configure android/keystore.properties or set EDUSTRIDE_KEYSTORE_PATH, EDUSTRIDE_KEYSTORE_PASSWORD, EDUSTRIDE_KEY_ALIAS, and EDUSTRIDE_KEY_PASSWORD to build a signed release APK."
+    Write-Warning "No release keystore configured. Building local debug APK only (will NOT publish to frontend/public or android/releases)."
 }
 
 $gradleTask = if ($useReleaseBuild) { "assembleRelease" } else { "assembleDebug" }
@@ -201,35 +199,41 @@ $publicApkDest = Join-Path $publicDir $versionedName
 $appVersionJs = Join-Path $repoRoot "frontend\src\config\appVersion.js"
 
 if (Test-Path $apkSource) {
-    if (-not (Test-Path $releasesDir)) {
-        New-Item -ItemType Directory -Force -Path $releasesDir | Out-Null
-    }
-    Copy-Item -Path $apkSource -Destination $releaseApkDest -Force
-    Copy-Item -Path $apkSource -Destination $apkDest -Force
+    if (-not $useReleaseBuild) {
+        $debugDest = Join-Path $androidDir "EduStride-debug.apk"
+        Copy-Item -Path $apkSource -Destination $debugDest -Force
+        Write-Host "Success! Saved local DEBUG APK only (production frontend/public untouched):" -ForegroundColor Yellow
+        Write-Host "  Debug   : $debugDest" -ForegroundColor Yellow
+    } else {
+        if (-not (Test-Path $releasesDir)) {
+            New-Item -ItemType Directory -Force -Path $releasesDir | Out-Null
+        }
+        Copy-Item -Path $apkSource -Destination $releaseApkDest -Force
+        Copy-Item -Path $apkSource -Destination $apkDest -Force
 
-    if (Test-Path $publicDir) {
-        # Replace any older public APK so Vercel always serves the single latest versioned APK
-        Get-ChildItem -Path $publicDir -Filter "EduStride*.apk" -ErrorAction SilentlyContinue | Remove-Item -Force
-        Copy-Item -Path $apkSource -Destination $publicApkDest -Force
-    }
+        if (Test-Path $publicDir) {
+            # Replace any older public APK so Vercel always serves the single latest signed release APK
+            Get-ChildItem -Path $publicDir -Filter "EduStride*.apk" -ErrorAction SilentlyContinue | Remove-Item -Force
+            Copy-Item -Path $apkSource -Destination $publicApkDest -Force
+        }
 
-    if (Test-Path (Split-Path -Parent $appVersionJs)) {
-        # Keep frontend version config synced automatically
-        $versionJsContent = @"
+        if (Test-Path (Split-Path -Parent $appVersionJs)) {
+            # Keep frontend version config synced automatically
+            $versionJsContent = @"
 // Auto-synced by android/build_apk.ps1 on every Android release build
 export const APP_VERSION = '$versionName';
 export const APP_VERSION_CODE = $versionCode;
 export const APK_FILENAME = ``EduStride-v`${APP_VERSION}.apk``;
 export const APK_DOWNLOAD_URL = ``/`${APK_FILENAME}``;
 "@
-        Set-Content -Path $appVersionJs -Value $versionJsContent -Encoding UTF8
-    }
+            Set-Content -Path $appVersionJs -Value $versionJsContent -Encoding UTF8
+        }
 
-    $buildVariantLabel = if ($useReleaseBuild) { "RELEASE (signed)" } else { "DEBUG (unsigned fallback)" }
-    Write-Host "Success! Saved $buildVariantLabel versioned APK:" -ForegroundColor Green
-    Write-Host "  Archive : $releaseApkDest" -ForegroundColor Green
-    Write-Host "  Latest  : $apkDest" -ForegroundColor Green
-    Write-Host "  Public  : $publicApkDest" -ForegroundColor Green
+        Write-Host "Success! Saved RELEASE (signed) versioned APK:" -ForegroundColor Green
+        Write-Host "  Archive : $releaseApkDest" -ForegroundColor Green
+        Write-Host "  Latest  : $apkDest" -ForegroundColor Green
+        Write-Host "  Public  : $publicApkDest" -ForegroundColor Green
+    }
 } else {
     Write-Error "Build failed: Compiled APK not found at $apkSource."
 }

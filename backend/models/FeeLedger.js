@@ -39,11 +39,14 @@ const feeLedgerSchema = new mongoose.Schema({
   year: {
     type: Number,
     required: true,
-    default: () => new Date().getFullYear()
+    default: () => new Date(Date.now() + 5.5 * 60 * 60 * 1000).getUTCFullYear()
   },
   months: [monthlyFeeSchema]
 }, {
   timestamps: true
 });
+
+feeLedgerSchema.index({ 'months.month_name': 1, 'months.status': 1 });
+feeLedgerSchema.index({ year: 1, 'months.month_name': 1, 'months.status': 1 });
 
 export default mongoose.model('FeeLedger', feeLedgerSchema);

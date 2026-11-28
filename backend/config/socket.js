@@ -11,6 +11,34 @@ let ioInstance = null;
 
 export const getIO = () => ioInstance;
 
+export const disconnectUserSockets = (userId) => {
+  try {
+    if (!ioInstance || !userId) return;
+    ioInstance.in(`AUTH_USER_${String(userId)}`).disconnectSockets(true);
+  } catch (err) {
+    console.error('[Socket Disconnect User Error]:', err.message);
+  }
+};
+
+const MAX_PLAIN_MESSAGE_LEN = 4000;
+const MAX_ATTACHMENT_MESSAGE_LEN = 6.5 * 1024 * 1024;
+const MAX_EMOJI_LEN = 16;
+const MAX_REACTIONS_PER_MESSAGE = 200;
+
+const allowSocketEvent = (socket, bucket, limit, windowMs) => {
+  if (!socket.data.rateBuckets) socket.data.rateBuckets = new Map();
+  const now = Date.now();
+  const cutoff = now - windowMs;
+  const recent = (socket.data.rateBuckets.get(bucket) || []).filter(ts => ts > cutoff);
+  if (recent.length >= limit) {
+    socket.data.rateBuckets.set(bucket, recent);
+    return false;
+  }
+  recent.push(now);
+  socket.data.rateBuckets.set(bucket, recent);
+  return true;
+};
+
 const normalizeRoom = (rawRoom) => {
   if (rawRoom === null || rawRoom === undefined) return '';
   const trimmed = String(rawRoom).trim();
@@ -125,7 +153,7 @@ export const initSocket = (server) => {
         uniqueMembers.push(m);
       }
     }
-    io.to(room).emit('room_members', uniqueMembers);
+    io.to(room).emit('room_members', { class_level: room, members: uniqueMembers });
   };
 
   const removeUserFromRooms = (socketId) => {
@@ -157,6 +185,9 @@ export const initSocket = (server) => {
 
   io.on('connection', (socket) => {
     console.log(`Socket connected: ${socket.id} (${socket.user?.email} / ${socket.user?.role})`);
+    if (socket.user?._id) {
+      socket.join(`AUTH_USER_${String(socket.user._id)}`);
+    }
 
     // Listen for join_room (with strict RBAC authorization)
     socket.on('join_room', async (class_level) => {
@@ -261,6 +292,7 @@ export const initSocket = (server) => {
 
         const sender = getSocketSender(socket.user);
         socket.to(room).emit('typing_status', {
+          class_level: room,
           sender_id: sender.sender_id,
           sender_name: sender.sender_name,
           is_typing: Boolean(is_typing)
@@ -270,51 +302,62 @@ export const initSocket = (server) => {
       }
     });
 
-    // Listen for message reactions
+    // Listen for message reactions (bounded emoji/count + per-socket rate limit + VersionError retry)
     socket.on('add_reaction', async (data) => {
       try {
+        if (!allowSocketEvent(socket, 'reaction', 30, 10000)) return;
         const { message_id, class_level, emoji } = data || {};
         const room = normalizeRoom(class_level);
         if (!message_id || !room || typeof emoji !== 'string' || !emoji.trim()) return;
+        const cleanEmoji = emoji.trim();
+        if (cleanEmoji.length > MAX_EMOJI_LEN) return;
         if (!(await canJoinRoom(socket.user, room))) return;
 
-        const message = await ChatMessage.findById(message_id);
-        if (!message) return;
-        if (normalizeRoom(message.class_level) !== room) return;
-
         const sender = getSocketSender(socket.user);
-        const cleanEmoji = emoji.trim();
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const message = await ChatMessage.findById(message_id);
+          if (!message) return;
+          if (normalizeRoom(message.class_level) !== room) return;
 
-        const existingIndex = message.reactions.findIndex((r) => {
-          if (r.emoji !== cleanEmoji) return false;
-          if (r.sender_id) return r.sender_id === sender.sender_id;
-          return r.sender_name === sender.sender_name;
-        });
-
-        if (existingIndex > -1) {
-          message.reactions.splice(existingIndex, 1);
-        } else {
-          message.reactions.push({
-            emoji: cleanEmoji,
-            sender_name: sender.sender_name,
-            sender_id: sender.sender_id
+          const existingIndex = message.reactions.findIndex((r) => {
+            if (r.emoji !== cleanEmoji) return false;
+            if (r.sender_id) return r.sender_id === sender.sender_id;
+            return r.sender_name === sender.sender_name;
           });
+
+          if (existingIndex > -1) {
+            message.reactions.splice(existingIndex, 1);
+          } else {
+            if (message.reactions.length >= MAX_REACTIONS_PER_MESSAGE) return;
+            message.reactions.push({
+              emoji: cleanEmoji,
+              sender_name: sender.sender_name,
+              sender_id: sender.sender_id
+            });
+          }
+
+          try {
+            await message.save();
+            io.to(room).emit('message_reaction_updated', {
+              class_level: room,
+              message_id,
+              reactions: message.reactions
+            });
+            return;
+          } catch (saveErr) {
+            if (saveErr?.name === 'VersionError' && attempt < 2) continue;
+            throw saveErr;
+          }
         }
-
-        await message.save();
-
-        io.to(room).emit('message_reaction_updated', {
-          message_id,
-          reactions: message.reactions
-        });
       } catch (error) {
         console.error('Socket error in add_reaction:', error.message);
       }
     });
 
-    // Listen for send_message
+    // Listen for send_message (same-room reply_to validation + size caps + per-socket rate limit)
     socket.on('send_message', async (data) => {
       try {
+        if (!allowSocketEvent(socket, 'message', 20, 10000)) return;
         const { class_level, message_text, reply_to } = data || {};
         const room = normalizeRoom(class_level);
         if (!room || !(await canJoinRoom(socket.user, room))) return;
@@ -328,6 +371,34 @@ export const initSocket = (server) => {
           return;
         }
 
+        let isAttachmentPayload = false;
+        if (message_text.startsWith('{') && message_text.includes('"isAttachment":true')) {
+          try {
+            const parsed = JSON.parse(message_text);
+            if (parsed && parsed.isAttachment === true && typeof parsed.content === 'string') {
+              isAttachmentPayload = true;
+            }
+          } catch (_) {
+            isAttachmentPayload = false;
+          }
+        }
+
+        if (isAttachmentPayload) {
+          if (!allowSocketEvent(socket, 'attachment', 4, 10000)) return;
+          if (message_text.length > MAX_ATTACHMENT_MESSAGE_LEN) return;
+        } else if (message_text.length > MAX_PLAIN_MESSAGE_LEN) {
+          return;
+        }
+
+        // Prevent cross-room IDOR: only allow reply_to targeting a message inside the exact same room
+        let validReplyTo = null;
+        if (reply_to && /^[0-9a-fA-F]{24}$/.test(String(reply_to))) {
+          const replyTarget = await ChatMessage.findById(reply_to).select('class_level').lean();
+          if (replyTarget && normalizeRoom(replyTarget.class_level) === room) {
+            validReplyTo = replyTarget._id;
+          }
+        }
+
         const sender = getSocketSender(socket.user);
 
         let chatMsg = await ChatMessage.create({
@@ -336,10 +407,10 @@ export const initSocket = (server) => {
           sender_name: sender.sender_name,
           sender_role: sender.sender_role,
           message_text,
-          reply_to: reply_to || null
+          reply_to: validReplyTo
         });
 
-        if (reply_to) {
+        if (validReplyTo) {
           chatMsg = await ChatMessage.findById(chatMsg._id).populate('reply_to');
         }
 

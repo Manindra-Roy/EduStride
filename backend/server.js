@@ -33,9 +33,6 @@ if (!process.env.JWT_SECRET || typeof process.env.JWT_SECRET !== 'string' || pro
   process.exit(1);
 }
 
-// Connect to Database
-connectDB();
-
 const app = express();
 app.set('trust proxy', 1);
 const server = http.createServer(app);
@@ -49,29 +46,32 @@ const allowedOrigins = process.env.CORS_ORIGINS
   ? process.env.CORS_ORIGINS.split(',').map(o => o.trim()).filter(Boolean)
   : '*';
 
-// Lightweight Map-based sliding-window rate limiter with periodic cleanup
-const createRateLimiter = ({ windowMs, maxRequests, message }) => {
-  const hits = new Map(); // ip -> number[] (timestamps)
+// Bounded Map-based sliding-window rate limiter with 60s cleanup & OOM eviction cap
+const createRateLimiter = ({ windowMs, maxRequests, message, keyGenerator = null, maxKeys = 50000 }) => {
+  const hits = new Map(); // key -> number[] (timestamps)
   const cleanupTimer = setInterval(() => {
     const cutoff = Date.now() - windowMs;
-    for (const [ip, timestamps] of hits.entries()) {
+    for (const [k, timestamps] of hits.entries()) {
       const valid = timestamps.filter(ts => ts > cutoff);
       if (valid.length === 0) {
-        hits.delete(ip);
+        hits.delete(k);
       } else {
-        hits.set(ip, valid);
+        hits.set(k, valid);
       }
     }
-  }, Math.max(windowMs, 60000));
+  }, 60000);
   if (typeof cleanupTimer.unref === 'function') {
     cleanupTimer.unref();
   }
 
   return (req, res, next) => {
-    const ip = req.ip || req.socket?.remoteAddress || 'unknown';
+    const key = (typeof keyGenerator === 'function' ? keyGenerator(req) : null)
+      || req.ip
+      || req.socket?.remoteAddress
+      || 'unknown';
     const now = Date.now();
     const cutoff = now - windowMs;
-    const recent = (hits.get(ip) || []).filter(ts => ts > cutoff);
+    const recent = (hits.get(key) || []).filter(ts => ts > cutoff);
 
     if (recent.length >= maxRequests) {
       return res.status(429).json({
@@ -80,8 +80,13 @@ const createRateLimiter = ({ windowMs, maxRequests, message }) => {
       });
     }
 
+    if (!hits.has(key) && hits.size >= maxKeys) {
+      const oldestKey = hits.keys().next().value;
+      if (oldestKey !== undefined) hits.delete(oldestKey);
+    }
+
     recent.push(now);
-    hits.set(ip, recent);
+    hits.set(key, recent);
     next();
   };
 };
@@ -92,9 +97,35 @@ const loginRateLimiter = createRateLimiter({
   message: 'Too many login attempts from this IP. Please try again after 15 minutes.'
 });
 
-const biometricDeviceRateLimiter = createRateLimiter({
+const authSensitiveRateLimiter = createRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  maxRequests: 30,
+  message: 'Too many account security requests. Please try again shortly.'
+});
+
+const webhookRateLimiter = createRateLimiter({
   windowMs: 60 * 1000,
   maxRequests: 120,
+  message: 'Webhook rate limit exceeded.'
+});
+
+const apkDownloadRateLimiter = createRateLimiter({
+  windowMs: 10 * 60 * 1000,
+  maxRequests: 20,
+  message: 'Too many APK download requests. Please try again shortly.'
+});
+
+// Keyed by x-device-id so multiple ESP32 scanners sharing a school Wi-Fi NAT IP never block each other during morning rush!
+const biometricDeviceRateLimiter = createRateLimiter({
+  windowMs: 60 * 1000,
+  maxRequests: 480,
+  keyGenerator: (req) => {
+    const devId = req.headers['x-device-id'];
+    if (typeof devId === 'string' && devId.trim()) {
+      return `dev:${devId.trim().toUpperCase().slice(0, 64)}`;
+    }
+    return `ip:${req.ip || req.socket?.remoteAddress || 'unknown'}`;
+  },
   message: 'Device request rate limit exceeded. Please slow down polling.'
 });
 
@@ -109,11 +140,24 @@ app.use(express.json({
 }));
 app.use(express.urlencoded({ extended: true }));
 
-// Serve Uploaded Files statically
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+// Serve Uploaded Files statically with MIME-sniffing protection
+app.use('/uploads', express.static(path.join(__dirname, 'uploads'), {
+  setHeaders: (res, filePath) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    const ext = path.extname(filePath).toLowerCase();
+    const inlineImageExts = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp']);
+    if (!inlineImageExts.has(ext)) {
+      res.setHeader('Content-Disposition', 'attachment');
+    }
+  }
+}));
 
 // Apply rate limiters on sensitive endpoints
 app.use('/api/auth/login', loginRateLimiter);
+app.use('/api/auth/register', authSensitiveRateLimiter);
+app.use('/api/auth/change-password', authSensitiveRateLimiter);
+app.use('/api/fees/webhook', webhookRateLimiter);
+app.use('/api/system/download-apk', apkDownloadRateLimiter);
 app.use('/api/biometric/device', biometricDeviceRateLimiter);
 
 // Routes
@@ -205,13 +249,38 @@ app.get('/', (req, res) => {
 // Centralized error handler
 app.use(errorHandler);
 
-// Initialize Socket.io Server
-initSocket(server);
-
-// Start Background Jobs
-initCronJobs();
-
 const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => {
-  console.log(`Server running in ${process.env.NODE_ENV || 'development'} mode on port ${PORT}`);
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[Unhandled Rejection]:', reason);
+});
+
+const startServer = async () => {
+  await connectDB();
+  initSocket(server);
+  initCronJobs();
+
+  server.listen(PORT, () => {
+    console.log(`Server running in ${process.env.NODE_ENV || 'development'} mode on port ${PORT}`);
+  });
+};
+
+const shutdown = (signal) => {
+  console.log(`[Shutdown] Received ${signal}, draining active requests...`);
+  server.close(() => {
+    console.log('[Shutdown] HTTP server closed cleanly.');
+    process.exit(0);
+  });
+  setTimeout(() => {
+    console.error('[Shutdown] Forced exit after timeout.');
+    process.exit(1);
+  }, 10000).unref();
+};
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+
+startServer().catch((err) => {
+  console.error('[Startup Fatal]:', err);
+  process.exit(1);
 });

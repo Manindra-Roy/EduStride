@@ -44,6 +44,7 @@ const fingerprintTemplateSchema = new mongoose.Schema({
 
 fingerprintTemplateSchema.index({ device_id: 1, slot_id: 1 }, { unique: true });
 fingerprintTemplateSchema.index({ device_id: 1, student: 1, finger_index: 1 }, { unique: true });
+fingerprintTemplateSchema.index({ student: 1 });
 
 const FingerprintTemplate = mongoose.model('FingerprintTemplate', fingerprintTemplateSchema);
 

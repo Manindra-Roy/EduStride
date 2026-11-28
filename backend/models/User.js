@@ -39,4 +39,14 @@ const userSchema = new mongoose.Schema({
   timestamps: true
 });
 
+userSchema.index(
+  { studentProfile: 1 },
+  { unique: true, partialFilterExpression: { studentProfile: { $type: 'objectId' } }, name: 'unique_student_profile' }
+);
+userSchema.index({ role: 1 });
+userSchema.index(
+  { role: 1 },
+  { unique: true, partialFilterExpression: { role: 'SuperAdmin' }, name: 'unique_superadmin_role' }
+);
+
 export default mongoose.model('User', userSchema);

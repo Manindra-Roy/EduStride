@@ -1,14 +1,15 @@
 import 'dotenv/config';
 import mongoose from 'mongoose';
 
-if (process.env.NODE_ENV === 'production') {
-  console.error('Refusing to run reset_progress.js when NODE_ENV=production.');
+const normalizedEnv = String(process.env.NODE_ENV || '').trim().toLowerCase();
+if (normalizedEnv === 'production' || normalizedEnv === 'prod') {
+  console.error('Refusing to run reset_progress.js in production.');
   process.exit(1);
 }
 
 if (!process.argv.includes('--confirm-wipe')) {
   console.error('Refusing to wipe progress data without explicit --confirm-wipe flag.');
-  console.error('Usage: node reset_progress.js --confirm-wipe');
+  console.error('Usage: node reset_progress.js --confirm-wipe [--allow-remote-db=<dbName>]');
   process.exit(1);
 }
 
@@ -18,11 +19,26 @@ if (!MONGO_URI) {
   process.exit(1);
 }
 
+const isLocalMongo = /^mongodb:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?\//i.test(MONGO_URI.trim());
+const allowRemoteArg = process.argv.find(a => a.startsWith('--allow-remote-db='));
+const allowedRemoteDbName = allowRemoteArg ? allowRemoteArg.split('=')[1]?.trim() : '';
+
+if (!isLocalMongo && !allowedRemoteDbName) {
+  console.error('Refusing to wipe a non-localhost / MongoDB Atlas database without --allow-remote-db=<exactDbName>.');
+  process.exit(1);
+}
+
 console.log('Connecting to MongoDB...');
 
 mongoose.connect(MONGO_URI)
   .then(async () => {
-    console.log('Connected successfully!');
+    const dbName = mongoose.connection.name;
+    if (!isLocalMongo && allowedRemoteDbName !== dbName) {
+      console.error(`Refusing to wipe remote database "${dbName}": --allow-remote-db must exactly match "${dbName}".`);
+      await mongoose.connection.close();
+      process.exit(1);
+    }
+    console.log(`Connected successfully to database "${dbName}"!`);
 
     // 1. Reset Student progress history and score arrays
     console.log('Resetting Student progress records...');
@@ -39,12 +55,17 @@ mongoose.connect(MONGO_URI)
     );
     console.log(`Modified ${studentUpdateResult.modifiedCount} Student profiles.`);
 
-    // 2. Clear all Daily Attendance logs
-    console.log('Clearing daily Attendance registers...');
+    // 2. Clear all Daily Attendance & Biometric Gate logs + Special Batch progress arrays
+    console.log('Clearing daily Attendance registers and Gate Entry logs...');
     const attendanceDeleteResult = await mongoose.connection.collection('attendances').deleteMany({});
-    console.log(`Deleted ${attendanceDeleteResult.deletedCount} daily Attendance logs.`);
+    const gateLogDeleteResult = await mongoose.connection.collection('gateentrylogs').deleteMany({});
+    const batchUpdateResult = await mongoose.connection.collection('specialbatches').updateMany(
+      {},
+      { $set: { attendance_records: [], test_scores: [] } }
+    );
+    console.log(`Deleted ${attendanceDeleteResult.deletedCount} Attendance logs, ${gateLogDeleteResult.deletedCount} GateEntryLogs, and reset ${batchUpdateResult.modifiedCount} SpecialBatches.`);
 
-    // 3. Reset all Fee Ledgers to default unpaid months
+    // 3. Reset all Fee Ledgers to default unpaid months (IST year)
     console.log('Resetting Fee Ledgers to default unpaid state...');
     const defaultMonths = [
       'January', 'February', 'March', 'April', 'May', 'June',
@@ -58,12 +79,13 @@ mongoose.connect(MONGO_URI)
       transaction_method: null
     }));
 
+    const istYear = new Date(Date.now() + 5.5 * 60 * 60 * 1000).getUTCFullYear();
     const ledgerUpdateResult = await mongoose.connection.collection('feeledgers').updateMany(
       {},
       {
         $set: {
           months: defaultMonths,
-          year: new Date().getFullYear()
+          year: istYear
         }
       }
     );

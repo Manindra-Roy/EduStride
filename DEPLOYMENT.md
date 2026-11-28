@@ -20,18 +20,20 @@ Render will host the Express backend, keeping the WebSocket server and backgroun
    - **Root Directory**: `backend`
    - **Build Command**: `npm install`
    - **Start Command**: `node server.js`
-   - **Instance Type**: Select the **Free** tier (or **Starter** for better performance/no spin-downs).
+   - **Instance Type**: Select **Starter** (always-on) for production. *(Warning: Render's Free tier spins down after 15 minutes of inactivity, which skips `node-cron` 8 AM/9 AM IST alerts, drops Android background Socket.IO sync, and delays ESP32 biometric gate scans by ~50s cold starts.)*
 5. Click **Advanced** and add the following **Environment Variables**:
    - `NODE_ENV` = `production`
-   - `MONGO_URI` = *(Your MongoDB Atlas Connection URI)*
-   - `JWT_SECRET` = *(Any long random string for securing tokens)*
-   - `EMAIL_HOST` = `smtp.gmail.com`
-   - `EMAIL_PORT` = `587`
-   - `EMAIL_USER` = *(Your Gmail address, e.g., name@gmail.com)*
-   - `EMAIL_PASS` = *(Your Gmail App Password generated from Google Account settings)*
-   - `CLOUDINARY_CLOUD_NAME` = *(Your Cloudinary cloud name)*
+   - `MONGO_URI` = *(Your MongoDB Atlas Connection URI — replica set required for transactional roll-number updates)*
+   - `JWT_SECRET` = *(Long random string, minimum 16 characters — recommended 32+ hex bytes)*
+   - `CORS_ORIGINS` = `https://edustride.in,https://www.edustride.in` *(Required in production so CORS/Socket.IO do not default to wide-open `*`)*
+   - `PAYMENT_WEBHOOK_SECRET` = *(Strong random HMAC-SHA256 secret shared with your payment gateway)*
+   - `BREVO_PASS` = *(Required in production — Brevo HTTP API key used by `mailService.js` whenever `NODE_ENV=production`)*
+   - `BREVO_SENDER` = *(Your verified Brevo sender email, e.g., `noreply@edustride.in`)*
+   - `CLOUDINARY_CLOUD_NAME` = *(Required in production — Render local disk `/uploads` is ephemeral)*
    - `CLOUDINARY_API_KEY` = *(Your Cloudinary API key)*
    - `CLOUDINARY_API_SECRET` = *(Your Cloudinary API secret)*
+   - *(Optional for biometric gate SMS/WhatsApp alerts)* `GATE_SMS_WEBHOOK_URL` and `GATE_SMS_WEBHOOK_TOKEN`
+   - *(Local development only — not used when `NODE_ENV=production`)* `EMAIL_HOST`, `EMAIL_PORT`, `EMAIL_SECURE`, `EMAIL_USER`, `EMAIL_PASS`
 6. Click **Create Web Service**.
 7. Once deployed, note down the backend service URL (e.g., `https://edustride-backend.onrender.com`).
 

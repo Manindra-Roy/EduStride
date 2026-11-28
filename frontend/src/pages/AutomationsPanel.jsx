@@ -1130,20 +1130,28 @@ const AutomationsPanel = () => {
                       <div><span className="text-slate-500 font-semibold">WhatsApp:</span> {log.phone}</div>
                       <div className="flex justify-between items-center mt-2 pt-2 border-t border-dark-800/80">
                         <div className="flex gap-2 font-mono text-[9px]">
-                          <span className={log.email ? 'text-emerald-400' : 'text-amber-400'}>
-                            {log.email ? 'Email: Dispatched' : 'Email: Skipped (No email)'}
+                          <span className={log.emailSent ? 'text-emerald-400' : (log.email ? 'text-rose-400' : 'text-amber-400')}>
+                            {log.emailSent ? 'Email: Dispatched' : (log.email ? 'Email: Failed' : 'Email: Skipped (No email)')}
                           </span>
                           <span className="text-slate-500">|</span>
-                          <span className="text-teal-400">WhatsApp: Ready</span>
+                          <span className={log.whatsappLink ? 'text-teal-400' : 'text-slate-500'}>
+                            {log.whatsappLink ? 'WhatsApp: Ready' : 'WhatsApp: No Phone'}
+                          </span>
                         </div>
-                        <a
-                          href={log.whatsappLink}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="px-2 py-0.5 rounded bg-teal-500/10 hover:bg-teal-500/25 border border-teal-500/30 text-teal-400 text-[9px] font-bold transition-all duration-150 flex items-center gap-1 font-outfit"
-                        >
-                          Send WhatsApp
-                        </a>
+                        {log.whatsappLink ? (
+                          <a
+                            href={log.whatsappLink}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="px-2 py-0.5 rounded bg-teal-500/10 hover:bg-teal-500/25 border border-teal-500/30 text-teal-400 text-[9px] font-bold transition-all duration-150 flex items-center gap-1 font-outfit"
+                          >
+                            Send WhatsApp
+                          </a>
+                        ) : (
+                          <span className="px-2 py-0.5 rounded bg-dark-900 border border-dark-800 text-slate-500 text-[9px] font-semibold">
+                            No Phone
+                          </span>
+                        )}
                       </div>
                     </div>
                   </div>

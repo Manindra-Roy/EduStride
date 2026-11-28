@@ -43,20 +43,19 @@ export const initCronJobs = () => {
     console.log('[CRON] Running Fee Nagging Job...');
     try {
       const ist = getISTParts();
-      const currentYear = Number(ist.dateStr.slice(0, 4));
       const currentMonthIdx = Number(ist.dateStr.slice(5, 7)) - 1;
       const currentMonthName = MONTH_NAMES[currentMonthIdx];
 
-      // Find all unpaid or partial ledgers for the current academic year & month
+      // Each student holds one active rolling 12-month ledger; omit brittle `year: currentYear`
+      // so January–March reminders in an April–March academic year are NEVER skipped!
       const unpaidLedgers = await FeeLedger.find({
-        year: currentYear,
         months: {
           $elemMatch: {
             month_name: currentMonthName,
             status: { $in: ['Unpaid', 'Partial/Pending'] }
           }
         }
-      }).populate('student_id');
+      }).populate('student_id').lean();
 
       const eligibleStudents = unpaidLedgers
         .map(l => l.student_id)
@@ -75,13 +74,20 @@ export const initCronJobs = () => {
         }
 
         const monthRecord = ledger.months.find(m => m.month_name === currentMonthName);
-        const statusLabel = monthRecord?.status === 'Partial/Pending' ? 'PARTIALLY PAID / PENDING' : 'UNPAID';
+        const isPartial = monthRecord?.status === 'Partial/Pending';
+        const statusLabel = isPartial ? 'PARTIALLY PAID / PENDING' : 'UNPAID';
+        const monthlyFee = Number(student.monthly_fee) || 0;
+        const paidSoFar = Number(monthRecord?.amount_paid) || 0;
+        const balanceDue = Math.max(0, monthlyFee - paidSoFar);
+        const amountClause = isPartial && paidSoFar > 0
+          ? `remaining tuition balance of ₹${balanceDue} (₹${paidSoFar} paid of ₹${monthlyFee})`
+          : `tuition fee of ₹${monthlyFee}`;
 
         const mailOptions = {
           from: '"EduStride Admin" <admin@edustride.com>',
           to: parentEmail,
           subject: `Urgent: Tuition Fee Outstanding for ${student.name} - ${currentMonthName}`,
-          text: `Dear ${student.parent_name},\n\nThis is a friendly reminder that the tuition fee of ₹${student.monthly_fee || 0} for ${student.name} (Class ${student.class_level}, Roll No ${student.roll_number}) for the month of ${currentMonthName} is currently ${statusLabel}. Please clear the outstanding balance via the student portal at edustride.in at your earliest convenience.\n\nBest regards,\nEduStride Administration`
+          text: `Dear ${student.parent_name},\n\nThis is a friendly reminder that the ${amountClause} for ${student.name} (Class ${student.class_level}, Roll No ${student.roll_number}) for the month of ${currentMonthName} is currently ${statusLabel}. Please clear the outstanding balance via the student portal at edustride.in at your earliest convenience.\n\nBest regards,\nEduStride Administration`
         };
 
         try {

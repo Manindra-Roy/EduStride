@@ -23,5 +23,6 @@ const subjectSchema = new mongoose.Schema({
 
 // Compound index to ensure uniqueness of subject names per class
 subjectSchema.index({ name: 1, class_level: 1 }, { unique: true });
+subjectSchema.index({ class_level: 1, name: 1 });
 
 export default mongoose.model('Subject', subjectSchema);

@@ -1,3 +1,4 @@
+import mongoose from 'mongoose';
 import Student from '../models/Student.js';
 import Attendance from '../models/Attendance.js';
 import Timetable from '../models/Timetable.js';
@@ -26,9 +27,12 @@ const getCachedTimetableData = async () => {
   return cachedTimetableData;
 };
 
-// Generic keyed async mutex for serializing Attendance sheet mutations
+// Generic keyed async mutex for serializing Attendance sheet mutations across manual & biometric paths
 const sheetLocks = new Map();
-const withSheetLock = async (key, fn) => {
+export const makeSheetLockKey = (class_level, dateStr, session_name) =>
+  `${String(class_level || '').trim().toUpperCase()}::${String(dateStr || '').trim()}::${String(session_name || 'Session 1').trim()}`;
+
+export const withSheetLock = async (key, fn) => {
   const prev = sheetLocks.get(key) || Promise.resolve();
   let release;
   const next = new Promise(resolve => { release = resolve; });
@@ -124,11 +128,26 @@ export const getISTParts = (dateObj = new Date()) => {
  */
 export const parseSlotStartMinutes = (timeStr) => {
   if (!timeStr || typeof timeStr !== 'string') return null;
-  const match = timeStr.trim().match(/^(\d{1,2}):(\d{2})(?:\s*(AM|PM))?/i);
+  const trimmed = timeStr.trim();
+  const match = trimmed.match(/^(\d{1,2}):(\d{2})(?:\s*(AM|PM))?/i);
   if (!match) return null;
   let hours = parseInt(match[1], 10);
   const mins = parseInt(match[2], 10);
-  const meridiem = match[3] ? match[3].toUpperCase() : null;
+  let meridiem = match[3] ? match[3].toUpperCase() : null;
+
+  // Handle ranges like "04:00 - 05:00 PM" where meridiem is written only at the end
+  if (!meridiem && hours >= 1 && hours <= 12) {
+    const endMatch = trimmed.match(/-\s*(\d{1,2}):(\d{2})\s*(AM|PM)\b/i);
+    if (endMatch) {
+      const endHour = parseInt(endMatch[1], 10);
+      const endMeridiem = endMatch[3].toUpperCase();
+      if (hours <= endHour || endHour === 12) {
+        meridiem = endMeridiem;
+      } else {
+        meridiem = endMeridiem === 'PM' ? 'AM' : 'PM';
+      }
+    }
+  }
 
   if (meridiem === 'PM' && hours < 12) hours += 12;
   if (meridiem === 'AM' && hours === 12) hours = 0;
@@ -143,7 +162,7 @@ const rollRecalcDirty = new Set();  // class_level needing one more pass after a
 
 const runRecalculateRollNumbers = async (class_level) => {
   const students = await Student.find({ class_level })
-    .select('_id status test_scores attendance_history joining_date name')
+    .select('_id roll_number status test_scores attendance_history joining_date name')
     .lean();
   if (students.length === 0) return;
 
@@ -183,6 +202,7 @@ const runRecalculateRollNumbers = async (class_level) => {
 
     return {
       _id: student._id,
+      roll_number: student.roll_number || '',
       status: student.status || 'Active',
       progressScore,
       testScorePercentage,
@@ -215,6 +235,13 @@ const runRecalculateRollNumbers = async (class_level) => {
     return a.name.localeCompare(b.name);
   });
 
+  // Skip database writes entirely if every student already holds their exact target roll number!
+  const needsUpdate = studentsWithProgress.some((s, idx) => {
+    const targetRoll = (idx + 1).toString().padStart(2, '0');
+    return s.roll_number !== targetRoll;
+  });
+  if (!needsUpdate) return;
+
   const nonce = `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   const tempOps = studentsWithProgress.map(s => ({
     updateOne: {
@@ -229,8 +256,36 @@ const runRecalculateRollNumbers = async (class_level) => {
     }
   }));
 
-  await Student.bulkWrite(tempOps, { ordered: true });
-  await Student.bulkWrite(finalOps, { ordered: true });
+  // Use a MongoDB transaction on replica sets (Atlas) so readers NEVER observe TEMP_ roll numbers
+  let session = null;
+  try {
+    session = await mongoose.startSession();
+    await session.withTransaction(async () => {
+      await Student.bulkWrite(tempOps, { ordered: true, session });
+      await Student.bulkWrite(finalOps, { ordered: true, session });
+    });
+  } catch (txErr) {
+    const isStandaloneUnsupported =
+      txErr?.code === 20 ||
+      /Transaction numbers are only allowed on a replica set/i.test(txErr?.message || '');
+    if (!isStandaloneUnsupported) {
+      throw txErr;
+    }
+    // Standalone local MongoDB fallback: execute two-pass update with retry on finalOps so TEMP_ never persists
+    await Student.bulkWrite(tempOps, { ordered: true });
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        await Student.bulkWrite(finalOps, { ordered: true });
+        break;
+      } catch (finalErr) {
+        if (attempt === 2) throw finalErr;
+      }
+    }
+  } finally {
+    if (session) {
+      await session.endSession().catch(() => {});
+    }
+  }
 };
 
 /**
@@ -501,31 +556,43 @@ export const markBiometricAttendancePresent = async (student, dateStr, time12Str
   const normalizedDate = new Date(`${dateStr}T00:00:00.000Z`);
   const trackingMonth = dateStr.substring(0, 7);
   const session_name = await resolveActiveSessionForClass(class_level, dateStr, istMinutesNow, sessionOverride);
-  const lockKey = `${String(class_level).trim().toUpperCase()}::${dateStr}::${session_name}`;
+  const lockKey = makeSheetLockKey(class_level, dateStr, session_name);
 
   await withSheetLock(lockKey, async () => {
     const entryRemark = `Biometric Entry ${time12Str}`;
 
-    const applyUpdateToSheet = async (sheet) => {
-      const existingRec = sheet.records.find(r => r.student.toString() === student._id.toString());
-      if (existingRec) {
-        existingRec.status = 'Present';
-        existingRec.remarks = existingRec.remarks
-          ? (existingRec.remarks.includes('Biometric Entry') ? existingRec.remarks : `${existingRec.remarks} | ${entryRemark}`)
-          : entryRemark;
-      } else {
-        sheet.records.push({
-          student: student._id,
-          status: 'Present',
-          remarks: entryRemark
-        });
+    const applyUpdateToSheet = async () => {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const currentSheet = await Attendance.findOne({ class_level, date: normalizedDate, session_name });
+        if (!currentSheet) return false;
+
+        const existingRec = currentSheet.records.find(r => r.student.toString() === student._id.toString());
+        if (existingRec) {
+          existingRec.status = 'Present';
+          existingRec.remarks = existingRec.remarks
+            ? (existingRec.remarks.includes('Biometric Entry') ? existingRec.remarks : `${existingRec.remarks} | ${entryRemark}`)
+            : entryRemark;
+        } else {
+          currentSheet.records.push({
+            student: student._id,
+            status: 'Present',
+            remarks: entryRemark
+          });
+        }
+        try {
+          await currentSheet.save();
+          return true;
+        } catch (saveErr) {
+          if (saveErr?.name === 'VersionError' && attempt < 2) continue;
+          throw saveErr;
+        }
       }
-      await sheet.save();
+      return false;
     };
 
-    let sheet = await Attendance.findOne({ class_level, date: normalizedDate, session_name });
+    const updatedExisting = await applyUpdateToSheet();
 
-    if (!sheet) {
+    if (!updatedExisting) {
       const activeStudents = await Student.find({ class_level, status: 'Active' }).select('_id').lean();
       const records = activeStudents.map(s => ({
         student: s._id,
@@ -551,16 +618,11 @@ export const markBiometricAttendancePresent = async (student, dateStr, time12Str
       } catch (createErr) {
         // Handle E11000 duplicate-key race (e.g. concurrent teacher manual sheet save)
         if (createErr?.code === 11000) {
-          sheet = await Attendance.findOne({ class_level, date: normalizedDate, session_name });
-          if (sheet) {
-            await applyUpdateToSheet(sheet);
-          }
+          await applyUpdateToSheet();
         } else {
           throw createErr;
         }
       }
-    } else {
-      await applyUpdateToSheet(sheet);
     }
   });
 
@@ -578,36 +640,54 @@ export const markBiometricAttendancePresent = async (student, dateStr, time12Str
 
 /**
  * Append biometric exit time into today's Attendance record remark (keeps status 'Present' intact),
- * serialized with entry updates for the same sheet.
+ * serialized with manual and entry updates for the exact same sheet.
  */
 export const appendBiometricExitRemark = async (student, dateStr, time12Str, sessionName) => {
   try {
     const normalizedDate = new Date(`${dateStr}T00:00:00.000Z`);
-    const resolvedSession = sessionName || '';
-    const lockKey = `${String(student.class_level).trim().toUpperCase()}::${dateStr}::${resolvedSession || '*'}`;
+    let resolvedSession = (typeof sessionName === 'string' && sessionName.trim()) ? sessionName.trim() : '';
+
+    // Resolve concrete session_name BEFORE locking so lockKey matches manual & biometric entry locks!
+    if (!resolvedSession) {
+      const latestSheet = await Attendance.findOne({ class_level: student.class_level, date: normalizedDate })
+        .sort({ updatedAt: -1 })
+        .select('session_name')
+        .lean();
+      if (!latestSheet?.session_name) return;
+      resolvedSession = latestSheet.session_name;
+    }
+
+    const lockKey = makeSheetLockKey(student.class_level, dateStr, resolvedSession);
 
     await withSheetLock(lockKey, async () => {
-      const query = resolvedSession
-        ? { class_level: student.class_level, date: normalizedDate, session_name: resolvedSession }
-        : { class_level: student.class_level, date: normalizedDate };
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const sheet = await Attendance.findOne({
+          class_level: student.class_level,
+          date: normalizedDate,
+          session_name: resolvedSession
+        });
+        if (!sheet) return;
 
-      const sheet = await Attendance.findOne(query).sort({ updatedAt: -1 });
-      if (!sheet) return;
+        const existingRec = sheet.records.find(r => r.student.toString() === student._id.toString());
+        if (!existingRec) return;
 
-      const existingRec = sheet.records.find(r => r.student.toString() === student._id.toString());
-      if (existingRec) {
         const exitNote = `Exit ${time12Str}`;
         existingRec.remarks = existingRec.remarks ? `${existingRec.remarks} | ${exitNote}` : exitNote;
-        await sheet.save();
-
-        emitAttendanceUpdated({
-          class_level: student.class_level,
-          date: dateStr,
-          session_name: sheet.session_name,
-          student_id: student._id,
-          student_name: student.name,
-          source: 'biometric_exit'
-        });
+        try {
+          await sheet.save();
+          emitAttendanceUpdated({
+            class_level: student.class_level,
+            date: dateStr,
+            session_name: sheet.session_name,
+            student_id: student._id,
+            student_name: student.name,
+            source: 'biometric_exit'
+          });
+          return;
+        } catch (saveErr) {
+          if (saveErr?.name === 'VersionError' && attempt < 2) continue;
+          throw saveErr;
+        }
       }
     });
   } catch (err) {

@@ -77,6 +77,7 @@ const BiometricGatePanel = () => {
   const [togglingPower, setTogglingPower] = useState(false);
   const [rebootingDevice, setRebootingDevice] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
+  const enrollingRef = useRef(false);
 
   // Setup credentials drawer & device management
   const [showSettingsDrawer, setShowSettingsDrawer] = useState(false);
@@ -447,7 +448,8 @@ const BiometricGatePanel = () => {
     try {
       const res = await axios.post(`/api/biometric/devices/${activeDevice.device_id}/reboot`);
       if (res.data.success) {
-        if (res.data.command) setLiveCommand(res.data.command);
+        const nextCmd = res.data.data?.pending_command || res.data.command;
+        if (nextCmd) setLiveCommand(nextCmd);
         showToastBanner('success', res.data.message || 'Reboot queued — ESP32 will restart shortly.');
       }
     } catch (err) {
@@ -501,7 +503,8 @@ const BiometricGatePanel = () => {
 
   // Queue remote fingerprint enrollment on ESP32 (fingerIndex: 1=Primary, 2=Backup) & open interactive wizard
   const handleStartEnroll = async (student, fingerIndex = 1) => {
-    if (!activeDevice || !student) return;
+    if (!activeDevice || !student || enrollingRef.current) return;
+    enrollingRef.current = true;
     const fingerLabel = fingerIndex === 2 ? 'Backup Finger' : 'Primary Finger';
     setEnrollWizardStudent(student);
     setEnrollWizardFingerIndex(fingerIndex);
@@ -536,9 +539,13 @@ const BiometricGatePanel = () => {
         showToastBanner('success', res.data.message);
       }
     } catch (err) {
-      setLiveCommand(null);
-      setShowEnrollWizard(false);
+      if (err.response?.status !== 409) {
+        setLiveCommand(null);
+        setShowEnrollWizard(false);
+      }
       showToastBanner('error', err.response?.data?.message || 'Failed to queue fingerprint enrollment');
+    } finally {
+      enrollingRef.current = false;
     }
   };
 
@@ -2049,7 +2056,7 @@ const BiometricGatePanel = () => {
             </div>
             <div className="text-xs min-w-0">
               <p className="font-bold uppercase tracking-wider flex items-center gap-2 flex-wrap">
-                <span>{liveCommand.action !== 'NONE' ? liveCommand.action.replaceAll('_', ' ') : 'Device Command'}</span>
+                <span>{liveCommand.action && liveCommand.action !== 'NONE' ? String(liveCommand.action).replaceAll('_', ' ') : 'Device Command'}</span>
                 <span className="text-[10px] px-2 py-0.5 rounded-full bg-black/25 border border-white/10">
                   {liveCommand.status}
                 </span>
