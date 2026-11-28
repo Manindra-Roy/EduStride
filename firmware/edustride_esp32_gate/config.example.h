@@ -13,9 +13,11 @@
 //    Copy SERVER_BASE_URL, DEVICE_ID, and DEVICE_API_KEY from the EduStride
 //    Mobile App -> Gate Scanner -> "ESP32 Setup Credentials"
 // ============================================================================
-#define SERVER_BASE_URL  "https://api.edustride.in"
-#define DEVICE_ID        "GATE-ESP32-01"
-#define DEVICE_API_KEY   "PASTE_API_KEY_FROM_EDUSTRIDE_APP"
+#define SERVER_BASE_URL      "https://api.edustride.in"
+// Optional local LAN dev fallback (auto-failover if cloud is unreachable; leave "" to disable)
+#define SERVER_FALLBACK_URL  ""
+#define DEVICE_ID            "GATE-ESP32-01"
+#define DEVICE_API_KEY       "PASTE_API_KEY_FROM_EDUSTRIDE_APP"
 
 // ============================================================================
 // 3. SAFE NON-STRAPPING GPIO PINOUT (ESP32-CP2102-TypeC-38Pins)
@@ -72,7 +74,7 @@
 // ============================================================================
 // 5. TIMING, TLS & FIRMWARE METADATA
 // ============================================================================
-#define FIRMWARE_VERSION         "3.1.1-ota"
+#define FIRMWARE_VERSION         "3.1.2-ota"
 #define HEARTBEAT_INTERVAL_MS    5500   // Calm 5.5s interval keeps 3.3V rail quiet for R307S
 #define HTTP_TIMEOUT_MS          12000  // Handles cloud cold-starts cleanly
 #define ENROLL_STEP_TIMEOUT_MS   25000

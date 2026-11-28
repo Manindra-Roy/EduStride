@@ -30,7 +30,10 @@
 #include "config.h"
 
 #ifndef FIRMWARE_VERSION
-#define FIRMWARE_VERSION "3.1.1-ota"
+#define FIRMWARE_VERSION "3.1.2-ota"
+#endif
+#ifndef SERVER_FALLBACK_URL
+#define SERVER_FALLBACK_URL ""
 #endif
 #ifndef FP_TOUCH_PIN
 #define FP_TOUCH_PIN 4
@@ -108,6 +111,11 @@ Adafruit_Fingerprint finger = Adafruit_Fingerprint(&fpSerial);
 WiFiClient sharedPlainClient;
 WiFiClientSecure sharedSecureClient;
 bool tlsConfigured = false;
+String lastSecureBaseUrl = "";
+String lastPlainBaseUrl = "";
+bool usingFallbackServer = false;
+unsigned long lastPrimaryProbeMs = 0;
+const unsigned long PRIMARY_RECOVERY_INTERVAL_MS = 30000UL;
 bool wifiEventsRegistered = false;
 volatile bool wifiResetNeeded = false;
 volatile uint8_t lastWifiDisconnectReason = 0;
@@ -950,39 +958,51 @@ void syncNtpClock(bool force = false) {
   }
 }
 
-int performHttpRequest(const String& method, const String& path, const String& jsonBody, String& responseOut, unsigned long timeoutOverrideMs = 0) {
-  if (WiFi.status() != WL_CONNECTED) return -1;
-  unsigned long effectiveTimeoutMs = (timeoutOverrideMs > 0) ? timeoutOverrideMs : (unsigned long)HTTP_TIMEOUT_MS;
-  if (netMutex && xSemaphoreTake(netMutex, pdMS_TO_TICKS(effectiveTimeoutMs + 2000)) != pdTRUE) return -3;
-
-  wifiBusy = true;
-
-  if (wifiResetNeeded) {
-    wifiResetNeeded = false;
-    sharedSecureClient.stop();
-    tlsConfigured = false;
-    sharedPlainClient.stop();
-  }
-
-  // Opportunistically check/throttle NTP sync from this single synchronized path
-  if (!ntpSynced || ntpRequestPending) {
-    syncNtpClockLocked(ntpRequestPending);
-  }
-
-  String baseUrl = String(SERVER_BASE_URL);
+String normalizeBaseUrl(const char* rawUrl) {
+  if (!rawUrl) return "";
+  String baseUrl = String(rawUrl);
+  baseUrl.trim();
   while (baseUrl.endsWith("/")) baseUrl.remove(baseUrl.length() - 1);
-  String fullUrl = baseUrl + path;
+  return baseUrl;
+}
 
+// MUST be called while holding netMutex!
+int executeSingleServerRequest(
+  const String& baseUrl,
+  const String& method,
+  const String& path,
+  const String& jsonBody,
+  String& responseOut,
+  unsigned long effectiveTimeoutMs,
+  int maxNetAttempts,
+  unsigned long connectTimeoutOverrideMs = 0
+) {
+  String fullUrl = baseUrl + path;
   bool isHttps = (fullUrl.startsWith("https://") || fullUrl.startsWith("HTTPS://"));
+  unsigned long connectTimeoutMs = (connectTimeoutOverrideMs > 0)
+    ? min(effectiveTimeoutMs, connectTimeoutOverrideMs)
+    : min(effectiveTimeoutMs, 5000UL);
   int httpCode = -2;
 
-  // Up to 2 attempts: recovers transparently if a Render/Cloudflare Keep-Alive socket closed while idle
-  // Use single attempt for short override timeouts (e.g. 2s mid-enrollment cancel checks)
-  int maxNetAttempts = (timeoutOverrideMs > 0 && timeoutOverrideMs <= 3000UL) ? 1 : 2;
+  // Reset persistent client socket cleanly if target host changed (e.g. primary <-> fallback)
+  if (isHttps) {
+    if (lastSecureBaseUrl != baseUrl) {
+      sharedSecureClient.stop();
+      tlsConfigured = false;
+      lastSecureBaseUrl = baseUrl;
+    }
+  } else {
+    if (lastPlainBaseUrl != baseUrl) {
+      sharedPlainClient.stop();
+      lastPlainBaseUrl = baseUrl;
+    }
+  }
+
+  // Up to maxNetAttempts: recovers transparently if a Render/Cloudflare Keep-Alive socket closed while idle
   for (int netAttempt = 0; netAttempt < maxNetAttempts; netAttempt++) {
     HTTPClient http;
     http.setTimeout(effectiveTimeoutMs);
-    http.setConnectTimeout(min(effectiveTimeoutMs, 5000UL));
+    http.setConnectTimeout(connectTimeoutMs);
     http.setReuse(true);
 
     bool began = false;
@@ -1021,7 +1041,7 @@ int performHttpRequest(const String& method, const String& path, const String& j
         http.end();
         break;
       } else {
-        Serial.printf("[HTTP] %s %s failed (code=%d, attempt=%d)\n", method.c_str(), path.c_str(), httpCode, netAttempt + 1);
+        Serial.printf("[HTTP] %s %s%s failed (code=%d, attempt=%d)\n", method.c_str(), baseUrl.c_str(), path.c_str(), httpCode, netAttempt + 1);
         http.end();
         if (isHttps) {
           sharedSecureClient.stop();
@@ -1029,11 +1049,78 @@ int performHttpRequest(const String& method, const String& path, const String& j
         } else {
           sharedPlainClient.stop();
         }
-        if (netAttempt == 0) delay(120);
+        if (netAttempt + 1 < maxNetAttempts) delay(120);
       }
     } else {
       httpCode = -2;
       break;
+    }
+  }
+
+  return httpCode;
+}
+
+int performHttpRequest(const String& method, const String& path, const String& jsonBody, String& responseOut, unsigned long timeoutOverrideMs = 0) {
+  if (WiFi.status() != WL_CONNECTED) return -1;
+  unsigned long effectiveTimeoutMs = (timeoutOverrideMs > 0) ? timeoutOverrideMs : (unsigned long)HTTP_TIMEOUT_MS;
+  if (netMutex && xSemaphoreTake(netMutex, pdMS_TO_TICKS(effectiveTimeoutMs + 4000)) != pdTRUE) return -3;
+
+  wifiBusy = true;
+
+  if (wifiResetNeeded) {
+    wifiResetNeeded = false;
+    sharedSecureClient.stop();
+    tlsConfigured = false;
+    sharedPlainClient.stop();
+    lastSecureBaseUrl = "";
+    lastPlainBaseUrl = "";
+  }
+
+  // Opportunistically check/throttle NTP sync from this single synchronized path
+  if (!ntpSynced || ntpRequestPending) {
+    syncNtpClockLocked(ntpRequestPending);
+  }
+
+  String primaryBase = normalizeBaseUrl(SERVER_BASE_URL);
+  String fallbackBase = normalizeBaseUrl(SERVER_FALLBACK_URL);
+  bool hasFallback = (fallbackBase.length() > 0 && fallbackBase != primaryBase);
+
+  // Use single attempt for short override timeouts (e.g. 2s mid-enrollment cancel checks)
+  bool isFastCheck = (timeoutOverrideMs > 0 && timeoutOverrideMs <= 3000UL);
+  int maxNetAttempts = isFastCheck ? 1 : 2;
+  int httpCode = -2;
+
+  unsigned long nowMs = millis();
+  bool shouldProbePrimary = usingFallbackServer && !isFastCheck &&
+    ((unsigned long)(nowMs - lastPrimaryProbeMs) >= PRIMARY_RECOVERY_INTERVAL_MS);
+
+  if (!hasFallback || !usingFallbackServer || shouldProbePrimary) {
+    int primaryAttempts = shouldProbePrimary ? 1 : maxNetAttempts;
+    httpCode = executeSingleServerRequest(primaryBase, method, path, jsonBody, responseOut, effectiveTimeoutMs, primaryAttempts);
+    if (httpCode > 0) {
+      if (usingFallbackServer) {
+        usingFallbackServer = false;
+        Serial.printf("[HTTP] Recovered PRIMARY server: %s\n", primaryBase.c_str());
+      }
+    } else if (hasFallback) {
+      lastPrimaryProbeMs = millis();
+      int fbCode = executeSingleServerRequest(fallbackBase, method, path, jsonBody, responseOut, min(effectiveTimeoutMs, 6000UL), 1, 2500UL);
+      if (fbCode > 0) {
+        httpCode = fbCode;
+        if (!usingFallbackServer) {
+          usingFallbackServer = true;
+          Serial.printf("[HTTP] Primary unreachable -> switched to FALLBACK server: %s\n", fallbackBase.c_str());
+        }
+      }
+    }
+  } else {
+    // Currently pinned to healthy local fallback; use it directly for zero-lag LAN speed
+    httpCode = executeSingleServerRequest(fallbackBase, method, path, jsonBody, responseOut, min(effectiveTimeoutMs, 6000UL), 1, 2500UL);
+    if (httpCode <= 0) {
+      // Fallback went down (e.g., local PC stopped) — immediately try primary cloud server!
+      usingFallbackServer = false;
+      Serial.printf("[HTTP] Fallback unreachable -> retrying PRIMARY server: %s\n", primaryBase.c_str());
+      httpCode = executeSingleServerRequest(primaryBase, method, path, jsonBody, responseOut, effectiveTimeoutMs, maxNetAttempts);
     }
   }
 

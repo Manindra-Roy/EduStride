@@ -8,6 +8,7 @@ import { fileURLToPath } from 'url';
 import connectDB from './config/db.js';
 import { initSocket } from './config/socket.js';
 import { initCronJobs } from './services/cron.js';
+import { initBiometricRealtimeSync, closeBiometricRealtimeSync } from './services/biometricRealtimeSync.js';
 
 import authRoutes from './routes/auth.js';
 import studentRoutes from './routes/students.js';
@@ -258,6 +259,7 @@ process.on('unhandledRejection', (reason) => {
 const startServer = async () => {
   await connectDB();
   initSocket(server);
+  initBiometricRealtimeSync();
   initCronJobs();
 
   server.listen(PORT, () => {
@@ -267,6 +269,7 @@ const startServer = async () => {
 
 const shutdown = (signal) => {
   console.log(`[Shutdown] Received ${signal}, draining active requests...`);
+  closeBiometricRealtimeSync().catch(() => {});
   server.close(() => {
     console.log('[Shutdown] HTTP server closed cleanly.');
     process.exit(0);

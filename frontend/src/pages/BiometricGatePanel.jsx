@@ -289,16 +289,26 @@ const BiometricGatePanel = () => {
   }, [isStaff, activeTab, fetchEnrollmentData]);
 
   // Adaptive polling: fast 2s fallback while an enrollment/sync is in-flight so UI never gets stuck;
-  // calm 12s heartbeat refresh when idle (paused while tab is hidden).
+  // calm 12s heartbeat + today's scan-log refresh when idle (paused while tab is hidden).
   const isCommandInFlight = liveCommand?.status === 'PENDING' || liveCommand?.status === 'IN_PROGRESS';
   useEffect(() => {
     if (!isStaff) return;
     const pollMs = isCommandInFlight ? 2000 : 12000;
     const interval = setInterval(() => {
-      if (!document.hidden) fetchDevices(true);
+      if (!document.hidden) {
+        fetchDevices(true);
+        if (!isCommandInFlight && selectedDateRef.current === getTodayIST()) {
+          fetchLogsRef.current(true);
+        }
+      }
     }, pollMs);
     const handleVisibility = () => {
-      if (!document.hidden) fetchDevices(true);
+      if (!document.hidden) {
+        fetchDevices(true);
+        if (selectedDateRef.current === getTodayIST()) {
+          fetchLogsRef.current(true);
+        }
+      }
     };
     document.addEventListener('visibilitychange', handleVisibility);
     return () => {
